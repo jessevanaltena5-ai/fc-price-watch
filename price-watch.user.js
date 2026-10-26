@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.6
+// @version      2.7.7
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1459,6 +1459,64 @@ function priceWatchMain(SCRIPT_VERSION) {
     renderRunBar();
   }
 
+  // Min bid wrap: FUT Genie's right arrow raises the min bid on the search filters (to refresh EA's results).
+  // Once it reaches the max buy now price, start again at 0.
+  function currentSearchFilters() {
+    if (typeof UTMarketSearchFiltersViewController === "undefined") return null;
+    const root = getAppMain().getRootViewController();
+    const current = tabs => tabs && (typeof tabs.getCurrentViewController === "function" ? tabs.getCurrentViewController() : tabs.currentController);
+    const presented = typeof root.getPresentedViewController === "function" ? root.getPresentedViewController() : null;
+    const tabBar = findTabBarController();
+    const navs = [presented instanceof UTTabBarController ? current(presented) : presented, current(tabBar), ...((tabBar && tabBar.childViewControllers) || [])];
+    for (const nav of navs) {
+      const stack = (nav && nav.childViewControllers) || [];
+      const top = stack[stack.length - 1];
+      if (top instanceof UTMarketSearchFiltersViewController) return top;
+    }
+    return null;
+  }
+
+  // The four price inputs of the filter screen: bid min, bid max, buy now min, buy now max.
+  function filterPriceInputs() {
+    return [...document.querySelectorAll(".search-prices input")].filter(input => input.offsetParent !== null);
+  }
+
+  function wrapMinBid() {
+    const controller = currentSearchFilters();
+    const viewmodel = controller && (controller.viewmodel || controller._viewmodel);
+    const criteria = viewmodel && viewmodel.searchCriteria;
+    const inputs = filterPriceInputs();
+    const shown = inputs.length === 4 ? { minBid: parsePrice(inputs[0].value), maxBuy: parsePrice(inputs[3].value) } : null;
+    const minBid = Math.max((criteria && criteria.minBid) || 0, (shown && shown.minBid) || 0);
+    const maxBuy = (criteria && criteria.maxBuy) || (shown && shown.maxBuy) || 0;
+    if (!maxBuy || minBid < maxBuy) return;
+    if (criteria) criteria.minBid = 0;
+    if (shown) {
+      const input = inputs[0];
+      input.value = "";
+      ["input", "change", "blur"].forEach(type => input.dispatchEvent(new Event(type, { bubbles: true })));
+    }
+    showToast("Min bid weer op 0 (bereikte je max BIN)", true);
+  }
+
+  let minBidWrapInstalled = false;
+
+  function installMinBidWrap() {
+    if (minBidWrapInstalled) return;
+    minBidWrapInstalled = true;
+    document.addEventListener("keydown", event => {
+      if (event.key !== "ArrowRight") return;
+      // After FUT Genie has raised the value.
+      window.setTimeout(() => {
+        try {
+          wrapMinBid();
+        } catch (error) {
+          console.warn("Price Watch: min bid terugzetten mislukt.", error);
+        }
+      }, 80);
+    });
+  }
+
   let marketWatchInstalled = false;
 
   function installMarketWatch() {
@@ -1466,6 +1524,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     marketWatchInstalled = true;
     const original = services.Item.searchTransferMarket;
     services.Item.searchTransferMarket = function (criteria, ...rest) {
+      // Safety net for the min bid wrap (see wrapMinBid): never search with min bid ≥ max buy now.
+      try {
+        if (criteria && criteria.maxBuy > 0 && criteria.minBid >= criteria.maxBuy) criteria.minBid = 0;
+      } catch (_) {
+        // Leave the search as it is.
+      }
       const observable = original.call(this, criteria, ...rest);
       try {
         if (criteria && criteria.club && observable && typeof observable.observe === "function") {
@@ -1518,12 +1582,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     return list.clubs.flatMap(club => levels.filter(level => clubHasLevel(club, level)).map(level => {
       const key = `${club.teamId}|${level}`;
       const market = list.flip && list.market && list.market[key] || null;
+      // Flip without a market price yet: no max BIN, so you see where the market really is.
       return {
         club,
         level,
         market,
-        max: market ? flipBuyMax(list, market.price) : list.levels[level].max,
-        ideal: market ? null : list.levels[level].ideal,
+        ceiling: list.levels[level].max, // the tip's "options that have silvers <300-400"
+        max: market ? flipBuyMax(list, market.price) : list.flip ? null : list.levels[level].max,
+        ideal: market || list.flip ? null : list.levels[level].ideal,
         key
       };
     }));
@@ -2851,15 +2917,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       const { sellLow, sellHigh } = list.flip;
       const low = rule.max + sellLow;
       const high = rule.max + sellHigh;
+      const aboveTip = rule.ceiling && rule.market.price > rule.ceiling;
       info.append(
         el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · koop ≤ ${priceFormat.format(rule.max)}`),
         el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${rule.market.seen ? "gezien " : ""}${formatTime(rule.market.at)}) · ` +
           `verkoop ${priceFormat.format(low)}–${priceFormat.format(high)} = ${formatSigned(flipNet(low, rule.max))}…${formatSigned(flipNet(high, rule.max))} na 5%` +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
+      if (aboveTip) {
+        info.appendChild(el("div", "pt-run-window pt-window-before",
+          `⚠ markt boven de tip (≤ ${priceFormat.format(rule.ceiling)}): meer risico, de tip raadt deze nu niet aan`));
+      }
     } else if (list.flip) {
       info.append(
-        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · markt bekijken ≤ ${priceFormat.format(rule.max)}`),
+        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · markt bekijken (geen max BIN)`),
         el("div", "pt-run-sub", `Zoek: de goedkoopste BIN wordt de markt (of vul hem in) → koopfilter markt − ${priceFormat.format(list.flip.under)}` +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
@@ -4429,13 +4500,16 @@ function priceWatchMain(SCRIPT_VERSION) {
             const current = active && run.index === index;
             const cell = el("td", "pt-col-level");
             const rule = rules[index];
+            const aboveTip = rule.market && rule.ceiling && rule.market.price > rule.ceiling;
             const label = !list.flip ? `≤ ${priceFormat.format(rule.max)}`
-              : rule.market ? `koop ≤ ${priceFormat.format(rule.max)}` : `👀 markt ≤ ${priceFormat.format(rule.max)}`;
+              : rule.market ? `${aboveTip ? "⚠ " : ""}koop ≤ ${priceFormat.format(rule.max)}` : "👀 markt";
             const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""),
               `${done ? "✓ " : list.flip && !rule.market ? "" : "🔍 "}${label}`);
             button.type = "button";
-            button.title = `${club.teamName} · ${LEVEL_LABEL[level]} · max BIN ${priceFormat.format(rule.max)} klaarzetten` +
+            button.title = `${club.teamName} · ${LEVEL_LABEL[level]} · ` +
+              (rule.max ? `max BIN ${priceFormat.format(rule.max)} klaarzetten` : "markt bekijken (zonder max BIN)") +
               (rule.market ? ` (markt ${priceFormat.format(rule.market.price)} om ${formatTime(rule.market.at)})` : "") +
+              (aboveTip ? ` – boven de tip (≤ ${priceFormat.format(rule.ceiling)})` : "") +
               (done ? ` (eerder klaargezet om ${formatTime(done)})` : "");
             button.addEventListener("click", () => goToRule(list.id, index));
             cell.appendChild(button);
@@ -5289,6 +5363,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       migrated = true;
       renderRunBar(); // resume a stock run after a page refresh
       installMarketWatch();
+      installMinBidWrap();
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.
       startRelay();

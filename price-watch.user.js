@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.5
+// @version      2.7.6
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1428,6 +1428,65 @@ function priceWatchMain(SCRIPT_VERSION) {
     return `${value > 0 ? "+" : ""}${priceFormat.format(value)}`;
   }
 
+  // Your own market searches keep the flip market prices current: the cheapest BIN in the results of a
+  // club + quality search becomes that rule's market. We only listen to the answer of the search you ran.
+  // A search capped at the buy filter (market − under) is skipped: its results sit below the market.
+  function recordMarketSearch(criteria, response) {
+    if (!criteria || !criteria.club || !response || !response.success) return;
+    const items = (response.data && response.data.items) || [];
+    const prices = items.map(item => {
+      const auction = typeof item.getAuctionData === "function" ? item.getAuctionData() : item._auction;
+      return auction && auction.buyNowPrice;
+    }).filter(price => price > 0);
+    if (!prices.length) return;
+    const cheapest = Math.min(...prices);
+    const nextPage = criteria.offset > 0;
+    let changed = false;
+    getStock().filter(list => list.flip && Array.isArray(list.clubs)).forEach(list => {
+      stockRules(list).forEach(rule => {
+        if (Number(rule.club.teamId) !== Number(criteria.club) || SearchLevel[rule.level.toUpperCase()] !== criteria.level) return;
+        if (rule.market && criteria.maxBuy > 0 && criteria.maxBuy <= rule.max) return;
+        const known = list.market && list.market[rule.key];
+        // Next pages of the same search: keep the lowest one seen.
+        const price = nextPage && known && Date.now() - known.at < 5 * 60 * 1000 ? Math.min(known.price, cheapest) : cheapest;
+        list.market = list.market || {};
+        list.market[rule.key] = { price, at: Date.now(), seen: true };
+        changed = true;
+      });
+    });
+    if (!changed) return;
+    saveStock();
+    renderRunBar();
+  }
+
+  let marketWatchInstalled = false;
+
+  function installMarketWatch() {
+    if (marketWatchInstalled || typeof services === "undefined" || !services.Item || typeof services.Item.searchTransferMarket !== "function") return;
+    marketWatchInstalled = true;
+    const original = services.Item.searchTransferMarket;
+    services.Item.searchTransferMarket = function (criteria, ...rest) {
+      const observable = original.call(this, criteria, ...rest);
+      try {
+        if (criteria && criteria.club && observable && typeof observable.observe === "function") {
+          const snapshot = { club: criteria.club, level: criteria.level, maxBuy: criteria.maxBuy, offset: criteria.offset };
+          const context = {};
+          observable.observe(context, (sender, response) => {
+            try {
+              sender.unobserve(context);
+              recordMarketSearch(snapshot, response);
+            } catch (error) {
+              console.warn("Price Watch: marktprijs uit zoekopdracht niet verwerkt.", error);
+            }
+          });
+        }
+      } catch (_) {
+        // Never get in the way of the search itself.
+      }
+      return observable;
+    };
+  }
+
   function stockRules(list) {
     if (list.type === "fodder") {
       return list.ratings.filter(entry => entry.enabled !== false).map(entry => ({
@@ -2729,9 +2788,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       marketInput.placeholder = "markt";
       marketInput.title = "Goedkoopste BIN die je nu op de markt ziet";
       const marketSet = el("button", "pt-run-btn", "OK");
+      const marketBuy = el("button", "pt-run-btn pt-run-buy", "🔍 Koopfilter");
       const marketClear = el("button", "pt-run-btn", "↺");
-      [marketSet, marketClear].forEach(button => { button.type = "button"; });
+      [marketSet, marketBuy, marketClear].forEach(button => { button.type = "button"; });
       marketSet.title = "Marktprijs opslaan en het koopfilter klaarzetten";
+      marketBuy.title = "Koopfilter (markt min je marge) klaarzetten";
+      marketBuy.addEventListener("click", () => run && goToRule(run.listId, run.index));
       marketClear.title = "Marktprijs vergeten en de markt opnieuw bekijken";
       const setMarket = price => {
         const list = run && getStock().find(item => item.id === run.listId);
@@ -2748,7 +2810,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       marketSet.addEventListener("click", () => { const price = parsePrice(marketInput.value); if (price) setMarket(price); });
       marketInput.addEventListener("keydown", event => { if (event.key === "Enter") marketSet.click(); });
       marketClear.addEventListener("click", () => setMarket(null));
-      market.append(marketInput, marketSet, marketClear);
+      market.append(marketInput, marketSet, marketBuy, marketClear);
       runBar.append(info, market, prev, next, stop);
       document.body.appendChild(runBar);
     }
@@ -2791,14 +2853,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       const high = rule.max + sellHigh;
       info.append(
         el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · koop ≤ ${priceFormat.format(rule.max)}`),
-        el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${formatTime(rule.market.at)}) · ` +
+        el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${rule.market.seen ? "gezien " : ""}${formatTime(rule.market.at)}) · ` +
           `verkoop ${priceFormat.format(low)}–${priceFormat.format(high)} = ${formatSigned(flipNet(low, rule.max))}…${formatSigned(flipNet(high, rule.max))} na 5%` +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else if (list.flip) {
       info.append(
         el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · markt bekijken ≤ ${priceFormat.format(rule.max)}`),
-        el("div", "pt-run-sub", `Zoek, vul de goedkoopste BIN in → koopfilter markt − ${priceFormat.format(list.flip.under)}` +
+        el("div", "pt-run-sub", `Zoek: de goedkoopste BIN wordt de markt (of vul hem in) → koopfilter markt − ${priceFormat.format(list.flip.under)}` +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else {
@@ -2810,6 +2872,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const marketBox = runBar.querySelector(".pt-run-market");
     marketBox.style.display = list.flip && rule.club && !runLoading ? "" : "none";
     marketBox.lastChild.style.display = rule.market ? "" : "none";
+    marketBox.querySelector(".pt-run-buy").style.display = rule.market ? "" : "none";
     if (state) info.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
 
     const nextButton = runBar.querySelector(".pt-run-next");
@@ -5225,6 +5288,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!migrated && findTabBarController()) {
       migrated = true;
       renderRunBar(); // resume a stock run after a page refresh
+      installMarketWatch();
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.
       startRelay();

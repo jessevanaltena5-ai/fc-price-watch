@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.3
+// @version      2.7.4
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1371,7 +1371,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Stock lists: club + quality + max BIN rules, imported from a pasted tip
   // ---------------------------------------------------------------------------
   // List: { id, name, createdAt, levels: { gold|silver|bronze: { enabled, max, ideal } },
-  //         clubs: [{ teamId, teamName, leagueId, leagueName }], done: { "teamId|level": timestamp } }
+  //         clubs: [{ teamId, teamName, leagueId, leagueName, levels? }], done: { "teamId|level": timestamp } }
 
   const LEVELS = ["gold", "silver", "bronze"];
   const LEVEL_LABEL = { gold: "Goud", silver: "Zilver", bronze: "Brons" };
@@ -1398,6 +1398,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       console.warn("Price Watch: stock-lijsten konden niet worden opgeslagen.", error);
     }
     listeners.forEach(listener => listener());
+  }
+
+  // Clubs without "levels" get every quality of the list.
+  function clubHasLevel(club, level) {
+    return !club.levels || club.levels.includes(level);
   }
 
   function stockRules(list) {
@@ -1428,7 +1433,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       }));
     }
     const levels = LEVELS.filter(level => list.levels[level] && list.levels[level].enabled);
-    return list.clubs.flatMap(club => levels.map(level => ({
+    return list.clubs.flatMap(club => levels.filter(level => clubHasLevel(club, level)).map(level => ({
       club,
       level,
       max: list.levels[level].max,
@@ -2249,6 +2254,13 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   const PRICE_LINE = /\b(golds?|silvers?|bronzes?)\b[^\d]*(\d[\d.,]*\s*k?)(?:\s*[-–]\s*(\d[\d.,]*\s*k?))?/i;
+  // "SILVER OPTIONS", "Bronzes:", "Gold clubs": the clubs below it are for that quality only.
+  const LEVEL_HEADING = /^(golds?|silvers?|bronzes?)(?:\s+(?:options?|clubs?|teams?|list))?$/i;
+
+  function levelFromWord(word) {
+    const lower = word.toLowerCase();
+    return lower.startsWith("gold") ? "gold" : lower.startsWith("silver") ? "silver" : "bronze";
+  }
 
   function parseTip(text) {
     const levels = {
@@ -2258,33 +2270,47 @@ function priceWatchMain(SCRIPT_VERSION) {
     };
     const clubs = [];
     let leagueId = null;
+    let section = null;
+    let sections = false;
 
     String(text || "").split(/\r?\n/).forEach(rawLine => {
-      const price = rawLine.match(PRICE_LINE);
+      // Every price on the line: "silvers <300-400 and bronzes 150-200".
+      const prices = [...rawLine.matchAll(new RegExp(PRICE_LINE.source, "gi"))];
       const line = rawLine.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–]\s*/, "").trim();
       if (!line) return;
 
-      if (price) {
-        const level = price[1].toLowerCase().startsWith("gold") ? "gold" : price[1].toLowerCase().startsWith("silver") ? "silver" : "bronze";
-        const low = parseCoins(price[2]);
-        const high = parseCoins(price[3]);
-        // "<650-700": max BIN = upper bound, ideal = lower bound.
-        levels[level] = { enabled: true, max: high || low, ideal: high ? low : null };
+      if (prices.length) {
+        prices.forEach(price => {
+          const low = parseCoins(price[2]);
+          const high = parseCoins(price[3]);
+          // "<650-700": max BIN = upper bound, ideal = lower bound.
+          levels[levelFromWord(price[1])] = { enabled: true, max: high || low, ideal: high ? low : null };
+        });
         return;
       }
 
-      const words = line.split(/\s+/);
-      if (words.length > 5 || line.length > 40 || /[.!?]$/.test(line)) return; // prose
+      const heading = line.replace(/:$/, "").trim();
+      const levelHeading = heading.match(LEVEL_HEADING);
+      if (levelHeading) {
+        section = levelFromWord(levelHeading[1]);
+        sections = true;
+        leagueId = null;
+        return;
+      }
 
-      const league = words.length <= 3 ? matchLeague(line) : null;
+      const words = heading.split(/\s+/);
+      if (words.length > 5 || heading.length > 40 || /[.!?]$/.test(heading)) return; // prose
+
+      const league = words.length <= 3 ? matchLeague(heading) : null;
       if (league) {
         leagueId = league;
         return;
       }
-      clubs.push({ ...matchClub(line, leagueId), leagueContext: leagueId });
+      if (line.endsWith(":")) return; // "We have 2 grind options:"
+      clubs.push({ ...matchClub(heading, leagueId), leagueContext: leagueId, level: section });
     });
 
-    return { levels, clubs };
+    return { levels, clubs, sections };
   }
 
   // --- Filter tips: nation + league + quality + positions -------------------------
@@ -3620,7 +3646,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         // Rating-based fodder prices ("87s <6 / <6.5").
         if (asFodder.ratings.length >= 2) {
           showFodderReviewStep(asFodder);
-        } else if (asFilters.rules.some(rule => rule.nation)) {
+        } else if (asFilters.rules.some(rule => rule.nation) && !asClubs.sections) {
           // Nation + league + quality + positions ("Silver RB England <650/700 ideally prem").
           showFilterReviewStep(asFilters);
         } else if (targets.length && snipeLists.length && targets.length >= playerScoreTotal && !looksLikeClubTip(area.value)) {
@@ -3661,7 +3687,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Clubs
       const table = el("table", "pt-watch-table pt-stock-review");
       const head = el("tr");
-      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Competitie", "pt-col-league"], ["", "pt-col-status"]]
+      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Competitie", "pt-col-league"],
+        ...(parsed.sections ? [["Kwaliteit", "pt-col-level"]] : []), ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
       thead.appendChild(head);
@@ -3697,10 +3724,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         checkCell.appendChild(check);
         const selectCell = el("td", "pt-col-match");
         selectCell.appendChild(select);
-        row.append(checkCell, el("td", "pt-col-raw", item.raw), selectCell, league, statusCell);
+        // Tip with "SILVER OPTIONS" / "BRONZE OPTIONS" blocks: the club only gets its block's quality.
+        const level = el("select", "pt-stock-select");
+        level.appendChild(new Option("Alle", ""));
+        LEVELS.forEach(value => level.appendChild(new Option(LEVEL_LABEL[value], value)));
+        level.value = item.level || "";
+        const levelCell = el("td", "pt-col-level");
+        levelCell.appendChild(level);
+        row.append(checkCell, el("td", "pt-col-raw", item.raw), selectCell, league, ...(parsed.sections ? [levelCell] : []), statusCell);
         body.appendChild(row);
         sync();
-        return { check, select };
+        return { check, select, level };
       });
 
       const nameInput = el("input", "pt-target-input pt-stock-name");
@@ -3718,14 +3752,27 @@ function priceWatchMain(SCRIPT_VERSION) {
           const max = parsePrice(input.max.value);
           levels[level] = { enabled: input.check.checked && !!max, max, ideal: parsePrice(input.ideal.value) };
         });
-        const seen = new Set();
-        const clubs = rows
-          .filter(row => row.check.checked && row.select.value)
-          .map(row => getClubIndex().clubs.find(c => String(c.teamId) === row.select.value))
-          .filter(club => club && !seen.has(club.teamId) && seen.add(club.teamId))
-          .map(({ teamId, teamName, leagueId, leagueName }) => ({ teamId, teamName, leagueId, leagueName }));
+        // A club in both the silver and the bronze block becomes one club with both qualities.
+        const byTeam = new Map();
+        rows.filter(row => row.check.checked && row.select.value).forEach(row => {
+          const club = getClubIndex().clubs.find(c => String(c.teamId) === row.select.value);
+          if (!club) return;
+          const level = parsed.sections ? row.level.value || null : null;
+          const known = byTeam.get(club.teamId);
+          if (!known) {
+            const { teamId, teamName, leagueId, leagueName } = club;
+            byTeam.set(teamId, { teamId, teamName, leagueId, leagueName, ...(level ? { levels: [level] } : {}) });
+          } else if (!level) delete known.levels;
+          else if (known.levels && !known.levels.includes(level)) known.levels.push(level);
+        });
+        const clubs = [...byTeam.values()];
         if (!clubs.length || !LEVELS.some(level => levels[level].enabled)) {
           message.textContent = "Kies minstens één club en één kwaliteit met een max BIN.";
+          return;
+        }
+        const missing = LEVELS.filter(level => !levels[level].enabled && clubs.some(club => club.levels && club.levels.includes(level)));
+        if (missing.length) {
+          message.textContent = `Vul ook een max BIN in voor ${missing.map(level => LEVEL_LABEL[level]).join(" en ")}.`;
           return;
         }
         getStock().unshift({ id: `s${Date.now()}`, name: nameInput.value.trim() || "Stock-lijst", createdAt: Date.now(), levels, clubs, done: {} });
@@ -4191,6 +4238,10 @@ function priceWatchMain(SCRIPT_VERSION) {
           const row = el("tr");
           row.append(el("td", "pt-watch-name", club.teamName), el("td", "pt-muted", club.leagueName.replace(/\s*\(.*\)/, "")));
           levels.forEach(level => {
+            if (!clubHasLevel(club, level)) {
+              row.appendChild(el("td", "pt-col-level pt-muted", "–"));
+              return;
+            }
             const key = `${club.teamId}|${level}`;
             const index = rules.findIndex(rule => rule.key === key);
             const done = list.done && list.done[key];

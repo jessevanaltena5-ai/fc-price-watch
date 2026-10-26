@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.4
+// @version      2.7.5
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1405,6 +1405,29 @@ function priceWatchMain(SCRIPT_VERSION) {
     return !club.levels || club.levels.includes(level);
   }
 
+  // --- Lazy flip: list.flip = { under, sellLow, sellHigh }, list.market = { "teamId|level": { price, at } } ---
+  // Without a market price the filter shows the market (max BIN = the tip's upper bound); once you type in the
+  // cheapest BIN you saw, the filter becomes "market − under" and the bar shows the relist prices.
+  const FLIP_DEFAULT = { under: 100, sellLow: 300, sellHigh: 900 };
+  const FLIP_MIN_BIN = 150;
+
+  function roundDownToStep(price) {
+    const step = price < 1000 ? 50 : price < 10000 ? 100 : price < 50000 ? 250 : price < 100000 ? 500 : 1000;
+    return Math.floor(price / step) * step;
+  }
+
+  function flipBuyMax(list, marketPrice) {
+    return Math.max(FLIP_MIN_BIN, roundDownToStep(marketPrice - list.flip.under));
+  }
+
+  function flipNet(sell, buy) {
+    return Math.round(sell * (1 - EA_TAX) - buy);
+  }
+
+  function formatSigned(value) {
+    return `${value > 0 ? "+" : ""}${priceFormat.format(value)}`;
+  }
+
   function stockRules(list) {
     if (list.type === "fodder") {
       return list.ratings.filter(entry => entry.enabled !== false).map(entry => ({
@@ -1433,13 +1456,18 @@ function priceWatchMain(SCRIPT_VERSION) {
       }));
     }
     const levels = LEVELS.filter(level => list.levels[level] && list.levels[level].enabled);
-    return list.clubs.flatMap(club => levels.filter(level => clubHasLevel(club, level)).map(level => ({
-      club,
-      level,
-      max: list.levels[level].max,
-      ideal: list.levels[level].ideal,
-      key: `${club.teamId}|${level}`
-    })));
+    return list.clubs.flatMap(club => levels.filter(level => clubHasLevel(club, level)).map(level => {
+      const key = `${club.teamId}|${level}`;
+      const market = list.flip && list.market && list.market[key] || null;
+      return {
+        club,
+        level,
+        market,
+        max: market ? flipBuyMax(list, market.price) : list.levels[level].max,
+        ideal: market ? null : list.levels[level].ideal,
+        key
+      };
+    }));
   }
 
   // --- Snipe lists: players, max BIN = FUT Genie price minus a margin ---------------
@@ -2257,6 +2285,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   // "SILVER OPTIONS", "Bronzes:", "Gold clubs": the clubs below it are for that quality only.
   const LEVEL_HEADING = /^(golds?|silvers?|bronzes?)(?:\s+(?:options?|clubs?|teams?|list))?$/i;
 
+  const FLIP_UNDER = /(\d[\d.,]*\s*k?)\s*c?(?:\s*[-–]\s*(\d[\d.,]*\s*k?)\s*c?)?\s+(?:below|under)\s+(?:the\s+)?market/i;
+  const FLIP_MARKUP = /\blist\s+(?:at\s+|for\s+)?\+\s*(\d[\d.,]*\s*k?)\s*c?(?:\s*[-–]\s*\+?\s*(\d[\d.,]*\s*k?)\s*c?)?/i;
+
   function levelFromWord(word) {
     const lower = word.toLowerCase();
     return lower.startsWith("gold") ? "gold" : lower.startsWith("silver") ? "silver" : "bronze";
@@ -2272,8 +2303,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     let leagueId = null;
     let section = null;
     let sections = false;
+    let flip = null;
 
     String(text || "").split(/\r?\n/).forEach(rawLine => {
+      // "buy 50-100c under market and list +300-900c": buy below the market you see, relist higher.
+      const under = rawLine.match(FLIP_UNDER);
+      if (under) {
+        const markup = rawLine.match(FLIP_MARKUP);
+        flip = {
+          under: parseCoins(under[2]) || parseCoins(under[1]),
+          sellLow: markup ? parseCoins(markup[1]) : FLIP_DEFAULT.sellLow,
+          sellHigh: markup ? parseCoins(markup[2]) || parseCoins(markup[1]) : FLIP_DEFAULT.sellHigh
+        };
+      }
       // Every price on the line: "silvers <300-400 and bronzes 150-200".
       const prices = [...rawLine.matchAll(new RegExp(PRICE_LINE.source, "gi"))];
       const line = rawLine.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–]\s*/, "").trim();
@@ -2310,7 +2352,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       clubs.push({ ...matchClub(heading, leagueId), leagueContext: leagueId, level: section });
     });
 
-    return { levels, clubs, sections };
+    return { levels, clubs, sections, flip };
   }
 
   // --- Filter tips: nation + league + quality + positions -------------------------
@@ -2663,7 +2705,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!runBar) {
       runBar = el("div", "pt-run-bar");
       const info = el("div", "pt-run-info");
-      const prev = el("button", "pt-run-btn", "◀");
+      const prev = el("button", "pt-run-btn pt-run-prev", "◀");
       const next = el("button", "pt-run-btn pt-run-next", "Volgende ▶");
       const stop = el("button", "pt-run-btn pt-run-stop", "✕");
       [prev, next, stop].forEach(button => { button.type = "button"; });
@@ -2679,7 +2721,35 @@ function priceWatchMain(SCRIPT_VERSION) {
         goToRule(run.listId, run.index + 1 >= count ? 0 : run.index + 1);
       });
       stop.addEventListener("click", stopRun);
-      runBar.append(info, prev, next, stop);
+
+      // Lazy flip: the cheapest BIN you saw → the filter becomes "market − under".
+      const market = el("div", "pt-run-market");
+      const marketInput = el("input", "pt-target-input");
+      marketInput.inputMode = "numeric";
+      marketInput.placeholder = "markt";
+      marketInput.title = "Goedkoopste BIN die je nu op de markt ziet";
+      const marketSet = el("button", "pt-run-btn", "OK");
+      const marketClear = el("button", "pt-run-btn", "↺");
+      [marketSet, marketClear].forEach(button => { button.type = "button"; });
+      marketSet.title = "Marktprijs opslaan en het koopfilter klaarzetten";
+      marketClear.title = "Marktprijs vergeten en de markt opnieuw bekijken";
+      const setMarket = price => {
+        const list = run && getStock().find(item => item.id === run.listId);
+        const rule = list && stockRules(list)[run.index];
+        if (!rule || !rule.club) return;
+        list.market = list.market || {};
+        if (price) list.market[rule.key] = { price, at: Date.now() };
+        else delete list.market[rule.key];
+        marketInput.value = "";
+        marketInput.blur();
+        saveStock();
+        goToRule(run.listId, run.index);
+      };
+      marketSet.addEventListener("click", () => { const price = parsePrice(marketInput.value); if (price) setMarket(price); });
+      marketInput.addEventListener("keydown", event => { if (event.key === "Enter") marketSet.click(); });
+      marketClear.addEventListener("click", () => setMarket(null));
+      market.append(marketInput, marketSet, marketClear);
+      runBar.append(info, market, prev, next, stop);
       document.body.appendChild(runBar);
     }
 
@@ -2715,12 +2785,31 @@ function priceWatchMain(SCRIPT_VERSION) {
         el("div", "pt-run-sub", `${rule.league ? rule.league.label : "alle competities"}` + (rule.ideal ? ` · ideaal ≤ ${priceFormat.format(rule.ideal)}` : "") +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
+    } else if (list.flip && rule.market) {
+      const { sellLow, sellHigh } = list.flip;
+      const low = rule.max + sellLow;
+      const high = rule.max + sellHigh;
+      info.append(
+        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · koop ≤ ${priceFormat.format(rule.max)}`),
+        el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${formatTime(rule.market.at)}) · ` +
+          `verkoop ${priceFormat.format(low)}–${priceFormat.format(high)} = ${formatSigned(flipNet(low, rule.max))}…${formatSigned(flipNet(high, rule.max))} na 5%` +
+          ` · ${list.name} · ${run.index + 1}/${rules.length}`)
+      );
+    } else if (list.flip) {
+      info.append(
+        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · markt bekijken ≤ ${priceFormat.format(rule.max)}`),
+        el("div", "pt-run-sub", `Zoek, vul de goedkoopste BIN in → koopfilter markt − ${priceFormat.format(list.flip.under)}` +
+          ` · ${list.name} · ${run.index + 1}/${rules.length}`)
+      );
     } else {
       info.append(
         el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} ≤ ${priceFormat.format(rule.max)}`),
         el("div", "pt-run-sub", `${list.name} · ${run.index + 1}/${rules.length}` + (rule.ideal ? ` · ideaal ≤ ${priceFormat.format(rule.ideal)}` : ""))
       );
     }
+    const marketBox = runBar.querySelector(".pt-run-market");
+    marketBox.style.display = list.flip && rule.club && !runLoading ? "" : "none";
+    marketBox.lastChild.style.display = rule.market ? "" : "none";
     if (state) info.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
 
     const nextButton = runBar.querySelector(".pt-run-next");
@@ -2728,7 +2817,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     nextButton.disabled = runLoading || rules.length < 2;
     nextButton.textContent = atEnd ? `↻ Opnieuw (1/${rules.length})` : "Volgende ▶";
     nextButton.title = atEnd ? "Terug naar de eerste en opnieuw beginnen" : "Volgende klaarzetten (zoeken doe je zelf)";
-    runBar.querySelector(".pt-run-btn").disabled = runLoading || run.index <= 0;
+    runBar.querySelector(".pt-run-prev").disabled = runLoading || run.index <= 0;
   }
 
   // Keep the countdown current; during an open window, refresh snipe prices every minute.
@@ -3684,6 +3773,27 @@ function priceWatchMain(SCRIPT_VERSION) {
         levelBox.appendChild(box);
       });
 
+      // Lazy flip ("buy 50-100c under market and list +300-900c"): max BIN above = where the market may sit.
+      const flipBox = el("label", "pt-stock-level");
+      const flipCheck = el("input");
+      flipCheck.type = "checkbox";
+      flipCheck.checked = !!parsed.flip;
+      const flipValues = parsed.flip || FLIP_DEFAULT;
+      const flipInput = value => {
+        const input = el("input", "pt-target-input");
+        input.inputMode = "numeric";
+        input.value = value;
+        return input;
+      };
+      const flipUnder = flipInput(flipValues.under);
+      const flipLow = flipInput(flipValues.sellLow);
+      const flipHigh = flipInput(flipValues.sellHigh);
+      flipBox.title = "Eerst zie je de markt (filter tot de max BIN hierboven). Vul de goedkoopste BIN in de balk in; " +
+        "daarna wordt het filter markt min dit bedrag en zie je je verkoopprijzen.";
+      flipBox.append(flipCheck, el("span", "pt-stock-level-name", "Lazy flip"), el("span", "pt-muted", "markt −"), flipUnder,
+        el("span", "pt-muted", "verkoop +"), flipLow, el("span", "pt-muted", "tot +"), flipHigh);
+      levelBox.appendChild(flipBox);
+
       // Clubs
       const table = el("table", "pt-watch-table pt-stock-review");
       const head = el("tr");
@@ -3775,7 +3885,13 @@ function priceWatchMain(SCRIPT_VERSION) {
           message.textContent = `Vul ook een max BIN in voor ${missing.map(level => LEVEL_LABEL[level]).join(" en ")}.`;
           return;
         }
-        getStock().unshift({ id: `s${Date.now()}`, name: nameInput.value.trim() || "Stock-lijst", createdAt: Date.now(), levels, clubs, done: {} });
+        const under = parsePrice(flipUnder.value);
+        const sellLow = parsePrice(flipLow.value);
+        const flip = flipCheck.checked && under && sellLow
+          ? { under, sellLow, sellHigh: Math.max(sellLow, parsePrice(flipHigh.value) || sellLow) }
+          : null;
+        getStock().unshift({ id: `s${Date.now()}`, name: nameInput.value.trim() || "Stock-lijst", createdAt: Date.now(), levels, clubs, done: {},
+          ...(flip ? { flip, market: {} } : {}) });
         saveStock();
         importPanel.style.display = "none";
       });
@@ -4118,7 +4234,9 @@ function priceWatchMain(SCRIPT_VERSION) {
             ? `${rules.length} ratings · ${list.mode === "bid" ? "bieden (max bod)" : "direct kopen (max BIN)"} · ${doneCount}/${rules.length} klaargezet`
             : isPlayers
             ? `${list.players.length} spelers · winst ${profitLabel(list)} na belasting · ${doneCount}/${rules.length} klaargezet`
-            : `${list.clubs.length} clubs · ${levels.map(level => `${LEVEL_LABEL[level]} ≤ ${priceFormat.format(list.levels[level].max)}`).join(" · ")} · ${doneCount}/${rules.length} klaargezet`)
+            : `${list.clubs.length} clubs · ${levels.map(level => `${LEVEL_LABEL[level]} ≤ ${priceFormat.format(list.levels[level].max)}`).join(" · ")}` +
+              (list.flip ? ` · lazy flip: markt − ${priceFormat.format(list.flip.under)}, verkoop +${priceFormat.format(list.flip.sellLow)}–${priceFormat.format(list.flip.sellHigh)}` : "") +
+              ` · ${doneCount}/${rules.length} klaargezet`)
         );
         const state = listWindowState(list);
         if (state) title.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
@@ -4247,10 +4365,14 @@ function priceWatchMain(SCRIPT_VERSION) {
             const done = list.done && list.done[key];
             const current = active && run.index === index;
             const cell = el("td", "pt-col-level");
+            const rule = rules[index];
+            const label = !list.flip ? `≤ ${priceFormat.format(rule.max)}`
+              : rule.market ? `koop ≤ ${priceFormat.format(rule.max)}` : `👀 markt ≤ ${priceFormat.format(rule.max)}`;
             const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""),
-              `${done ? "✓ " : "🔍 "}≤ ${priceFormat.format(list.levels[level].max)}`);
+              `${done ? "✓ " : list.flip && !rule.market ? "" : "🔍 "}${label}`);
             button.type = "button";
-            button.title = `${club.teamName} · ${LEVEL_LABEL[level]} · max BIN ${priceFormat.format(list.levels[level].max)} klaarzetten` +
+            button.title = `${club.teamName} · ${LEVEL_LABEL[level]} · max BIN ${priceFormat.format(rule.max)} klaarzetten` +
+              (rule.market ? ` (markt ${priceFormat.format(rule.market.price)} om ${formatTime(rule.market.at)})` : "") +
               (done ? ` (eerder klaargezet om ${formatTime(done)})` : "");
             button.addEventListener("click", () => goToRule(list.id, index));
             cell.appendChild(button);
@@ -4821,6 +4943,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-run-info { min-width: 0; margin-right: 6px; }
 .pt-run-title { font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pt-run-sub { font-size: 12px; color: #8d9aae; white-space: nowrap; }
+.pt-run-market { display: flex; gap: 4px; align-items: center; flex: 0 0 auto; }
+.pt-run-market .pt-target-input { width: 70px; }
+@media (max-width: 700px) { .pt-run-bar { flex-wrap: wrap; } .pt-run-info { flex: 1 1 100%; } }
 
 .pt-run-btn {
   flex: 0 0 auto;

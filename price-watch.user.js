@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.7
+// @version      2.7.8
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1428,29 +1428,41 @@ function priceWatchMain(SCRIPT_VERSION) {
     return `${value > 0 ? "+" : ""}${priceFormat.format(value)}`;
   }
 
-  // Your own market searches keep the flip market prices current: the cheapest BIN in the results of a
-  // club + quality search becomes that rule's market. We only listen to the answer of the search you ran.
-  // A search capped at the buy filter (market − under) is skipped: its results sit below the market.
+  // Your own market searches keep the flip market prices current. We only listen to the answer of the
+  // search you ran. Market = the 3rd cheapest BIN in the results (the cheapest if there are fewer), so one
+  // card listed too cheap is a card to buy, not the market. EA sorts results by time left, not price, so a
+  // search without max BIN can miss cheaper cards: a buy-filter search that shows 3+ cards below the market
+  // lowers it.
+  const MARKET_SAMPLE = 3;
+
   function recordMarketSearch(criteria, response) {
     if (!criteria || !criteria.club || !response || !response.success) return;
     const items = (response.data && response.data.items) || [];
     const prices = items.map(item => {
       const auction = typeof item.getAuctionData === "function" ? item.getAuctionData() : item._auction;
       return auction && auction.buyNowPrice;
-    }).filter(price => price > 0);
+    }).filter(price => price > 0).sort((a, b) => a - b);
     if (!prices.length) return;
-    const cheapest = Math.min(...prices);
+    const enough = prices.length >= MARKET_SAMPLE;
+    const seenMarket = enough ? prices[MARKET_SAMPLE - 1] : prices[0];
     const nextPage = criteria.offset > 0;
     let changed = false;
     getStock().filter(list => list.flip && Array.isArray(list.clubs)).forEach(list => {
       stockRules(list).forEach(rule => {
         if (Number(rule.club.teamId) !== Number(criteria.club) || SearchLevel[rule.level.toUpperCase()] !== criteria.level) return;
-        if (rule.market && criteria.maxBuy > 0 && criteria.maxBuy <= rule.max) return;
         const known = list.market && list.market[rule.key];
-        // Next pages of the same search: keep the lowest one seen.
-        const price = nextPage && known && Date.now() - known.at < 5 * 60 * 1000 ? Math.min(known.price, cheapest) : cheapest;
+        const buySearch = rule.market && criteria.maxBuy > 0 && criteria.maxBuy <= rule.max;
+        let price;
+        if (buySearch) {
+          // Results sit below the market by design; only 3+ of them mean the market itself is lower.
+          if (!enough || seenMarket >= rule.market.price) return;
+          price = seenMarket;
+        } else {
+          // Next pages of the same search: keep the lowest one seen.
+          price = nextPage && known && Date.now() - known.at < 5 * 60 * 1000 ? Math.min(known.price, seenMarket) : seenMarket;
+        }
         list.market = list.market || {};
-        list.market[rule.key] = { price, at: Date.now(), seen: true };
+        list.market[rule.key] = { price, at: Date.now(), seen: true, count: prices.filter(value => value <= price).length };
         changed = true;
       });
     });
@@ -2920,7 +2932,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const aboveTip = rule.ceiling && rule.market.price > rule.ceiling;
       info.append(
         el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · koop ≤ ${priceFormat.format(rule.max)}`),
-        el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${rule.market.seen ? "gezien " : ""}${formatTime(rule.market.at)}) · ` +
+        el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${rule.market.seen ? `${rule.market.count ? `${rule.market.count}× ` : ""}gezien ` : ""}${formatTime(rule.market.at)}) · ` +
           `verkoop ${priceFormat.format(low)}–${priceFormat.format(high)} = ${formatSigned(flipNet(low, rule.max))}…${formatSigned(flipNet(high, rule.max))} na 5%` +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.8
+// @version      2.7.9
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -2012,11 +2012,61 @@ function priceWatchMain(SCRIPT_VERSION) {
     return String(text).split(/\r?\n/).some(line => PRICE_LINE.test(line));
   }
 
+  // "Hemp-88 <110 / <100pc", "Bisseck-85 skip / <112", "Felix-84 <197 / skip (link)":
+  // name, rating, then one price per platform (console / pc; a "pc"/"console" mark overrides the order).
+  const RATED_PRICE_LINE = /^(.+?)\s*[-–:]\s*(\d{2})\b\s*(.*?(?:[<≤~]?\s*\d|\bskip\b).*)$/i;
+
+  function parseRatedPriceLine(rawLine, platform) {
+    const match = rawLine.replace(/@\w+/g, " ").replace(/[•*_`>]+/g, " ").trim().match(RATED_PRICE_LINE);
+    if (!match || /\d/.test(match[1]) || match[1].split(/\s+/).length > 4) return null;
+    const rating = +match[2];
+    if (rating < 45 || rating > 99) return null;
+    const columns = match[3].replace(/\(.*?\)/g, " ").split("/").map(column => column.trim()).filter(Boolean).slice(0, 2);
+    if (!columns.length) return null;
+    const markOf = column => (/\bpc\b|\dpc\b/i.test(column) ? "pc" : /console|ps[45]?|xbox/i.test(column) ? "console" : null);
+    let index = columns.length === 1 ? 0 : platform === "pc" ? 1 : 0;
+    const marked = columns.findIndex(column => markOf(column) === platform);
+    if (marked >= 0) index = marked;
+    else if (columns.length === 2 && markOf(columns[index]) && markOf(columns[index]) !== platform) index = 1 - index;
+    const column = columns[index];
+    const price = column.match(/(\d+(?:[.,]\d+)?)\s*(k)?/i);
+    // Prices in these tips are in thousands ("<110" = 110k).
+    const coins = /\bskip\b/i.test(column) || !price ? null : fodderCoins(price[1]);
+    return { name: match[1].trim(), rating, coins, skip: !coins };
+  }
+
+  // Name match that prefers the card with the tip's rating.
+  function matchRatedPlayer(name, rating) {
+    const match = matchPlayer(name);
+    const rated = match.candidates.filter(entry => entry.rating === rating);
+    if (rated.length) {
+      match.player = rated[0];
+      match.candidates = [...rated, ...match.candidates.filter(entry => entry.rating !== rating)];
+      if (match.status === "maybe" && rated.length === 1) match.status = "sure";
+    } else if (match.player) {
+      match.status = "maybe";
+    }
+    return match;
+  }
+
   function parsePlayerTip(text) {
     const players = [];
     const seen = new Set();
     let skipped = 0;
+    const platform = userPlatform();
     String(text || "").split(/\r?\n/).forEach(rawLine => {
+      const rated = parseRatedPriceLine(rawLine, platform);
+      if (rated) {
+        const match = matchRatedPlayer(rated.name, rated.rating);
+        if (!match.player) {
+          skipped++;
+          return;
+        }
+        if (seen.has(match.player.id)) return;
+        seen.add(match.player.id);
+        players.push(Object.assign(match, { raw: rawLine.trim(), fixedMax: rated.coins, skip: rated.skip, priced: true }));
+        return;
+      }
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
       rawLine.split(/[,;/]/).forEach(part => {
         const line = part.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–\d.)]+\s*/, "").trim();
@@ -2034,7 +2084,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         players.push(match);
       });
     });
-    return { players, skipped, windows: parseWindows(text) };
+    return { players, skipped, platform, windows: parseWindows(text) };
   }
 
   // --- Inventory: what you own per rule, what it cost, what it's worth ----------
@@ -3762,7 +3812,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Players
       const table = el("table", "pt-watch-table pt-stock-review");
       const head = el("tr");
-      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Genie (PC)", "pt-col-league"], ["", "pt-col-status"]]
+      const priced = parsed.players.some(item => item.priced);
+      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Genie (PC)", "pt-col-league"],
+        ...(priced ? [[`Max BIN (${parsed.platform === "pc" ? "PC" : "console"})`, "pt-col-level"]] : []), ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
       thead.appendChild(head);
@@ -3774,10 +3826,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         const row = el("tr", `pt-match-${item.status}`);
         const check = el("input");
         check.type = "checkbox";
-        check.checked = item.status !== "none";
+        check.checked = item.status !== "none" && !item.skip;
         const select = el("select", "pt-stock-select");
         select.appendChild(new Option("— overslaan —", ""));
         item.candidates.forEach(player => select.appendChild(new Option(`${player.display} · ${player.rating}`, String(player.id))));
+        // Tip price for your platform; "skip" leaves the card unticked.
+        const maxInput = el("input", "pt-target-input");
+        maxInput.inputMode = "numeric";
+        maxInput.value = item.fixedMax || "";
+        maxInput.placeholder = item.skip ? "skip" : "auto";
+        const maxCell = el("td", "pt-col-level");
+        maxCell.appendChild(maxInput);
         select.value = item.player ? String(item.player.id) : "";
         const priceCell = el("td", "pt-col-league pt-muted");
         const statusCell = el("td", "pt-col-status");
@@ -3801,10 +3860,10 @@ function priceWatchMain(SCRIPT_VERSION) {
         checkCell.appendChild(check);
         const selectCell = el("td", "pt-col-match");
         selectCell.appendChild(select);
-        row.append(checkCell, el("td", "pt-col-raw", item.raw), selectCell, priceCell, statusCell);
+        row.append(checkCell, el("td", "pt-col-raw", item.raw), selectCell, priceCell, ...(priced ? [maxCell] : []), statusCell);
         body.appendChild(row);
         sync();
-        return { check, select, sync };
+        return { check, select, sync, maxInput };
       });
       fetchGeniePrices(parsed.players.filter(item => item.player).map(item => item.player.id))
         .then(() => rows.forEach(row => row.sync()));
@@ -3821,14 +3880,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         const seen = new Set();
         const players = rows
           .filter(row => row.check.checked && row.select.value)
-          .map(row => index.find(entry => String(entry.id) === row.select.value))
-          .filter(player => player && !seen.has(player.id) && seen.add(player.id))
-          .map(player => ({ definitionId: player.id, name: player.display, rating: player.rating, fixedMax: null }));
+          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), fixedMax: parsePrice(row.maxInput.value) }))
+          .filter(({ player }) => player && !seen.has(player.id) && seen.add(player.id))
+          .map(({ player, fixedMax }) => ({ definitionId: player.id, name: player.display, rating: player.rating, fixedMax }));
         if (!players.length) {
           message.textContent = "Kies minstens één speler.";
           return;
         }
-        const price = player => (geniePrice(player.definitionId) || { price: 0 }).price;
+        const price = player => player.fixedMax || (geniePrice(player.definitionId) || { price: 0 }).price;
         players.sort((a, b) => price(b) - price(a)); // higher cost cards first
         const profitValue = profit.value.trim() === "" ? null : Number(profit.value.replace(",", "."));
         getStock().unshift({
@@ -3879,7 +3938,10 @@ function priceWatchMain(SCRIPT_VERSION) {
         const asFodder = parseFodderTip(area.value);
         const asFilters = parseFilterTip(area.value);
         // Rating-based fodder prices ("87s <6 / <6.5").
-        if (asFodder.ratings.length >= 2) {
+        if (asPlayers.players.filter(item => item.priced).length >= 2) {
+          // Names with rating and prices ("Hemp-88 <110 / <100pc"): a new snipe list with fixed max BINs.
+          showPlayerReviewStep(asPlayers);
+        } else if (asFodder.ratings.length >= 2) {
           showFodderReviewStep(asFodder);
         } else if (asFilters.rules.some(rule => rule.nation) && !asClubs.sections) {
           // Nation + league + quality + positions ("Silver RB England <650/700 ideally prem").

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.11.0
+// @version      2.12.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -12,6 +12,7 @@
 // @grant        GM_deleteValue
 // @connect      api.github.com
 // @connect      gist.githubusercontent.com
+// @connect      ntfy.sh
 // @require      https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
 // @updateURL    https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
@@ -921,6 +922,53 @@ function priceWatchMain(SCRIPT_VERSION) {
     return qrLibrary;
   }
 
+  // 📲 Push via ntfy: your topic lives in Tampermonkey on this pc; the ntfy app on the phone subscribes to it.
+  function buildPushPanel() {
+    const panel = el("div", "pt-transfer");
+    const part = el("div", "pt-transfer-part");
+    part.appendChild(el("div", "pt-transfer-title", "Pushmelding op je telefoon (ntfy)"));
+    const info = el("div", "pt-muted");
+    const topic = el("input", "pt-transfer-input");
+    topic.type = "text";
+    topic.autocomplete = "off";
+    topic.placeholder = "jouw topic, bijv. pw-k8f3x9q2m7";
+    const save = el("button", "pt-watch-refresh", "Opslaan");
+    const test = el("button", "pt-watch-refresh", "Test sturen");
+    const off = el("button", "pt-link-btn", "Uitzetten");
+    const result = el("span", "pt-muted");
+    [save, test, off].forEach(button => { button.type = "button"; });
+    part.append(info, topic, save, test, off, result);
+    panel.appendChild(part);
+
+    let current = "";
+    const render = () => {
+      test.style.display = current ? "" : "none";
+      off.style.display = current ? "" : "none";
+      info.textContent = (current
+        ? `Aan: zakt een speler na een prijsupdate tot zijn doel, dan stuurt deze pc een melding naar topic "${current}".`
+        : "Uit. Kies een lange, willekeurige topic-naam (iedereen die hem kent kan meelezen) en klik op Opslaan.") +
+        " Op je iPhone: installeer de app ntfy, tik op + en abonneer je op precies dezelfde topic." +
+        (genie() ? "" : " Let op: alleen een pc met FUT Genie verstuurt meldingen.");
+    };
+    const randomTopic = () => `pw-${Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => "abcdefghijkmnpqrstuvwxyz23456789"[byte % 32]).join("")}`;
+    const call = (type, data, done) => {
+      result.textContent = "…";
+      relayCall(type, data).then(value => { result.textContent = done(value) || ""; render(); }, error => { result.textContent = `Mislukt: ${error.message}`; });
+    };
+    save.addEventListener("click", () => call("setNtfy", { topic: topic.value.trim() }, value => { current = value.topic; return current ? "Opgeslagen." : "Uitgezet."; }));
+    off.addEventListener("click", () => call("setNtfy", { topic: "" }, () => { current = ""; topic.value = randomTopic(); return "Uitgezet."; }));
+    test.addEventListener("click", () => call("notify", { title: "Price Watch test", text: "Zo ziet een melding eruit als een speler op doel zit." },
+      sent => (sent ? "Verstuurd – komt hij binnen op je telefoon?" : "Geen topic ingesteld.")));
+    panel.__ptOpen = () => {
+      relayCall("ntfyStatus", {}).then(status => {
+        current = status.topic || "";
+        topic.value = current || randomTopic();
+        render();
+      }, error => { info.textContent = `Tampermonkey antwoordt niet: ${error.message}`; });
+    };
+    return panel;
+  }
+
   function buildTransferPanel() {
     const panel = el("div", "pt-transfer");
 
@@ -1169,7 +1217,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     atTarget = hits;
     if (!seeded || !newlyHit.length) return;
     if (chimeOn()) playChime();
-    showToast(`🎯 Op doel: ${newlyHit.map(({ entry, price }) => `${entry.name} ${priceFormat.format(price)}`).join(" · ")}`, true);
+    const text = newlyHit.map(({ entry, price }) => `${entry.name}: ${priceFormat.format(price)} (doel ${priceFormat.format(entry.target)})`);
+    showToast(`🎯 Op doel: ${text.join(" · ")}`, true);
+    // Push to the phone (ntfy) only from the pc with FUT Genie, so a phone with the app open doesn't send it twice.
+    if (genie()) relayCall("notify", { title: newlyHit.length > 1 ? `${newlyHit.length} spelers op doel` : "Speler op doel", text: text.join("\n") })
+      .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
   }
   // Seed once the first prices are in; after that every update (Genie on the pc, the gist on the phone) counts.
   listeners.add(() => {
@@ -1230,8 +1282,18 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (chimeOn()) playChime(); // let you hear it
     });
     showChime();
+    const push = el("button", "pt-watch-refresh", "📲");
+    push.type = "button";
+    push.title = "Pushmelding op je telefoon (ntfy) als een speler op doel zit, ook als hij vergrendeld is";
     const actions = el("div", "pt-watch-actions");
-    actions.append(walk, chime, transfer, refresh);
+    actions.append(walk, chime, push, transfer, refresh);
+    const pushPanel = buildPushPanel();
+    pushPanel.style.display = "none";
+    push.addEventListener("click", () => {
+      const open = pushPanel.style.display === "none";
+      pushPanel.style.display = open ? "" : "none";
+      if (open) pushPanel.__ptOpen();
+    });
     toolbar.append(heading, actions);
     const transferPanel = buildTransferPanel();
     transferPanel.style.display = "none";
@@ -1271,7 +1333,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const empty = el("div", "pt-watch-empty",
       "Nog geen spelers. Open een spelerskaart (club, transfermarkt, transfer list, SBC) en klik op \"+ Price Watch\".");
 
-    card.append(toolbar, transferPanel, table, empty);
+    card.append(toolbar, pushPanel, transferPanel, table, empty);
 
     const rowsById = new Map();
 
@@ -5902,6 +5964,29 @@ function priceWatchMain(SCRIPT_VERSION) {
     });
   }
 
+  // Push to your phone via ntfy.sh: a message to your own topic, which the ntfy app on the phone
+  // subscribes to. Works while the phone is locked. Only names and prices are sent.
+  const NTFY_KEY = "ntfy_topic";
+  const NTFY_TOPIC = /^[\w-]{8,64}$/;
+
+  function notify(title, text) {
+    const topic = getValue(NTFY_KEY);
+    if (!topic) return Promise.resolve(false);
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "POST",
+        url: `https://ntfy.sh/${encodeURIComponent(topic)}`,
+        // Header values must be plain ASCII; the emoji goes in as a tag ("dart" = 🎯).
+        headers: { Title: String(title || "Price Watch").replace(/[^\x20-\x7e]/g, ""), Tags: "dart" },
+        data: String(text || ""),
+        timeout: 15000,
+        onload: response => (response.status < 300 ? resolve(true) : reject(new Error(`ntfy ${response.status}`))),
+        onerror: () => reject(new Error("ntfy.sh niet bereikbaar")),
+        ontimeout: () => reject(new Error("ntfy.sh antwoordt niet (time-out)"))
+      });
+    });
+  }
+
   function githubError(response) {
     const message = response.json && response.json.message;
     if (response.status === 401) return "token ongeldig of verlopen";
@@ -6002,6 +6087,16 @@ function priceWatchMain(SCRIPT_VERSION) {
         return pull(message.gistId, message.file);
       case "tokenQr":
         return drawTokenQr(message.targetId, message.base, message.gistId);
+      case "ntfyStatus":
+        return { topic: getValue(NTFY_KEY) || "" };
+      case "setNtfy": {
+        const topic = String(message.topic || "").trim();
+        if (topic && !NTFY_TOPIC.test(topic)) throw new Error("topic: 8–64 tekens, alleen letters, cijfers, - en _");
+        setValue(NTFY_KEY, topic || null);
+        return { topic };
+      }
+      case "notify":
+        return notify(message.title, message.text);
       default:
         throw new Error(`onbekend verzoek ${message.type}`);
     }

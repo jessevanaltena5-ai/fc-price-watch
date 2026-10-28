@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.9.0
+// @version      2.9.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3903,7 +3903,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const table = el("table", "pt-watch-table pt-stock-review");
       const head = el("tr");
       const priced = parsed.players.some(item => item.priced);
-      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Genie (PC)", "pt-col-league"],
+      if (priced) table.classList.add("pt-stock-priced");
+      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], [priced ? "Kaartversie · Genie (PC)" : "Genie (PC)", "pt-col-league"],
         ...(priced ? [[`Max BIN (${parsed.platform === "pc" ? "PC" : "console"})`, "pt-col-level"]] : []), ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
@@ -4030,8 +4031,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       (async () => {
         const pricedRows = rows.filter(row => row.priced);
         for (let i = 0; i < pricedRows.length; i++) {
+          // The first wait also lets the table reach the page; stop when the review step was left.
+          await new Promise(resolve => window.setTimeout(resolve, i ? CLUB_SEARCH_DELAY_MS : 0));
           if (!importPanel.contains(table)) return;
-          if (i) await new Promise(resolve => window.setTimeout(resolve, CLUB_SEARCH_DELAY_MS));
           await pricedRows[i].loadVersions();
         }
       })();
@@ -5236,6 +5238,12 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-stock-review .pt-col-match  { width: 38%; }
 .pt-stock-review .pt-col-league { width: 26%; }
 .pt-stock-review .pt-col-status { width: 6%; text-align: center; font-weight: 700; }
+/* Snipe tips with prices: version dropdown + max BIN column. */
+.pt-stock-review.pt-stock-priced .pt-col-raw    { width: 21%; }
+.pt-stock-review.pt-stock-priced .pt-col-match  { width: 22%; }
+.pt-stock-review.pt-stock-priced .pt-col-league { width: 32%; }
+.pt-stock-review.pt-stock-priced .pt-col-level  { width: 14%; }
+.pt-stock-review.pt-stock-priced .pt-col-level .pt-target-input { box-sizing: border-box; width: 100%; }
 .pt-stock-review tr.pt-match-sure .pt-col-status  { color: #27d98b; }
 .pt-stock-review tr.pt-match-maybe { background: rgba(243, 201, 105, .08) !important; }
 .pt-stock-review tr.pt-match-maybe .pt-col-status { color: #f3c969; }

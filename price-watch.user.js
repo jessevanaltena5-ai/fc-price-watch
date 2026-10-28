@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.9.1
+// @version      2.10.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -176,6 +176,30 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (index < 0) return;
     list.splice(index, 1);
     saveWatch();
+  }
+
+  // Snipe-list players on the Spelers tab: the max BIN becomes the PC target (an existing target stays).
+  function addPlayersToWatch(players) {
+    let added = 0;
+    players.forEach(player => {
+      const existing = findWatched(player.definitionId);
+      if (existing) {
+        if (!existing.target && player.fixedMax) existing.target = player.fixedMax;
+        return;
+      }
+      getWatch().push({
+        definitionId: player.definitionId,
+        name: player.name,
+        rating: player.rating,
+        rarity: player.rarity != null ? player.rarity : null,
+        target: player.fixedMax || null,
+        addedAt: Date.now()
+      });
+      added++;
+    });
+    saveWatch();
+    refreshGeniePrices(true);
+    return added;
   }
 
   function setTarget(definitionId, target) {
@@ -1112,8 +1136,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     const transfer = el("button", "pt-watch-refresh", "⇄ Overzetten");
     transfer.type = "button";
     transfer.title = "Lijst + prijzen naar je telefoon (QR-code) of een code van je pc plakken";
+    const walk = el("button", "pt-watch-refresh", "▶ Alles afgaan");
+    walk.type = "button";
+    walk.title = "Zet speler na speler klaar op de transfermarkt (balk met \"Volgende\"): jouw PC-instapdoel als max BIN, leeg = auto uit de Genie-prijs. Duurste eerst.";
+    walk.addEventListener("click", () => {
+      if (!startWatchRun()) showToast("Nog geen spelers om af te gaan.", false);
+    });
     const actions = el("div", "pt-watch-actions");
-    actions.append(transfer, refresh);
+    actions.append(walk, transfer, refresh);
     toolbar.append(heading, actions);
     const transferPanel = buildTransferPanel();
     transferPanel.style.display = "none";
@@ -1256,7 +1286,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       removeCell.appendChild(remove);
 
       row.append(nameCell, el("td", "pt-col-rating", String(entry.rating || "")),
-        el("td", "pt-col-rarity", rarityName(entry.rarity)), priceCell, targetCell, distanceCell, removeCell);
+        el("td", "pt-col-rarity", entry.rarity != null ? rarityName(entry.rarity) : ""), priceCell, targetCell, distanceCell, removeCell);
 
       const update = () => {
         const genieEntry = geniePrice(entry.definitionId);
@@ -3281,6 +3311,28 @@ function priceWatchMain(SCRIPT_VERSION) {
     return true;
   }
 
+  // The Spelers tab as a run: every watched card (special versions with their rarity), your PC target
+  // as max BIN (empty = auto from Genie). A hidden list, rebuilt from the Spelers tab on every start.
+  const WATCH_RUN_ID = "watch-run";
+
+  function startWatchRun() {
+    const players = getWatch().map(entry => ({
+      definitionId: entry.definitionId,
+      name: entry.name,
+      rating: entry.rating,
+      ...(entry.definitionId > 0xFFFFFF ? { special: true, rarity: entry.rarity } : {}),
+      fixedMax: entry.target || null
+    }));
+    if (!players.length) return false;
+    const stock = getStock();
+    const index = stock.findIndex(list => list.id === WATCH_RUN_ID);
+    if (index >= 0) stock.splice(index, 1);
+    stock.push({ id: WATCH_RUN_ID, type: "players", watchRun: true, name: "Spelers", createdAt: Date.now(), profit: null, windows: [], players, done: {} });
+    saveStock();
+    startRun(WATCH_RUN_ID);
+    return true;
+  }
+
   // Ratings of the active fodder cycle, to highlight them on the Fodder screen.
   function activeCycleRatings() {
     const list = run && getStock().find(item => item.id === run.listId);
@@ -3770,7 +3822,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     function showTargetsStep(targets, windows) {
       importPanel.textContent = "";
-      const snipeLists = getStock().filter(list => list.type === "players" && !list.fodderRating);
+      const snipeLists = getStock().filter(list => list.type === "players" && !list.fodderRating && !list.watchRun);
 
       const listRow = el("div", "pt-stock-actions");
       const listSelect = el("select", "pt-stock-select pt-list-select");
@@ -4081,6 +4133,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           done: {}
         });
         saveStock();
+        const added = addPlayersToWatch(players);
+        showToast(`Snipe-lijst opgeslagen · ${added} speler(s) ook op de Spelers-tab gezet`, true);
         importPanel.style.display = "none";
       });
       actions.append(el("span", "pt-muted", "Naam"), nameInput, save, back, message);
@@ -4114,7 +4168,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const targets = parseTargetLines(area.value);
         const clubScore = asClubs.clubs.filter(item => item.status === "sure").length + (looksLikeClubTip(area.value) ? 3 : 0);
         const playerScoreTotal = asPlayers.players.filter(item => item.status === "sure").length;
-        const snipeLists = getStock().filter(list => list.type === "players" && !list.fodderRating);
+        const snipeLists = getStock().filter(list => list.type === "players" && !list.fodderRating && !list.watchRun);
         const asFodder = parseFodderTip(area.value);
         const asFilters = parseFilterTip(area.value);
         // Rating-based fodder prices ("87s <6 / <6.5").
@@ -4596,7 +4650,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (active && active.tagName === "INPUT" && lists.contains(active)) return;
       lists.textContent = "";
       // Fodder cycles live on the Fodder tab, not between your own lists.
-      const all = getStock().filter(list => !list.fodderRating);
+      const all = getStock().filter(list => !list.fodderRating && !list.watchRun);
       if (!all.length) {
         lists.appendChild(el("div", "pt-watch-empty", "Nog geen stock-lijsten. Klik op \"+ Tip plakken\"."));
         return;
@@ -4695,7 +4749,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         const start = el("button", "pt-watch-refresh", active ? "▶ Verder" : doneCount ? "▶ Verder" : "▶ Start");
         const reset = el("button", "pt-link-btn", "↺ Reset");
         const remove = el("button", "pt-link-btn pt-danger", "Verwijderen");
-        [inventory, start, reset, remove].forEach(button => { button.type = "button"; });
+        // Snipe lists: put the players on the Spelers tab (your max BIN as their target).
+        const toWatch = el("button", "pt-link-btn", "➕ Naar Spelers");
+        toWatch.title = "Zet deze spelers op de Spelers-tab, met de vaste max BIN als PC-instapdoel";
+        toWatch.addEventListener("click", () => {
+          const added = addPlayersToWatch(list.players);
+          flashButton(toWatch, `✓ ${added} erbij`, true, "Op de Spelers-tab gezet", "➕ Naar Spelers", toWatch.title);
+        });
+        [inventory, start, reset, remove, toWatch].forEach(button => { button.type = "button"; });
         start.addEventListener("click", () => startRun(list.id));
         reset.addEventListener("click", () => { list.done = {}; saveStock(); });
         // Two-step delete instead of a blocking confirm() dialog.
@@ -4714,7 +4775,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             remove.textContent = "Verwijderen";
           }, 3000);
         });
-        buttons.append(goalLabel, inventory, start, reset, remove);
+        buttons.append(goalLabel, inventory, start, ...(isPlayers ? [toWatch] : []), reset, remove);
         header.append(title, buttons);
 
         if (isFodder) {

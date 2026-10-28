@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.7.9
+// @version      2.8.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1586,7 +1586,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       return list.players.map(player => ({
         player,
         key: `p${player.definitionId}`,
-        genie: geniePrice(player.definitionId),
+        genie: player.special ? null : geniePrice(player.definitionId), // Genie only knows the regular card
         max: playerMax(list, player)
       }));
     }
@@ -1631,6 +1631,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // price × 0.95 − max ≥ max × profit%  →  max = price × 0.95 / (1 + profit%).
   function playerMax(list, player) {
     if (player.fixedMax) return player.fixedMax;
+    if (player.special) return null;
     const entry = geniePrice(player.definitionId);
     if (!entry) return null;
     return roundDownToStep(entry.price * (1 - EA_TAX) / (1 + profitFor(list) / 100));
@@ -2035,19 +2036,24 @@ function priceWatchMain(SCRIPT_VERSION) {
     return { name: match[1].trim(), rating, coins, skip: !coins };
   }
 
-  // Name match that prefers the card with the tip's rating.
+  // The tip's rating is usually a special (TOTW/promo) of the player: "Hemp-88" while her regular card is 87.
+  // The static data only has regular cards, so: the best name match whose regular card is at or below
+  // the tip rating; above it = a special of that player.
   function matchRatedPlayer(name, rating) {
     const match = matchPlayer(name);
-    const rated = match.candidates.filter(entry => entry.rating === rating);
-    if (rated.length) {
-      match.player = rated[0];
-      match.candidates = [...rated, ...match.candidates.filter(entry => entry.rating !== rating)];
-      if (match.status === "maybe" && rated.length === 1) match.status = "sure";
-    } else if (match.player) {
+    if (match.player && match.player.rating > rating) {
+      const lower = match.candidates.filter(entry => entry.rating <= rating).sort((a, b) => b.rating - a.rating)[0];
+      if (lower) {
+        match.player = lower;
+        match.candidates = [lower, ...match.candidates.filter(entry => entry !== lower)];
+      }
       match.status = "maybe";
     }
     return match;
   }
+
+  // Regular cards come from the static data; a higher tip rating means a special of that player.
+  const isSpecialFor = (player, tipRating) => !!(player && tipRating && tipRating > player.rating);
 
   function parsePlayerTip(text) {
     const players = [];
@@ -2064,7 +2070,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
         if (seen.has(match.player.id)) return;
         seen.add(match.player.id);
-        players.push(Object.assign(match, { raw: rawLine.trim(), fixedMax: rated.coins, skip: rated.skip, priced: true }));
+        players.push(Object.assign(match, { raw: rawLine.trim(), fixedMax: rated.coins, skip: rated.skip, priced: true, tipRating: rated.rating }));
         return;
       }
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
@@ -2814,8 +2820,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       const baseId = rule.player.definitionId & 0xFFFFFF;
       const rating = rule.player.rating || 0;
       criteria.maskedDefId = baseId;
-      // The regular card of that quality (no specials).
-      criteria.level = rating >= 75 ? SearchLevel.GOLD : rating >= 65 ? SearchLevel.SILVER : SearchLevel.BRONZE;
+      if (rule.player.special) {
+        // TOTW/promo version: quality "Special" leaves the regular card out (no level at all if the enum lacks it).
+        const special = SearchLevel.SPECIAL || SearchLevel.SP;
+        if (special) criteria.level = special;
+      } else {
+        // The regular card of that quality (no specials).
+        criteria.level = rating >= 75 ? SearchLevel.GOLD : rating >= 65 ? SearchLevel.SILVER : SearchLevel.BRONZE;
+      }
       playerData = repositories.Item.getStaticDataByDefId(baseId);
     } else {
       if (rule.club.leagueId > 0) criteria.league = rule.club.leagueId;
@@ -3844,7 +3856,9 @@ function priceWatchMain(SCRIPT_VERSION) {
           const player = index.find(entry => String(entry.id) === select.value) || null;
           if (!player) check.checked = false;
           const entry = player && geniePrice(player.id);
-          priceCell.textContent = entry ? priceFormat.format(entry.price) : player ? "…" : "";
+          const special = isSpecialFor(player, item.tipRating);
+          // Genie only prices the regular card; a special's price comes from the tip.
+          priceCell.textContent = special ? `special ${item.tipRating} (gewoon ${player.rating})` : entry ? priceFormat.format(entry.price) : player ? "…" : "";
           statusCell.textContent = !player ? "✗" : item.status === "sure" ? "✓" : "?";
           statusCell.title = !player ? "Niet herkend / overgeslagen" : item.status === "sure" ? "Zeker" : "Twijfel: controleer of dit de juiste speler is";
           return player;
@@ -3863,7 +3877,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         row.append(checkCell, el("td", "pt-col-raw", item.raw), selectCell, priceCell, ...(priced ? [maxCell] : []), statusCell);
         body.appendChild(row);
         sync();
-        return { check, select, sync, maxInput };
+        return { check, select, sync, maxInput, tipRating: item.tipRating };
       });
       fetchGeniePrices(parsed.players.filter(item => item.player).map(item => item.player.id))
         .then(() => rows.forEach(row => row.sync()));
@@ -3880,9 +3894,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         const seen = new Set();
         const players = rows
           .filter(row => row.check.checked && row.select.value)
-          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), fixedMax: parsePrice(row.maxInput.value) }))
+          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), fixedMax: parsePrice(row.maxInput.value), tipRating: row.tipRating }))
           .filter(({ player }) => player && !seen.has(player.id) && seen.add(player.id))
-          .map(({ player, fixedMax }) => ({ definitionId: player.id, name: player.display, rating: player.rating, fixedMax }));
+          .map(({ player, fixedMax, tipRating }) => isSpecialFor(player, tipRating)
+            ? { definitionId: player.id, name: `${player.display} ${tipRating}`, rating: tipRating, special: true, fixedMax }
+            : { definitionId: player.id, name: player.display, rating: player.rating, fixedMax });
         if (!players.length) {
           message.textContent = "Kies minstens één speler.";
           return;

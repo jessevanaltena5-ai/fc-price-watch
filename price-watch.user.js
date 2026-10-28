@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.10.1
+// @version      2.10.2
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3015,7 +3015,29 @@ function priceWatchMain(SCRIPT_VERSION) {
       const prev = el("button", "pt-run-btn pt-run-prev", "◀");
       const next = el("button", "pt-run-btn pt-run-next", "Volgende ▶");
       const stop = el("button", "pt-run-btn pt-run-stop", "✕");
-      [prev, next, stop].forEach(button => { button.type = "button"; });
+      // Top or bottom of the screen, so it never sits on EA's Search button (remembered; phone starts at the top).
+      const flip = el("button", "pt-run-btn pt-run-flip", "⇅");
+      flip.title = "Balk naar boven/onder verplaatsen";
+      const placeBar = () => {
+        let top = IS_PHONE;
+        try {
+          const saved = localStorage.getItem("pt_run_bar_pos");
+          if (saved) top = saved === "top";
+        } catch (_) {
+          // Default position.
+        }
+        runBar.classList.toggle("pt-run-top", top);
+      };
+      flip.addEventListener("click", () => {
+        try {
+          localStorage.setItem("pt_run_bar_pos", runBar.classList.contains("pt-run-top") ? "bottom" : "top");
+        } catch (_) {
+          // Only for this session.
+        }
+        placeBar();
+      });
+      placeBar();
+      [prev, next, stop, flip].forEach(button => { button.type = "button"; });
       prev.title = "Vorige klaarzetten";
       next.title = "Volgende club/kwaliteit klaarzetten (zoeken doe je zelf)";
       stop.title = "Stock-ronde stoppen";
@@ -3059,7 +3081,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       marketInput.addEventListener("keydown", event => { if (event.key === "Enter") marketSet.click(); });
       marketClear.addEventListener("click", () => setMarket(null));
       market.append(marketInput, marketSet, marketBuy, marketClear);
-      runBar.append(info, market, prev, next, stop);
+      runBar.append(info, market, prev, next, flip, stop);
       document.body.appendChild(runBar);
     }
 
@@ -5443,6 +5465,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-run-market { display: flex; gap: 4px; align-items: center; flex: 0 0 auto; }
 .pt-run-market .pt-target-input { width: 70px; }
 @media (max-width: 700px) { .pt-run-bar { flex-wrap: wrap; } .pt-run-info { flex: 1 1 100%; } }
+/* At the top: below the safe area of the phone (notch), clear of EA's Search button at the bottom. */
+.pt-run-bar.pt-run-top { top: calc(env(safe-area-inset-top, 0px) + 8px); bottom: auto; }
 
 .pt-run-btn {
   flex: 0 0 auto;

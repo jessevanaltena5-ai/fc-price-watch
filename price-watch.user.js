@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.10.2
+// @version      2.11.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1106,6 +1106,78 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // ---------------------------------------------------------------------------
+  // Target chime: a soft "pling" when a player reaches its PC target after a price update
+  // ---------------------------------------------------------------------------
+
+  const CHIME_KEY = "pt_chime_v1"; // "off" = muted
+  let chimeAudio = null;
+  let atTarget = null; // ids at or under their target at the last check; null = not seeded yet
+  const lastSeenPrice = new Map(); // id -> price at the last check (a changed target alone doesn't pling)
+
+  function chimeOn() {
+    try {
+      return localStorage.getItem(CHIME_KEY) !== "off";
+    } catch {
+      return true;
+    }
+  }
+
+  // Browsers only allow sound after a tap/click on the page: create the audio context on the first one.
+  function unlockChime() {
+    try {
+      const Context = window.AudioContext || window.webkitAudioContext;
+      if (!chimeAudio && Context) chimeAudio = new Context();
+      if (chimeAudio && chimeAudio.state === "suspended") chimeAudio.resume();
+    } catch (_) {
+      // No sound on this device.
+    }
+  }
+  ["pointerdown", "touchend", "keydown"].forEach(type => document.addEventListener(type, unlockChime, { capture: true, passive: true }));
+
+  // Two soft sine notes (E6 → A6) that fade out.
+  function playChime() {
+    if (!chimeAudio || chimeAudio.state !== "running") return;
+    const now = chimeAudio.currentTime;
+    [[1318.5, 0], [1760, 0.12]].forEach(([frequency, delay]) => {
+      const oscillator = chimeAudio.createOscillator();
+      const gain = chimeAudio.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0, now + delay);
+      gain.gain.linearRampToValueAtTime(0.08, now + delay + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + delay + 0.9);
+      oscillator.connect(gain).connect(chimeAudio.destination);
+      oscillator.start(now + delay);
+      oscillator.stop(now + delay + 1);
+    });
+  }
+
+  // Players that newly reached their target since the last check: pling + toast. The first check
+  // (prices from before this visit) only takes stock, so opening the app stays quiet.
+  function checkTargetHits() {
+    const hits = new Set();
+    const newlyHit = [];
+    getWatch().forEach(entry => {
+      const price = (geniePrice(entry.definitionId) || {}).price;
+      const previous = lastSeenPrice.get(entry.definitionId);
+      if (price) lastSeenPrice.set(entry.definitionId, price);
+      if (!entry.target || !price || price > entry.target) return;
+      hits.add(entry.definitionId);
+      if (atTarget && !atTarget.has(entry.definitionId) && price !== previous) newlyHit.push({ entry, price });
+    });
+    const seeded = !!atTarget;
+    atTarget = hits;
+    if (!seeded || !newlyHit.length) return;
+    if (chimeOn()) playChime();
+    showToast(`🎯 Op doel: ${newlyHit.map(({ entry, price }) => `${entry.name} ${priceFormat.format(price)}`).join(" · ")}`, true);
+  }
+  // Seed once the first prices are in; after that every update (Genie on the pc, the gist on the phone) counts.
+  listeners.add(() => {
+    if (!atTarget && !getWatch().some(entry => geniePrice(entry.definitionId))) return;
+    checkTargetHits();
+  });
+
+  // ---------------------------------------------------------------------------
   // Price Watch page
   // ---------------------------------------------------------------------------
 
@@ -1142,8 +1214,24 @@ function priceWatchMain(SCRIPT_VERSION) {
     walk.addEventListener("click", async () => {
       if (!(await startWatchRun())) showToast("Nog geen spelers om af te gaan.", false);
     });
+    const chime = el("button", "pt-watch-refresh");
+    chime.type = "button";
+    const showChime = () => {
+      chime.textContent = chimeOn() ? "🔔" : "🔕";
+      chime.title = chimeOn() ? "Pling als een speler na een prijsupdate op je doel zit (klik om uit te zetten)" : "Pling staat uit (klik om aan te zetten)";
+    };
+    chime.addEventListener("click", () => {
+      try {
+        localStorage.setItem(CHIME_KEY, chimeOn() ? "off" : "on");
+      } catch (_) {
+        // Only for this session.
+      }
+      showChime();
+      if (chimeOn()) playChime(); // let you hear it
+    });
+    showChime();
     const actions = el("div", "pt-watch-actions");
-    actions.append(walk, transfer, refresh);
+    actions.append(walk, chime, transfer, refresh);
     toolbar.append(heading, actions);
     const transferPanel = buildTransferPanel();
     transferPanel.style.display = "none";

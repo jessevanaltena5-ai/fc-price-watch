@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.10.0
+// @version      2.10.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1139,8 +1139,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const walk = el("button", "pt-watch-refresh", "▶ Alles afgaan");
     walk.type = "button";
     walk.title = "Zet speler na speler klaar op de transfermarkt (balk met \"Volgende\"): jouw PC-instapdoel als max BIN, leeg = auto uit de Genie-prijs. Duurste eerst.";
-    walk.addEventListener("click", () => {
-      if (!startWatchRun()) showToast("Nog geen spelers om af te gaan.", false);
+    walk.addEventListener("click", async () => {
+      if (!(await startWatchRun())) showToast("Nog geen spelers om af te gaan.", false);
     });
     const actions = el("div", "pt-watch-actions");
     actions.append(walk, transfer, refresh);
@@ -3315,12 +3315,51 @@ function priceWatchMain(SCRIPT_VERSION) {
   // as max BIN (empty = auto from Genie). A hidden list, rebuilt from the Spelers tab on every start.
   const WATCH_RUN_ID = "watch-run";
 
-  function startWatchRun() {
+  function regularRating(definitionId) {
+    try {
+      const data = repositories.Item.getStaticDataByDefId(definitionId & 0xFFFFFF);
+      return data && data.rating ? data.rating : 99;
+    } catch (_) {
+      return 99;
+    }
+  }
+
+  // A special whose version isn't known: regular id with a higher rating ("Tom Bischof 86", saved before
+  // the versions loaded).
+  const isUnresolvedSpecial = entry => entry.definitionId <= 0xFFFFFF && entry.rating > regularRating(entry.definitionId);
+
+  // Find the exact version of such entries once (concept search, no market): the one with that rating, by
+  // Genie price against the target. Left alone when it can't be told apart (e.g. no prices on the phone).
+  async function resolveWatchVersions() {
+    const unresolved = getWatch().filter(isUnresolvedSpecial);
+    if (!unresolved.length) return;
+    const byPlayer = await cardVersionsMany(unresolved.map(entry => entry.definitionId));
+    await fetchGeniePrices([...byPlayer.values()].flat().map(version => version.definitionId));
+    let changed = false;
+    unresolved.forEach(entry => {
+      const rated = (byPlayer.get(entry.definitionId) || []).filter(version => version.rating === entry.rating);
+      const pick = pickVersion(rated, entry.rating, entry.target);
+      if (!pick || (rated.length > 1 && !geniePrice(pick.definitionId)) || findWatched(pick.definitionId)) return;
+      entry.definitionId = pick.definitionId;
+      entry.rarity = pick.rarity;
+      entry.name = `${entry.name.replace(/\s+\d{2}$/, "")} ${pick.rating} ${rarityName(pick.rarity)}`;
+      changed = true;
+    });
+    if (changed) saveWatch();
+  }
+
+  async function startWatchRun() {
+    try {
+      await resolveWatchVersions();
+    } catch (error) {
+      console.warn("Price Watch: versies opzoeken mislukt.", error);
+    }
     const players = getWatch().map(entry => ({
       definitionId: entry.definitionId,
       name: entry.name,
       rating: entry.rating,
-      ...(entry.definitionId > 0xFFFFFF ? { special: true, rarity: entry.rarity } : {}),
+      // Specials (exact version or not) search quality Special, never the regular gold card.
+      ...(entry.definitionId > 0xFFFFFF || isUnresolvedSpecial(entry) ? { special: true, rarity: entry.definitionId > 0xFFFFFF ? entry.rarity : null } : {}),
       fixedMax: entry.target || null
     }));
     if (!players.length) return false;

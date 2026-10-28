@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.13.0
+// @version      2.13.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5937,8 +5937,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     }, { capture: true, passive: false });
   }
 
-  // Phone diagnosis: a tap inside the Price Watch card that lands on something else means an overlay
-  // (e.g. EA's click shield) is in the way. Say what it is and try to lower EA's shield.
+  // Phone: a tap inside the Price Watch card that lands on EA's click shield means the shield was left
+  // up. Lower it. Anything else on top (EA's own screens, popups, buttons) is left alone.
   if (IS_PHONE) {
     let lastBlockReport = 0;
     window.addEventListener("touchend", event => {
@@ -5949,6 +5949,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (touch.clientX < rect.left || touch.clientX > rect.right || touch.clientY < rect.top || touch.clientY > rect.bottom) return;
       const hit = document.elementFromPoint(touch.clientX, touch.clientY);
       if (!hit || card.contains(hit) || hit.closest(".pt-toast")) return;
+      const isShield = element => /shield/i.test(typeof element.className === "string" ? element.className : "");
+      let shield = hit;
+      while (shield && !isShield(shield)) shield = shield.parentElement;
+      if (!shield) return;
       lowerClickShield();
       if (Date.now() - lastBlockReport < 5000) return;
       lastBlockReport = Date.now();

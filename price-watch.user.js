@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.13.3
+// @version      2.13.4
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5843,6 +5843,39 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-table td.pt-transferred { color: #c9d3e0; }
 .pt-watch-table td.pt-market { color: #7fe3b4; }
 .pt-icon-btn.pt-lowest { min-width: 28px; }
+.pt-picker {
+  position: fixed;
+  inset: 0;
+  z-index: 100001;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.pt-picker-sheet {
+  width: min(520px, 100%);
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 8px 8px calc(env(safe-area-inset-bottom, 0px) + 8px);
+  background: #141c27;
+  border-radius: 12px 12px 0 0;
+}
+.pt-picker-option {
+  display: block;
+  width: 100%;
+  padding: 13px 14px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid #263243;
+  color: #e8edf3;
+  font: inherit;
+  font-size: 15px;
+}
+.pt-picker-option:disabled { color: #5d6a7c; }
+.pt-picker-current { color: #27d98b; font-weight: 700; }
+.pt-picker-cancel { color: #8d9aae; text-align: center; border-bottom: 0; }
+
 .pt-toast {
   position: fixed;
   left: 50%;
@@ -5918,7 +5951,33 @@ function priceWatchMain(SCRIPT_VERSION) {
   // iPhone: the EA app swallows the click that should follow a tap, so our buttons never fire. Turn a real
   // tap (finger didn't move) on our own controls into a click ourselves, and cancel the native one.
   if ("ontouchstart" in window) {
-    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add";
+    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-picker";
+    function openSelectPicker(select) {
+      document.querySelectorAll(".pt-picker").forEach(old => old.remove());
+      const overlay = el("div", "pt-picker");
+      const sheet = el("div", "pt-picker-sheet");
+      Array.from(select.options).forEach(option => {
+        const choice = el("button", "pt-picker-option" + (option.selected ? " pt-picker-current" : ""), option.textContent);
+        choice.type = "button";
+        choice.disabled = option.disabled;
+        choice.addEventListener("click", () => {
+          overlay.remove();
+          if (select.value === option.value) return;
+          select.value = option.value;
+          select.dispatchEvent(new Event("input", { bubbles: true }));
+          select.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        sheet.appendChild(choice);
+      });
+      const cancel = el("button", "pt-picker-option pt-picker-cancel", "Annuleren");
+      cancel.type = "button";
+      cancel.addEventListener("click", () => overlay.remove());
+      sheet.appendChild(cancel);
+      overlay.appendChild(sheet);
+      document.body.appendChild(overlay);
+      const current = sheet.querySelector(".pt-picker-current");
+      if (current) current.scrollIntoView({ block: "center" });
+    }
     const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio]";
     let start = null;
     document.addEventListener("touchstart", event => {
@@ -5933,6 +5992,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Text fields and dropdowns (often inside a label): focus them ourselves, which opens the keyboard or the
       // picker, instead of turning the tap into a click on the label.
       const field = event.target instanceof Element ? event.target.closest("input, select, textarea") : null;
+      // iOS won't open a dropdown's own picker here (focus() doesn't either): show our own list of its options.
+      if (field && field.tagName === "SELECT" && field.closest(OUR_AREAS) && !field.disabled) {
+        event.preventDefault();
+        openSelectPicker(field);
+        return;
+      }
       if (field && !/^(checkbox|radio|button|submit)$/.test(field.type)) {
         if (field.closest(OUR_AREAS) && !field.disabled && document.activeElement !== field) field.focus();
         return;

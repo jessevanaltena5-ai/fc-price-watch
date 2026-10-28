@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.13.4
+// @version      2.14.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4283,7 +4283,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const head = el("tr");
       const priced = parsed.players.some(item => item.priced);
       if (priced) table.classList.add("pt-stock-priced");
-      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], [priced ? "Kaartversie · Genie (PC)" : "Genie (PC)", "pt-col-league"],
+      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Kaartversie · Genie (PC)", "pt-col-league"],
         ...(priced ? [[`Max BIN (${parsed.platform === "pc" ? "PC" : "console"})`, "pt-col-level"]] : []), ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
@@ -4344,14 +4344,14 @@ function priceWatchMain(SCRIPT_VERSION) {
           row.className = `pt-match-${item.status}`;
           sync();
           fetchGeniePrices([Number(select.value)]).then(sync);
-          if (item.priced && select.value) loadVersions();
+          if (select.value) loadVersions();
         });
         let firstLoad = true;
         const loadVersions = async () => {
           let player = index.find(entry => String(entry.id) === select.value);
           if (!player) return;
           // First time: also the name lookalikes, and switch to one that has a card with the tip rating.
-          const pool = firstLoad ? [player, ...(item.lookalikes || []).filter(entry => entry.id !== player.id)] : [player];
+          const pool = firstLoad && item.tipRating ? [player, ...(item.lookalikes || []).filter(entry => entry.id !== player.id)] : [player];
           firstLoad = false;
           const chosenId = select.value;
           const byPlayer = await cardVersionsMany(pool.map(entry => entry.id));
@@ -4380,7 +4380,9 @@ function priceWatchMain(SCRIPT_VERSION) {
           const versions = byPlayer.get(player.id) || [];
           await fetchGeniePrices(versions.map(version => version.definitionId));
           if (select.value !== String(player.id)) return;
-          const pick = pickVersion(versions, item.tipRating, parsePrice(maxInput.value) || item.fitCoins);
+          // No rating in the tip: the regular card, unless you pick another version.
+          const pick = item.tipRating ? pickVersion(versions, item.tipRating, parsePrice(maxInput.value) || item.fitCoins)
+            : versions.find(version => version.definitionId === player.id) || versions[0] || null;
           versionState.playerId = player.id;
           versionState.versions = versions;
           versionSelect.value = "";
@@ -4408,7 +4410,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         .then(() => rows.forEach(row => row.sync()));
       // Versions one player at a time, with a pause like the club searches.
       (async () => {
-        const pricedRows = rows.filter(row => row.priced);
+        const pricedRows = rows.filter(row => row.select.value);
         for (let i = 0; i < pricedRows.length; i++) {
           // The first wait also lets the table reach the page; stop when the review step was left.
           await new Promise(resolve => window.setTimeout(resolve, i ? CLUB_SEARCH_DELAY_MS : 0));

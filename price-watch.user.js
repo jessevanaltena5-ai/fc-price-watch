@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.12.0
+// @version      2.13.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1707,6 +1707,122 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
       }, 80);
     });
+  }
+
+  // --- Transfer list timer: a pling (+ ntfy) when your listings run out ----------------------------
+  // Follows what the web app does itself (opening the transfer list, listing, relisting); no extra
+  // market requests. Listings ending within 2 minutes of each other share one alert.
+  const LISTING_KEY = "pt_listing_ends_v1"; // [{ end, count }]
+  const LISTING_GROUP_MS = 2 * 60 * 1000;
+  let listingTimers = [];
+
+  function getListingEnds() {
+    try {
+      const value = JSON.parse(localStorage.getItem(LISTING_KEY) || "[]");
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveListingEnds(groups) {
+    try {
+      localStorage.setItem(LISTING_KEY, JSON.stringify(groups));
+    } catch (_) {
+      // Timers still run for this session.
+    }
+    scheduleListingAlerts(groups);
+  }
+
+  function groupEnds(ends) {
+    const groups = [];
+    ends.sort((a, b) => a - b).forEach(end => {
+      const last = groups[groups.length - 1];
+      if (last && end - last.end <= LISTING_GROUP_MS) {
+        last.end = end;
+        last.count++;
+      } else {
+        groups.push({ end, count: 1 });
+      }
+    });
+    return groups;
+  }
+
+  // The transfer list as the web app loaded it: active listings and when they end (replaces what we had).
+  function recordTransferList(items) {
+    const now = Date.now();
+    const ends = items.map(item => {
+      const auction = auctionOf(item);
+      if (!auction) return null;
+      const active = typeof auction.isActiveTrade === "function" ? auction.isActiveTrade() : auction.tradeState === "active";
+      const seconds = Number(auction.expires);
+      return active && seconds > 0 ? now + seconds * 1000 : null;
+    }).filter(Boolean);
+    saveListingEnds(groupEnds(ends));
+  }
+
+  function scheduleListingAlerts(groups) {
+    listingTimers.forEach(timer => window.clearTimeout(timer));
+    listingTimers = (groups || getListingEnds())
+      .filter(group => group.end > Date.now() - 10 * 60 * 1000) // missed by up to 10 min (page was closed): still say it
+      .map(group => window.setTimeout(() => listingAlert(group), Math.max(0, group.end - Date.now() + 5000)));
+  }
+
+  function listingAlert(group) {
+    saveListingEnds(getListingEnds().filter(item => item.end !== group.end));
+    const what = group.count === 1 ? "1 kaart" : `${group.count} kaarten`;
+    if (chimeOn()) playChime();
+    showToast(`⏰ Transferlijst: listing van ${what} is afgelopen – wat niet verkocht is kun je opnieuw listen.`, true);
+    relayCall("notify", { title: "Transferlijst verlopen", text: `Listing van ${what} afgelopen. Niet verkocht? Opnieuw listen.` })
+      .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+  }
+
+  // Watch EA's own transfer list calls: loading it, listing one card, relisting the expired ones.
+  function installListingWatch() {
+    if (typeof services === "undefined" || !services.Item) return;
+    const wrap = (method, onSuccess) => {
+      const original = services.Item[method];
+      if (typeof original !== "function" || original.__ptListing) return;
+      const wrapped = function (...args) {
+        const observable = original.apply(this, args);
+        try {
+          if (observable && typeof observable.observe === "function") {
+            const context = {};
+            observable.observe(context, (sender, response) => {
+              sender.unobserve(context);
+              try {
+                if (response && response.success) onSuccess(response, args);
+              } catch (error) {
+                console.warn("Price Watch: transferlijst-timer niet bijgewerkt.", error);
+              }
+            });
+          }
+        } catch (_) {
+          // Never get in the way of EA's own request.
+        }
+        return observable;
+      };
+      wrapped.__ptListing = true;
+      services.Item[method] = wrapped;
+    };
+    wrap("requestTransferItems", response => {
+      const items = (response.response && response.response.items) || (response.data && response.data.items);
+      if (Array.isArray(items)) recordTransferList(items);
+    });
+    // Listing one card: (item, startingBid, buyNowPrice, duration in seconds).
+    wrap("list", (response, args) => {
+      const duration = Number(args[3]);
+      if (duration > 0) saveListingEnds(groupEnds(getListingEnds().flatMap(group => Array(group.count).fill(group.end)).concat(Date.now() + duration * 1000)));
+    });
+    // "Re-list all": ask for the transfer list once, the wrapper above takes the new end times from it.
+    wrap("relistExpiredAuctions", () => window.setTimeout(() => {
+      try {
+        services.Item.requestTransferItems();
+      } catch (_) {
+        // The next time you open the transfer list.
+      }
+    }, 1500));
+    scheduleListingAlerts();
   }
 
   let marketWatchInstalled = false;
@@ -5898,6 +6014,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       renderRunBar(); // resume a stock run after a page refresh
       installMarketWatch();
       installMinBidWrap();
+      installListingWatch();
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.
       startRelay();

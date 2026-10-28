@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.13.2
+// @version      2.13.3
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5669,7 +5669,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 }
 
 .pt-stock-list-name { font-size: 17px; font-weight: 700; color: #fff; }
-.pt-stock-list-buttons { display: flex; align-items: center; gap: 6px; }
+.pt-stock-list-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
 .pt-stock-grid .pt-col-level { width: 18%; text-align: center; }
 .pt-stock-grid td { height: auto; padding-top: 7px; padding-bottom: 7px; }
@@ -5930,6 +5930,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       const from = start;
       start = null;
       if (!from || !touch || Math.abs(touch.clientX - from.x) > 10 || Math.abs(touch.clientY - from.y) > 10) return;
+      // Text fields and dropdowns (often inside a label): focus them ourselves, which opens the keyboard or the
+      // picker, instead of turning the tap into a click on the label.
+      const field = event.target instanceof Element ? event.target.closest("input, select, textarea") : null;
+      if (field && !/^(checkbox|radio|button|submit)$/.test(field.type)) {
+        if (field.closest(OUR_AREAS) && !field.disabled && document.activeElement !== field) field.focus();
+        return;
+      }
       const target = event.target instanceof Element ? event.target.closest(TAPPABLE) : null;
       if (!target || !target.closest(OUR_AREAS) || target.disabled) return;
       event.preventDefault();

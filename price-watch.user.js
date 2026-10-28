@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.8.0
+// @version      2.9.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1586,7 +1586,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       return list.players.map(player => ({
         player,
         key: `p${player.definitionId}`,
-        genie: player.special ? null : geniePrice(player.definitionId), // Genie only knows the regular card
+        // Without a known version (only the regular id), the regular card's Genie price says nothing about the special.
+        genie: player.special && player.definitionId <= 0xFFFFFF ? null : geniePrice(player.definitionId),
         max: playerMax(list, player)
       }));
     }
@@ -1631,7 +1632,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // price × 0.95 − max ≥ max × profit%  →  max = price × 0.95 / (1 + profit%).
   function playerMax(list, player) {
     if (player.fixedMax) return player.fixedMax;
-    if (player.special) return null;
+    if (player.special && player.definitionId <= 0xFFFFFF) return null;
     const entry = geniePrice(player.definitionId);
     if (!entry) return null;
     return roundDownToStep(entry.price * (1 - EA_TAX) / (1 + profitFor(list) / 100));
@@ -2033,7 +2034,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const price = column.match(/(\d+(?:[.,]\d+)?)\s*(k)?/i);
     // Prices in these tips are in thousands ("<110" = 110k).
     const coins = /\bskip\b/i.test(column) || !price ? null : fodderCoins(price[1]);
-    return { name: match[1].trim(), rating, coins, skip: !coins };
+    // The other platform's price still helps to recognise the card ("Felix-84 <197 / skip").
+    const anyPrice = columns.map(text => !/\bskip\b/i.test(text) && text.match(/(\d+(?:[.,]\d+)?)/)).find(Boolean);
+    return { name: match[1].trim(), rating, coins, skip: !coins, fitCoins: coins || (anyPrice ? fodderCoins(anyPrice[1]) : null) };
   }
 
   // The tip's rating is usually a special (TOTW/promo) of the player: "Hemp-88" while her regular card is 87.
@@ -2049,11 +2052,85 @@ function priceWatchMain(SCRIPT_VERSION) {
       }
       match.status = "maybe";
     }
+    // Lookalikes whose regular card is at or below the tip rating ("Martin": Jon Martín, Lisandro Martínez, …):
+    // the card versions decide which one has a card with that rating.
+    const query = plainName(name);
+    // Exact names ("Martín") before prefixes ("Martínez"), then by rating.
+    match.lookalikes = query.length < 3 ? [] : getPlayerIndex()
+      .filter(entry => entry.rating <= rating && entry.rating >= rating - 20)
+      .map(entry => ({ entry, score: playerScore(query, entry) }))
+      .filter(item => item.score >= 0.85)
+      .sort((a, b) => (b.score >= 0.9) - (a.score >= 0.9) || b.entry.rating - a.entry.rating)
+      .slice(0, 16)
+      .map(item => item.entry);
     return match;
   }
 
   // Regular cards come from the static data; a higher tip rating means a special of that player.
   const isSpecialFor = (player, tipRating) => !!(player && tipRating && tipRating > player.rating);
+
+  // --- Card versions (TOTW, promos) ----------------------------------------------
+  // A version's id is the regular id + version × 2^24. The concept search (Club → concept players) on all
+  // possible ids returns the versions that exist, with rating and rarity. Not a transfer market search.
+  const VERSION_SLOTS = 32;
+  const cardVersionCache = new Map(); // regular id -> Promise<[{ definitionId, rating, rarity }]>
+
+  // Versions of several players in one concept search (name lookalikes of a tip line).
+  function cardVersionsMany(baseIds) {
+    const missing = [...new Set(baseIds)].filter(id => !cardVersionCache.has(id));
+    if (missing.length) {
+      const request = new Promise(resolve => {
+        if (!services.Item || typeof services.Item.searchConceptItems !== "function") return resolve([]);
+        const criteria = baseCriteria();
+        criteria.defId = missing.flatMap(id => Array.from({ length: VERSION_SLOTS }, (_, version) => id + version * 0x1000000));
+        criteria.count = CLUB_PAGE_SIZE;
+        criteria.offset = 0;
+        const owner = {};
+        const timer = window.setTimeout(() => resolve([]), 15000);
+        try {
+          services.Item.searchConceptItems(criteria).observe(owner, (observable, response) => {
+            observable.unobserve(owner);
+            window.clearTimeout(timer);
+            resolve(response.success && response.response ? response.response.items || [] : []);
+          });
+        } catch (error) {
+          window.clearTimeout(timer);
+          resolve([]);
+        }
+      });
+      missing.forEach(baseId => {
+        const promise = request.then(items => items
+          .filter(item => item && (item.definitionId & 0xFFFFFF) === baseId)
+          .map(item => ({ definitionId: item.definitionId, rating: item.rating, rarity: item.rareflag }))
+          .sort((a, b) => b.rating - a.rating || a.definitionId - b.definitionId));
+        cardVersionCache.set(baseId, promise);
+        // Failed or empty: ask again next time.
+        promise.then(versions => { if (!versions.length) cardVersionCache.delete(baseId); });
+      });
+    }
+    return Promise.all(baseIds.map(id => cardVersionCache.get(id) || Promise.resolve([])))
+      .then(lists => new Map(baseIds.map((id, i) => [id, lists[i]])));
+  }
+
+  // The version a tip means: its rating, and the Genie price closest to just above the tip price
+  // (tips buy a bit under the market). Untradeable versions (no price) only if nothing else fits.
+  function versionCost(version, tipCoins) {
+    const price = (geniePrice(version.definitionId) || {}).price;
+    if (!price) return 50;
+    return tipCoins ? Math.abs(Math.log(price / tipCoins) - Math.log(1.06)) : 0;
+  }
+
+  function pickVersion(versions, tipRating, tipCoins) {
+    const pool = versions.filter(version => version.rating === tipRating);
+    if (!pool.length) return null;
+    return [...pool].sort((a, b) => versionCost(a, tipCoins) - versionCost(b, tipCoins))[0];
+  }
+
+  function versionLabel(version, baseId) {
+    const price = (geniePrice(version.definitionId) || {}).price;
+    const kind = version.definitionId === baseId ? "Gewoon" : rarityName(version.rarity);
+    return `${kind} ${version.rating}` + (price ? ` · Genie ${priceFormat.format(price)}` : " · geen prijs");
+  }
 
   function parsePlayerTip(text) {
     const players = [];
@@ -2070,7 +2147,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
         if (seen.has(match.player.id)) return;
         seen.add(match.player.id);
-        players.push(Object.assign(match, { raw: rawLine.trim(), fixedMax: rated.coins, skip: rated.skip, priced: true, tipRating: rated.rating }));
+        players.push(Object.assign(match, { raw: rawLine.trim(), fixedMax: rated.coins, skip: rated.skip, priced: true, tipRating: rated.rating, fitCoins: rated.fitCoins }));
         return;
       }
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
@@ -2824,6 +2901,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         // TOTW/promo version: quality "Special" leaves the regular card out (no level at all if the enum lacks it).
         const special = SearchLevel.SPECIAL || SearchLevel.SP;
         if (special) criteria.level = special;
+        if (rule.player.rarity != null) criteria.rarities = [rule.player.rarity];
       } else {
         // The regular card of that quality (no specials).
         criteria.level = rating >= 75 ? SearchLevel.GOLD : rating >= 65 ? SearchLevel.SILVER : SearchLevel.BRONZE;
@@ -3852,13 +3930,30 @@ function priceWatchMain(SCRIPT_VERSION) {
         select.value = item.player ? String(item.player.id) : "";
         const priceCell = el("td", "pt-col-league pt-muted");
         const statusCell = el("td", "pt-col-status");
+        // Card versions of the chosen player (tips with a rating): a dropdown like "Team of the Week 88 · Genie 103.000".
+        const versionSelect = el("select", "pt-stock-select");
+        const versionState = { playerId: null, versions: [] };
         const sync = () => {
           const player = index.find(entry => String(entry.id) === select.value) || null;
           if (!player) check.checked = false;
           const entry = player && geniePrice(player.id);
           const special = isSpecialFor(player, item.tipRating);
-          // Genie only prices the regular card; a special's price comes from the tip.
-          priceCell.textContent = special ? `special ${item.tipRating} (gewoon ${player.rating})` : entry ? priceFormat.format(entry.price) : player ? "…" : "";
+          if (player && versionState.playerId === player.id && versionState.versions.length) {
+            const chosen = versionSelect.value;
+            versionSelect.textContent = "";
+            // No version with the tip rating (yet): search quality Special for that player.
+            if (special) versionSelect.appendChild(new Option(`Speciaal ${item.tipRating} · versie onbekend`, ""));
+            versionState.versions.forEach(version => versionSelect.appendChild(new Option(versionLabel(version, player.id), String(version.definitionId))));
+            versionSelect.value = chosen;
+            if (versionSelect.selectedIndex < 0) versionSelect.selectedIndex = 0;
+            if (!priceCell.contains(versionSelect)) {
+              priceCell.textContent = "";
+              priceCell.appendChild(versionSelect);
+            }
+          } else {
+            // Genie only prices the regular card; a special's price comes from the tip.
+            priceCell.textContent = special ? `special ${item.tipRating} (gewoon ${player.rating})${item.priced ? " · versies…" : ""}` : entry ? priceFormat.format(entry.price) : player ? "…" : "";
+          }
           statusCell.textContent = !player ? "✗" : item.status === "sure" ? "✓" : "?";
           statusCell.title = !player ? "Niet herkend / overgeslagen" : item.status === "sure" ? "Zeker" : "Twijfel: controleer of dit de juiste speler is";
           return player;
@@ -3869,7 +3964,50 @@ function priceWatchMain(SCRIPT_VERSION) {
           row.className = `pt-match-${item.status}`;
           sync();
           fetchGeniePrices([Number(select.value)]).then(sync);
+          if (item.priced && select.value) loadVersions();
         });
+        let firstLoad = true;
+        const loadVersions = async () => {
+          let player = index.find(entry => String(entry.id) === select.value);
+          if (!player) return;
+          // First time: also the name lookalikes, and switch to one that has a card with the tip rating.
+          const pool = firstLoad ? [player, ...(item.lookalikes || []).filter(entry => entry.id !== player.id)] : [player];
+          firstLoad = false;
+          const chosenId = select.value;
+          const byPlayer = await cardVersionsMany(pool.map(entry => entry.id));
+          if (select.value !== chosenId) return; // another player was chosen meanwhile
+          const hasRating = entry => (byPlayer.get(entry.id) || []).some(version => version.rating === item.tipRating);
+          const withRating = pool.filter(hasRating);
+          // Several lookalikes with such a card: the one whose Genie price fits the tip ("Martin-85 <86" is not
+          // Emiliano Martínez's 3.600 regular card). The name match itself gets a small head start.
+          if (withRating.length > 1 && item.fitCoins) {
+            await fetchGeniePrices(withRating.flatMap(entry => byPlayer.get(entry.id).filter(version => version.rating === item.tipRating).map(version => version.definitionId)));
+            const fit = entry => versionCost(pickVersion(byPlayer.get(entry.id), item.tipRating, item.fitCoins), item.fitCoins) - (entry.id === player.id ? 0.1 : 0);
+            withRating.sort((a, b) => fit(a) - fit(b));
+          }
+          if (select.value !== chosenId) return;
+          if (withRating.length && withRating[0].id !== player.id) {
+            const better = withRating[0];
+            if (![...select.options].some(option => option.value === String(better.id))) {
+              select.appendChild(new Option(`${better.display} · ${better.rating}`, String(better.id)));
+            }
+            select.value = String(better.id);
+            player = better;
+            item.status = "maybe";
+            row.className = "pt-match-maybe";
+            check.checked = !item.skip;
+          }
+          const versions = byPlayer.get(player.id) || [];
+          await fetchGeniePrices(versions.map(version => version.definitionId));
+          if (select.value !== String(player.id)) return;
+          const pick = pickVersion(versions, item.tipRating, parsePrice(maxInput.value) || item.fitCoins);
+          versionState.playerId = player.id;
+          versionState.versions = versions;
+          versionSelect.value = "";
+          sync();
+          versionSelect.value = pick ? String(pick.definitionId) : "";
+          if (versionSelect.selectedIndex < 0) versionSelect.selectedIndex = 0;
+        };
         const checkCell = el("td", "pt-col-check");
         checkCell.appendChild(check);
         const selectCell = el("td", "pt-col-match");
@@ -3877,10 +4015,26 @@ function priceWatchMain(SCRIPT_VERSION) {
         row.append(checkCell, el("td", "pt-col-raw", item.raw), selectCell, priceCell, ...(priced ? [maxCell] : []), statusCell);
         body.appendChild(row);
         sync();
-        return { check, select, sync, maxInput, tipRating: item.tipRating };
+        // The chosen version, when the versions of the selected player are known.
+        const version = () => {
+          const player = index.find(entry => String(entry.id) === select.value);
+          return player && versionState.playerId === player.id
+            ? versionState.versions.find(entry => String(entry.definitionId) === versionSelect.value) || null
+            : null;
+        };
+        return { check, select, sync, maxInput, tipRating: item.tipRating, priced: item.priced, loadVersions, version };
       });
       fetchGeniePrices(parsed.players.filter(item => item.player).map(item => item.player.id))
         .then(() => rows.forEach(row => row.sync()));
+      // Versions one player at a time, with a pause like the club searches.
+      (async () => {
+        const pricedRows = rows.filter(row => row.priced);
+        for (let i = 0; i < pricedRows.length; i++) {
+          if (!importPanel.contains(table)) return;
+          if (i) await new Promise(resolve => window.setTimeout(resolve, CLUB_SEARCH_DELAY_MS));
+          await pricedRows[i].loadVersions();
+        }
+      })();
 
       const nameInput = el("input", "pt-target-input pt-stock-name");
       nameInput.value = `Snipe ${new Date(parsed.windows.length ? parsed.windows[0].start : Date.now()).toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
@@ -3894,11 +4048,19 @@ function priceWatchMain(SCRIPT_VERSION) {
         const seen = new Set();
         const players = rows
           .filter(row => row.check.checked && row.select.value)
-          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), fixedMax: parsePrice(row.maxInput.value), tipRating: row.tipRating }))
-          .filter(({ player }) => player && !seen.has(player.id) && seen.add(player.id))
-          .map(({ player, fixedMax, tipRating }) => isSpecialFor(player, tipRating)
-            ? { definitionId: player.id, name: `${player.display} ${tipRating}`, rating: tipRating, special: true, fixedMax }
-            : { definitionId: player.id, name: player.display, rating: player.rating, fixedMax });
+          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), version: row.version(), fixedMax: parsePrice(row.maxInput.value), tipRating: row.tipRating }))
+          .filter(({ player, version }) => player && !seen.has(version ? version.definitionId : player.id) && seen.add(version ? version.definitionId : player.id))
+          .map(({ player, version, fixedMax, tipRating }) => {
+            if (version && version.definitionId !== player.id) {
+              // The exact version: its own id (Genie price, stock count) and rarity for the market filter.
+              return { definitionId: version.definitionId, name: `${player.display} ${version.rating} ${rarityName(version.rarity)}`,
+                rating: version.rating, special: true, rarity: version.rarity, fixedMax };
+            }
+            if (!version && isSpecialFor(player, tipRating)) {
+              return { definitionId: player.id, name: `${player.display} ${tipRating}`, rating: tipRating, special: true, fixedMax };
+            }
+            return { definitionId: player.id, name: player.display, rating: player.rating, fixedMax };
+          });
         if (!players.length) {
           message.textContent = "Kies minstens één speler.";
           return;

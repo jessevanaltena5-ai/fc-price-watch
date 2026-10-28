@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.13.1
+// @version      2.13.2
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5918,7 +5918,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // iPhone: the EA app swallows the click that should follow a tap, so our buttons never fire. Turn a real
   // tap (finger didn't move) on our own controls into a click ourselves, and cancel the native one.
   if ("ontouchstart" in window) {
-    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast";
+    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add";
     const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio]";
     let start = null;
     document.addEventListener("touchstart", event => {

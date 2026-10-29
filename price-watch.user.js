@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.19.2
+// @version      2.20.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -452,8 +452,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!force && Date.now() - (relay.sentAt || 0) < RELAY_PUSH_MS) return;
     relayBusy = true;
     try {
-      await fetchGeniePrices(getWatch().map(entry => entry.definitionId));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay() };
+      // Cards on your transfer list and in your snipe lists (what you buy is what you list next).
+      const extraIds = [...new Set(readJson(TL_IDS_KEY, []).concat(getStock().filter(list => list.type === "players")
+        .flatMap(list => list.players.filter(player => !(player.special && player.definitionId <= 0xFFFFFF)).map(player => player.definitionId))))];
+      await fetchGeniePrices(getWatch().map(entry => entry.definitionId).concat(extraIds));
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds) };
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
     } catch (error) {
@@ -530,7 +533,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         Object.assign(listPatch, { pcListJson, listJson: listJsonNow() });
       }
       const store = getRemotePrices();
-      Object.entries(data.p || {}).forEach(([id, value]) => {
+      Object.entries({ ...(data.x || {}), ...(data.p || {}) }).forEach(([id, value]) => {
         if (Array.isArray(value) && value[0] > 0) store[id] = value;
       });
       try {
@@ -1953,6 +1956,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const TL_STATUS_KEY = "pt_tl_status_v1"; // { at, active, next, expired, sold }
   const SALES_KEY = "pt_sales_v1"; // [{ n, p, b, at }], last 7 days
   const SALES_KEEP_MS = 7 * 24 * 3600 * 1000;
+  const TL_IDS_KEY = "pt_tl_ids_v1"; // definitionIds on the transfer list (not sold)
 
   function readJson(key, fallback) {
     try {
@@ -1975,6 +1979,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const count = state => items.filter(item => { const a = auctionOf(item); return a && a.tradeState === state; }).length;
     const ends = getListingEnds();
     writeJson(TL_STATUS_KEY, { at: Date.now(), active: count("active"), next: ends.length ? ends[0].end : 0, expired: count("expired"), sold: count("closed") });
+    // Cards still on the list: the pc sends their FUT Genie prices to the phone too.
+    writeJson(TL_IDS_KEY, [...new Set(items.filter(item => { const a = auctionOf(item); return a && a.tradeState !== "closed"; }).map(item => item.definitionId).filter(Boolean))].slice(0, 120));
     if (newSales.length) {
       const since = Date.now() - SALES_KEEP_MS;
       writeJson(SALES_KEY, readJson(SALES_KEY, []).filter(sale => sale.at > since).concat(newSales).slice(-300));
@@ -1986,6 +1992,17 @@ function priceWatchMain(SCRIPT_VERSION) {
   function transferStatusForRelay() {
     const since = Date.now() - 24 * 3600 * 1000;
     return { ...readJson(TL_STATUS_KEY, {}), sales: readJson(SALES_KEY, []).filter(sale => sale.at > since).slice(-40) };
+  }
+
+  // Prices for the phone beyond the watch list: cards on your transfer list, and (club rise on) your club's
+  // cards as far as FUT Genie already has them. In the gist next to "p"; the phone keeps them the same way.
+  function extraPrices(ids) {
+    const prices = {};
+    ids.concat(getClubRise().cards.map(card => card.d)).slice(0, 600).forEach(id => {
+      const entry = geniePrice(id);
+      if (entry) prices[id] = [entry.price, Number(entry._fetchedAt) || Date.now()];
+    });
+    return prices;
   }
 
   // Newest of this device's own view and the pc's (via the gist).
@@ -6151,9 +6168,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
-  // In EA's "List on Transfer Market" panel, next to FUT Genie's buttons (which work from the BIN in the field):
-  // BIN = what you paid + 10% / 15% / 20% / your own %, start price one step lower. Without FUT Genie also the
-  // profit after tax at the BIN in the field (FUT Genie shows that itself). You press List yourself.
+  // In EA's "List on Transfer Market" panel. With FUT Genie (pc) only what it lacks: BIN = what you paid
+  // + 10% / 15% / 20% / your own %. Without it (Safari on the phone) also what FUT Genie has: the price
+  // (FUT Genie via your pc, or the lowest BIN when you tap), −10% / +5% / +10% on the BIN in the field,
+  // break even, and the profit after tax at that BIN. Start price is always one step below. You press List.
   const QUICK_LIST_PCTS = [10, 15, 20];
 
   function addQuickListMarkup(controller) {
@@ -6162,23 +6180,29 @@ function priceWatchMain(SCRIPT_VERSION) {
     const item = controller.item;
     if (!actions || !item || typeof view.setBuyNowValue !== "function") return;
     const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
+    const full = !genie();
     let row = actions.querySelector(".pt-ql");
-    if (!bought) {
-      if (row) row.remove();
-      return;
+    if (row && (row.__ptItem !== item || row.__ptFull !== full)) {
+      row.remove();
+      row = null;
     }
+    if (!bought && !full) return;
+    if (row) return void row.__ptRefresh();
+
+    row = el("div", "panelActionRow pt-ql");
+    row.__ptItem = item;
+    row.__ptFull = full;
     const binNow = () => Number(view._buyNowNumericStepper && view._buyNowNumericStepper.getValue && view._buyNowNumericStepper.getValue()) || 0;
+    const profit = el("div", "pt-ql-profit");
     const showProfit = () => {
-      const profit = row.querySelector(".pt-ql-profit");
       profit.textContent = "";
       const bin = binNow();
-      if (!bin || genie()) return;
-      const net = netProfit(bin, row.__ptBought);
-      profit.append(`Bij BIN ${priceFormat.format(bin)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(net)} na tax`),
-        ` · break-even ${priceFormat.format(roundUpToStep(row.__ptBought / (1 - EA_TAX)))}`);
+      if (!bin || !bought || !full) return;
+      const net = netProfit(bin, bought);
+      profit.append(`Winst na tax bij BIN ${priceFormat.format(bin)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", signedCoins(net)));
     };
-    const apply = pct => {
-      const bin = Math.max(200, roundUpToStep(row.__ptBought * (1 + pct / 100)));
+    const setBin = price => {
+      const bin = Math.max(200, roundUpToStep(price));
       view.setBuyNowValue(bin);
       let start = 0;
       try {
@@ -6189,20 +6213,65 @@ function priceWatchMain(SCRIPT_VERSION) {
       view.setBidValue(start > 0 ? start : Math.max(150, priceStepBelow(binNow() || bin)));
       showProfit();
     };
-    if (!row) {
-      row = el("div", "panelActionRow pt-ql");
-      const buttons = el("div", "pt-ql-buttons");
-      QUICK_LIST_PCTS.forEach(pct => {
-        const button = el("button", "pt-ql-btn", `+${pct}%`);
-        button.type = "button";
-        button.title = `Buy Now = aankoopprijs + ${pct}%`;
-        button.addEventListener("click", event => {
-          event.preventDefault();
-          event.stopPropagation();
-          apply(pct);
-        });
-        buttons.appendChild(button);
+    const button = (label, title, onClick) => {
+      const node = el("button", "pt-ql-btn", label);
+      node.type = "button";
+      if (title) node.title = title;
+      node.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick(node);
       });
+      return node;
+    };
+    const grid = (columns, ...children) => {
+      const node = el("div", "pt-ql-buttons");
+      node.style.gridTemplateColumns = `repeat(${columns}, 1fr)`;
+      node.append(...children);
+      return node;
+    };
+
+    let refreshPrice = () => {};
+    if (full) {
+      // The price: FUT Genie from your pc when it sent one for this card, otherwise search when you tap.
+      const priceButton = button("", "", async node => {
+        const known = (geniePrice(item.definitionId) || {}).price;
+        if (known) return setBin(known);
+        if (marketBusy) return;
+        node.disabled = true;
+        try {
+          const lowest = await findLowestPrice(item.definitionId, search => { node.textContent = `Zoeken ${search}…`; });
+          if (lowest) setBin(Math.max(200, priceStepBelow(lowest)));
+          else showToast("Geen enkele listing gevonden voor deze kaart.", false);
+        } catch (error) {
+          showToast(`Laagste BIN zoeken mislukt: ${error.message}`, false);
+        } finally {
+          node.disabled = false;
+          refreshPrice();
+        }
+      });
+      priceButton.classList.add("pt-ql-gold");
+      refreshPrice = () => {
+        const entry = geniePrice(item.definitionId);
+        if (entry) {
+          const source = entry._market ? "Laagste BIN" : "Genie-prijs";
+          priceButton.textContent = `${source} ${priceFormat.format(entry.price)}`;
+          priceButton.title = `Buy Now = ${source.toLowerCase()} (${formatDayTime(Number(entry._fetchedAt) || Date.now())})`;
+        } else {
+          priceButton.textContent = "🏷️ Laagste BIN zoeken";
+          priceButton.title = "Zoekt deze kaart op de markt (max 6 zoekopdrachten) en zet de Buy Now één stap onder de goedkoopste";
+        }
+      };
+      refreshPrice();
+      const breakEven = button("Break even", "Buy Now waarbij je na 5% tax precies je aankoopprijs terugkrijgt", () => setBin(bought / (1 - EA_TAX)));
+      breakEven.classList.add("pt-ql-gold");
+      row.appendChild(bought ? grid(2, priceButton, breakEven) : grid(1, priceButton));
+      row.appendChild(grid(3, ...[[-10, 0.9], [5, 1.05], [10, 1.1]].map(([pct, factor]) =>
+        button(`${pct > 0 ? "+" : ""}${pct}%`, `Buy Now in het veld ${pct > 0 ? "+" : ""}${pct}%`, () => { if (binNow()) setBin(binNow() * factor); }))));
+    }
+
+    if (bought) {
+      const pcts = QUICK_LIST_PCTS.map(pct => button(`+${pct}%`, `Buy Now = aankoopprijs + ${pct}%`, () => setBin(bought * (1 + pct / 100))));
       // Own %: applied when you finish typing (Enter / Done / leaving the field).
       const customBox = el("label", "pt-ql-btn pt-ql-custom-box");
       const custom = el("input", "pt-ql-custom");
@@ -6216,7 +6285,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const pct = Number(String(custom.value).replace(",", "."));
         if (!custom.value || !Number.isFinite(pct) || pct <= -50 || pct > 500) return;
         writeJson(RELIST_KEY, { ...relistSettings(), pct });
-        apply(pct);
+        setBin(bought * (1 + pct / 100));
       };
       custom.addEventListener("change", applyCustom);
       custom.addEventListener("keydown", event => {
@@ -6225,26 +6294,34 @@ function priceWatchMain(SCRIPT_VERSION) {
         custom.blur();
         applyCustom();
       });
-      buttons.appendChild(customBox);
-      row.append(el("div", "pt-ql-title", "Op je aankoopprijs"), buttons, el("div", "pt-ql-profit"));
-      const listButton = actions.querySelector("button.call-to-action");
-      if (listButton && listButton.parentNode === actions) actions.insertBefore(row, listButton);
-      else actions.appendChild(row);
-      // Typing or +/- in EA's BIN field: profit follows.
-      try {
-        const input = view._buyNowNumericStepper.getInput();
-        if (input && typeof input.addTarget === "function" && window.EventType && !input.__ptProfit) {
-          input.__ptProfit = true;
-          input.addTarget(view, () => { if (row.isConnected) showProfit(); }, window.EventType.CHANGE);
-        }
-      } catch (_) {
-        // Profit then follows our buttons only.
-      }
-      actions.addEventListener("input", event => { if (event.target !== custom && row.isConnected) showProfit(); });
-      actions.addEventListener("click", () => window.setTimeout(() => { if (row.isConnected) showProfit(); }, 50));
+      row.append(el("div", "pt-ql-title", `Op je aankoopprijs (${priceFormat.format(bought)})`), grid(4, ...pcts, customBox));
     }
-    row.__ptBought = bought;
-    showProfit();
+    row.appendChild(profit);
+
+    const listButton = actions.querySelector("button.call-to-action");
+    if (listButton && listButton.parentNode === actions) actions.insertBefore(row, listButton);
+    else actions.appendChild(row);
+    // Typing or +/- in EA's BIN field: profit follows.
+    try {
+      const input = view._buyNowNumericStepper.getInput();
+      if (input && typeof input.addTarget === "function" && window.EventType && !input.__ptProfit) {
+        input.__ptProfit = true;
+        input.addTarget(view, () => { const current = actions.querySelector(".pt-ql"); if (current) current.__ptRefresh(); }, window.EventType.CHANGE);
+      }
+    } catch (_) {
+      // Profit then follows our buttons only.
+    }
+    if (!actions.__ptProfitBound) {
+      actions.__ptProfitBound = true;
+      const refresh = () => { const current = actions.querySelector(".pt-ql"); if (current) current.__ptRefresh(); };
+      actions.addEventListener("input", event => { if (!event.target.closest(".pt-ql")) refresh(); });
+      actions.addEventListener("click", () => window.setTimeout(refresh, 50));
+    }
+    row.__ptRefresh = () => {
+      refreshPrice();
+      showProfit();
+    };
+    row.__ptRefresh();
   }
 
   // ---------------------------------------------------------------------------
@@ -6444,6 +6521,10 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-ql-suffix { color: #9aa6b8; }
 .pt-ql-profit { font-size: 14px; margin-top: 8px; }
 .pt-ql-profit:empty { display: none; }
+.pt-ql-buttons + .pt-ql-buttons { margin-top: 8px; }
+.pt-ql-title { margin-top: 10px; }
+.pt-ql-gold { border-color: rgba(214,178,74,.75); color: #f0c94d; background: rgba(214,178,74,.08); }
+.pt-ql-btn:disabled { opacity: .6; }
 .pt-search-count { font-size: 12px; padding: 0 6px; white-space: nowrap; opacity: .85; }
 .pt-search-count.pt-search-hot { color: #ff7b7b; opacity: 1; font-weight: bold; }
 

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.21.0
+// @version      2.21.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1945,6 +1945,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     // "Re-list all": ask for the transfer list once, the wrapper above takes the new end times from it.
     wrap("relistExpiredAuctions", () => window.setTimeout(() => {
       try {
+        markPileDirty("requestTransferItems");
         services.Item.requestTransferItems();
       } catch (_) {
         // The next time you open the transfer list.
@@ -3300,10 +3301,23 @@ function priceWatchMain(SCRIPT_VERSION) {
     return item._auction || (item.getAuctionData && item.getAuctionData()) || null;
   }
 
+  // EA keeps the transfer list and unassigned pile cached: without marking them dirty a request
+  // returns the old copy (listings stay "active", sales never show). Same as FUT Genie does.
+  function markPileDirty(method) {
+    try {
+      const name = { requestTransferItems: "TRANSFER", requestUnassignedItems: "PURCHASED" }[method];
+      const pile = name && typeof ItemPile !== "undefined" ? ItemPile[name] : null;
+      if (pile != null && repositories.Item && typeof repositories.Item.setDirty === "function") repositories.Item.setDirty(pile);
+    } catch (_) {
+      // The cached copy, then.
+    }
+  }
+
   // Ask for one pile the way its own screen does; null when the request fails or doesn't exist.
   function requestPile(method) {
     return new Promise(resolve => {
       if (!services.Item || typeof services.Item[method] !== "function") return resolve(null);
+      markPileDirty(method);
       const owner = {};
       const timer = window.setTimeout(() => resolve(null), 15000);
       try {

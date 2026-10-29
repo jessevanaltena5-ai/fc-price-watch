@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.19.1
+// @version      2.19.2
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6151,10 +6151,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
-  // Phone (FUT Genie has its own buttons on the pc): BIN = what you paid + 10% / 15% / your own %,
-  // start price one step lower, and the profit after tax at the BIN in the field. You press List yourself.
+  // In EA's "List on Transfer Market" panel, next to FUT Genie's buttons (which work from the BIN in the field):
+  // BIN = what you paid + 10% / 15% / 20% / your own %, start price one step lower. Without FUT Genie also the
+  // profit after tax at the BIN in the field (FUT Genie shows that itself). You press List yourself.
+  const QUICK_LIST_PCTS = [10, 15, 20];
+
   function addQuickListMarkup(controller) {
-    if (genie()) return;
     const view = controller && typeof controller.getView === "function" ? controller.getView() : null;
     const actions = view && view.__panelActions;
     const item = controller.item;
@@ -6167,10 +6169,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     const binNow = () => Number(view._buyNowNumericStepper && view._buyNowNumericStepper.getValue && view._buyNowNumericStepper.getValue()) || 0;
     const showProfit = () => {
-      const bin = binNow();
       const profit = row.querySelector(".pt-ql-profit");
       profit.textContent = "";
-      if (!bin) return;
+      const bin = binNow();
+      if (!bin || genie()) return;
       const net = netProfit(bin, row.__ptBought);
       profit.append(`Bij BIN ${priceFormat.format(bin)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(net)} na tax`),
         ` · break-even ${priceFormat.format(roundUpToStep(row.__ptBought / (1 - EA_TAX)))}`);
@@ -6190,9 +6192,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!row) {
       row = el("div", "panelActionRow pt-ql");
       const buttons = el("div", "pt-ql-buttons");
-      [10, 15].forEach(pct => {
-        const button = el("button", "btn-standard pt-ql-btn", `+${pct}%`);
+      QUICK_LIST_PCTS.forEach(pct => {
+        const button = el("button", "pt-ql-btn", `+${pct}%`);
         button.type = "button";
+        button.title = `Buy Now = aankoopprijs + ${pct}%`;
         button.addEventListener("click", event => {
           event.preventDefault();
           event.stopPropagation();
@@ -6200,22 +6203,30 @@ function priceWatchMain(SCRIPT_VERSION) {
         });
         buttons.appendChild(button);
       });
-      const custom = el("input", "pt-target-input pt-ql-custom");
+      // Own %: applied when you finish typing (Enter / Done / leaving the field).
+      const customBox = el("label", "pt-ql-btn pt-ql-custom-box");
+      const custom = el("input", "pt-ql-custom");
       custom.inputMode = "decimal";
-      custom.placeholder = "%";
-      custom.value = String(relistSettings().pct);
-      const ok = el("button", "btn-standard pt-ql-btn", "+ eigen %");
-      ok.type = "button";
-      ok.addEventListener("click", event => {
-        event.preventDefault();
-        event.stopPropagation();
+      custom.enterKeyHint = "done";
+      const saved = relistSettings().pct;
+      custom.value = QUICK_LIST_PCTS.includes(saved) ? "" : String(saved);
+      custom.placeholder = "eigen";
+      customBox.append(custom, el("span", "pt-ql-suffix", "%"));
+      const applyCustom = () => {
         const pct = Number(String(custom.value).replace(",", "."));
-        if (!Number.isFinite(pct) || pct <= -50 || pct > 500) return;
+        if (!custom.value || !Number.isFinite(pct) || pct <= -50 || pct > 500) return;
         writeJson(RELIST_KEY, { ...relistSettings(), pct });
         apply(pct);
+      };
+      custom.addEventListener("change", applyCustom);
+      custom.addEventListener("keydown", event => {
+        if (event.key !== "Enter") return;
+        event.preventDefault();
+        custom.blur();
+        applyCustom();
       });
-      buttons.append(custom, ok);
-      row.append(el("div", "pt-ql-title pt-muted", "Opslag op je aankoopprijs"), buttons, el("div", "pt-ql-profit"));
+      buttons.appendChild(customBox);
+      row.append(el("div", "pt-ql-title", "Op je aankoopprijs"), buttons, el("div", "pt-ql-profit"));
       const listButton = actions.querySelector("button.call-to-action");
       if (listButton && listButton.parentNode === actions) actions.insertBefore(row, listButton);
       else actions.appendChild(row);
@@ -6224,7 +6235,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const input = view._buyNowNumericStepper.getInput();
         if (input && typeof input.addTarget === "function" && window.EventType && !input.__ptProfit) {
           input.__ptProfit = true;
-          input.addTarget(input, () => { if (row.isConnected) showProfit(); }, window.EventType.CHANGE);
+          input.addTarget(view, () => { if (row.isConnected) showProfit(); }, window.EventType.CHANGE);
         }
       } catch (_) {
         // Profit then follows our buttons only.
@@ -6422,12 +6433,17 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-pos { color: #5fd38d; }
 .pt-neg { color: #ff7b7b; }
 .pt-profit-info { font-size: 13px; padding: 6px 4px; text-align: center; }
-.pt-ql { display: block; padding: 6px 0; }
-.pt-ql-title { font-size: 13px; margin-bottom: 6px; }
-.pt-ql-buttons { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.pt-ql-btn { flex: 1 1 auto; min-width: 70px; margin: 0 !important; }
-.pt-ql-custom { width: 64px; }
+.pt-ql { display: block; padding: 8px 0; }
+.pt-ql-title { font-size: 13px; margin-bottom: 6px; color: #9aa6b8; }
+.pt-ql-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.pt-ql-btn { display: flex; align-items: center; justify-content: center; height: 44px; margin: 0; padding: 0 6px; box-sizing: border-box;
+  background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.28); border-radius: 8px; color: #fff; font: inherit; font-size: 15px; font-weight: 600; cursor: pointer; }
+.pt-ql-btn:active { background: rgba(255,255,255,.16); }
+.pt-ql-custom-box { gap: 2px; cursor: text; }
+.pt-ql-custom { width: 100%; min-width: 0; background: transparent; border: 0; color: #fff; font: inherit; text-align: right; outline: none; }
+.pt-ql-suffix { color: #9aa6b8; }
 .pt-ql-profit { font-size: 14px; margin-top: 8px; }
+.pt-ql-profit:empty { display: none; }
 .pt-search-count { font-size: 12px; padding: 0 6px; white-space: nowrap; opacity: .85; }
 .pt-search-count.pt-search-hot { color: #ff7b7b; opacity: 1; font-weight: bold; }
 
@@ -6906,6 +6922,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       let shield = hit;
       while (shield && !isShield(shield)) shield = shield.parentElement;
       if (!shield) return;
+      // Only when Price Watch itself is under the shield: EA shows it on its own screens while loading.
+      const below = (document.elementsFromPoint ? document.elementsFromPoint(touch.clientX, touch.clientY) : [])
+        .find(element => { let node = element; while (node && !isShield(node)) node = node.parentElement; return !node; });
+      if (!below || !card.contains(below)) return;
       lowerClickShield();
       if (Date.now() - lastBlockReport < 5000) return;
       lastBlockReport = Date.now();

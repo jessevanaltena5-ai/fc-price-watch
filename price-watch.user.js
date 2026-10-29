@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.23.0
+// @version      2.24.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1986,6 +1986,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       lastTransferLoad = Date.now();
       const why = ownTransferPoll || "geladen door jou, de web app of FUT Genie";
       recordTransferList(items);
+      rememberTransferItems(items);
       const found = reportTransferChanges(items);
       const active = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "active"; }).length;
       logTransferCheck({ why, text: `${active} actief · ${found.sold ? `${found.sold} nieuw verkocht` : "niets nieuw verkocht"} · ${found.expired ? `${found.expired} nieuw verlopen` : "niets nieuw verlopen"}${found.sent ? ` → ${found.sent}` : ""}` });
@@ -6328,6 +6329,133 @@ function priceWatchMain(SCRIPT_VERSION) {
       hooked.__ptQuickList = true;
       QuickList.prototype.renderView = hooked;
     }
+    const Cell = window.UTItemTableCellView;
+    if (Cell && Cell.prototype.render && !Cell.prototype.render.__ptTransferRow) {
+      const original = Cell.prototype.render;
+      const hooked = function (data) {
+        const result = original.apply(this, arguments);
+        try {
+          addTransferRowInfo(this, (typeof this.getData === "function" && this.getData()) || data);
+        } catch (error) {
+          console.warn("Price Watch: winst bij kaart op transferlijst mislukt.", error);
+        }
+        return result;
+      };
+      hooked.__ptTransferRow = true;
+      Cell.prototype.render = hooked;
+    }
+    const TransferList = window.UTTransferListViewController;
+    if (TransferList && TransferList.prototype._renderView && !TransferList.prototype._renderView.__ptSummary) {
+      const original = TransferList.prototype._renderView;
+      const hooked = function () {
+        const result = original.apply(this, arguments);
+        try {
+          transferListController = this;
+          addTransferSummary(this);
+        } catch (error) {
+          console.warn("Price Watch: transferlijst-overzicht mislukt.", error);
+        }
+        return result;
+      };
+      hooked.__ptSummary = true;
+      TransferList.prototype._renderView = hooked;
+    }
+  }
+
+  // --- Overview on EA's own transfer list (phone; FUT Genie has its own on the pc) ------------------
+  // At the top what the list brings in and what you make on it after tax; on each card bought, BIN,
+  // profit after tax and the FUT Genie price (via your pc), with ⚠ when your BIN is above it.
+  let lastTransferItems = [];
+  let transferItemIds = new Set();
+  let transferListController = null;
+
+  function rememberTransferItems(items) {
+    lastTransferItems = items;
+    transferItemIds = new Set(items.map(item => item.id).filter(Boolean));
+    if (transferListController) addTransferSummary(transferListController);
+  }
+
+  // Listed or expired: its BIN. Sold: what it sold for. Not listed: the FUT Genie price, if known.
+  function transferRowFacts(item) {
+    const auction = auctionOf(item) || {};
+    const state = auction.tradeState;
+    const sold = state === "closed";
+    const listed = state === "active" || state === "expired";
+    const market = (geniePrice(item.definitionId) || {}).price || 0;
+    const price = sold ? auction.currentBid || auction.buyNowPrice || 0 : listed ? auction.buyNowPrice || 0 : market;
+    const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
+    return { sold, listed, market, price, bought, net: bought && price ? netProfit(price, bought) : null, quickSell: Number(item.discardValue) || 0 };
+  }
+
+  function addTransferSummary(controller) {
+    const view = typeof controller.getView === "function" ? controller.getView() : null;
+    const root = view && typeof view.getRootElement === "function" ? view.getRootElement() : null;
+    if (!root) return;
+    let box = root.querySelector(".pt-tl-summary");
+    if (genie() || !lastTransferItems.length) {
+      if (box) box.remove();
+      return;
+    }
+    if (!box) {
+      box = el("div", "pt-tl-summary");
+      const list = root.querySelector(".sectioned-item-list");
+      if (list && list.parentNode) list.parentNode.insertBefore(box, list);
+      else root.insertBefore(box, root.firstChild);
+    }
+    const rows = lastTransferItems.map(transferRowFacts);
+    const open = rows.filter(row => !row.sold);
+    const sold = rows.filter(row => row.sold);
+    const sum = (list, value) => list.reduce((total, row) => total + (value(row) || 0), 0);
+    const after = price => Math.floor(price * (1 - EA_TAX));
+    const tile = (label, value, profit, note) => {
+      const node = el("div", "pt-tl-tile");
+      node.append(el("div", "pt-tl-tile-label", label), el("div", profit == null ? "pt-tl-tile-value" : `pt-tl-tile-value ${profit >= 0 ? "pt-pos" : "pt-neg"}`, value));
+      if (note) node.appendChild(el("div", "pt-tl-tile-note", note));
+      return node;
+    };
+    const openKnown = open.filter(row => row.net != null);
+    const soldKnown = sold.filter(row => row.net != null);
+    const openProfit = sum(openKnown, row => row.net);
+    const soldProfit = sum(soldKnown, row => row.net);
+    const noPrice = open.filter(row => !row.price).length;
+    const missing = (part, all) => (part.length < all.length ? `${part.length} van ${all.length} met aankoopprijs` : "na tax");
+    box.textContent = "";
+    box.append(
+      tile("Mogelijke opbrengst", priceFormat.format(sum(open, row => after(row.price))), null, noPrice ? `na tax · ${noPrice} zonder prijs` : "na tax"),
+      tile("Mogelijke winst", signedCoins(openProfit), openProfit, missing(openKnown, open)),
+      tile("Verkocht (opbrengst)", priceFormat.format(sum(sold, row => after(row.price))), null, `${sold.length} kaart(en), na tax`),
+      tile("Verkocht (winst)", signedCoins(soldProfit), soldProfit, missing(soldKnown, sold)),
+      tile("Quick sell totaal", priceFormat.format(sum(rows, row => row.quickSell))),
+      tile("Quick sell niet verkocht", priceFormat.format(sum(open, row => row.quickSell))));
+  }
+
+  function addTransferRowInfo(cell, item) {
+    const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
+    if (!root) return;
+    let line = root.querySelector(".pt-tl-row");
+    if (genie() || !item || !transferItemIds.has(item.id)) {
+      if (line) line.remove();
+      return;
+    }
+    if (!line) {
+      line = el("div", "pt-tl-row");
+      (root.querySelector(".entityContainer") || root).appendChild(line);
+    }
+    const row = transferRowFacts(item);
+    line.textContent = "";
+    const parts = [];
+    if (row.bought) parts.push(`gekocht ${priceFormat.format(row.bought)}`);
+    if (row.sold) parts.push(`verkocht ${priceFormat.format(row.price)}`);
+    else if (row.listed && row.price) parts.push(`BIN ${priceFormat.format(row.price)}`);
+    line.append(parts.join(" · "));
+    if (row.net != null && (row.sold || row.listed)) line.append(parts.length ? " · " : "", el("span", row.net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(row.net)} na tax`));
+    if (row.market && !row.sold) {
+      const over = row.listed && row.price > row.market;
+      const marketNet = row.bought ? netProfit(row.market, row.bought) : null;
+      line.append(line.textContent ? " · " : "", el("span", over ? "pt-neg" : "pt-muted",
+        `${over ? "⚠ " : ""}Genie ${priceFormat.format(row.market)}` + (!row.listed && marketNet != null ? ` (${signedCoins(marketNet)} na tax)` : "")));
+    }
+    if (!line.textContent) line.remove();
   }
 
   // In EA's "List on Transfer Market" panel. With FUT Genie (pc) only what it lacks: BIN = what you paid
@@ -6672,6 +6800,12 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-pos { color: #5fd38d; }
 .pt-neg { color: #ff7b7b; }
 .pt-profit-info { font-size: 13px; padding: 6px 4px; text-align: center; }
+.pt-tl-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
+.pt-tl-tile { padding: 8px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(0,0,0,.25); }
+.pt-tl-tile-label { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: #9aa6b8; }
+.pt-tl-tile-value { font-size: 18px; font-weight: 700; margin-top: 2px; }
+.pt-tl-tile-note { font-size: 11px; color: #9aa6b8; }
+.pt-tl-row { font-size: 12px; margin-top: 4px; line-height: 1.3; white-space: normal; }
 .pt-ql { display: block; padding: 8px 0; }
 .pt-ql-title { font-size: 13px; margin-bottom: 6px; color: #9aa6b8; }
 .pt-ql-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }

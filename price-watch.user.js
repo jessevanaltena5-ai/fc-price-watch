@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.25.0
+// @version      2.26.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1871,6 +1871,32 @@ function priceWatchMain(SCRIPT_VERSION) {
     return { sold: sold.length, expired, sent: "ntfy" };
   }
 
+  // Logged out (EA allows one web app at a time: logging in on your phone or in the FUT Genie app logs
+  // the pc out): the pc can't see sales any more, so it says so on your phone, once, and again when it's back.
+  const LOGGED_OUT_KEY = "pt_logged_out_v1"; // when the pc reported being logged out; 0 = logged in
+  let transferLoadFailures = 0;
+
+  function noteLoggedOut() {
+    if (!genie() || readJson(LOGGED_OUT_KEY, 0)) return;
+    writeJson(LOGGED_OUT_KEY, Date.now());
+    showToast("⚠️ Uitgelogd bij EA: je transferlijst wordt niet meer gevolgd tot je opnieuw inlogt.", false);
+    relayCall("notify", { title: "Pc uitgelogd bij EA", text: "⚠️ Je pc kan je transferlijst niet meer ophalen (uitgelogd, bijv. omdat je op je telefoon of in de FUT Genie-app inlogde). Verkopen worden niet gemeld tot je op de pc opnieuw inlogt." })
+      .then(sent => logTransferCheck({ why: "uitgelogd", text: sent ? "ntfy verstuurd" : "geen ntfy-topic ingesteld" }),
+        error => logTransferCheck({ why: "uitgelogd", text: `ntfy mislukt: ${error.message}` }));
+  }
+
+  function noteTransferLoad(ok) {
+    if (!ok) {
+      transferLoadFailures++;
+      if (transferLoadFailures >= 2) noteLoggedOut(); // once can be the network
+      return;
+    }
+    transferLoadFailures = 0;
+    if (!readJson(LOGGED_OUT_KEY, 0)) return;
+    writeJson(LOGGED_OUT_KEY, 0);
+    if (genie()) relayCall("notify", { title: "Pc weer ingelogd", text: "✅ Je pc volgt je transferlijst weer; wat in de tussentijd verkocht is komt in de volgende melding." }).catch(() => {});
+  }
+
   function scheduleListingPoll(delay, why) {
     window.clearTimeout(listingPollTimer);
     listingPollTimer = null;
@@ -1896,7 +1922,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!items) {
       logTransferCheck({ why: why || "controle", text: "transferlijst ophalen mislukt (niet ingelogd?)" });
       if (due.length) listingAlert({ count: due.reduce((sum, group) => sum + group.count, 0) });
-      return scheduleListingPoll();
+      noteTransferLoad(false);
+      return scheduleListingPoll(transferLoadFailures < 2 ? 2 * 60 * 1000 : null, why); // check again soon: logged out?
     }
     // The wrapper in installListingWatch did the rest; a listing at 0 seconds: look again in a minute.
     if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(LISTING_MIN_GAP_MS + 2000, "listing op 0 sec, nog eens");
@@ -1985,6 +2012,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const items = (response.response && response.response.items) || (response.data && response.data.items);
       if (!Array.isArray(items)) return;
       lastTransferLoad = Date.now();
+      noteTransferLoad(true);
       const why = ownTransferPoll || "geladen door jou, de web app of FUT Genie";
       recordTransferList(items);
       rememberTransferItems(items);
@@ -7361,6 +7389,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       startRelay();
     }
     if (!appReady()) {
+      // Stuck on the login screen with listings running: nobody is watching them.
+      if (Date.now() - startedAt > 2 * 60 * 1000 && getListingEnds().length) noteLoggedOut();
       if (Date.now() - startedAt > 45000 && !waitReported) {
         report("EA-app nog niet gevonden (nog niet ingelogd?)", false);
         waitReported = true;

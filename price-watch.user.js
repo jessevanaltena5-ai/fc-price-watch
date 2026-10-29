@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.15.0
+// @version      2.16.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -772,6 +772,16 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     const controller = new UTMarketSearchFiltersViewController();
     controller.initWithSearchCriteria(criteria);
+    // Holo flag on the screen's own criteria too (FUT Genie ticks its checkbox from there); off otherwise.
+    try {
+      const own = controller.viewmodel && controller.viewmodel.searchCriteria;
+      if (own && own !== criteria) {
+        if (criteria.__futgenieHoloOnly) own.__futgenieHoloOnly = true;
+        else delete own.__futgenieHoloOnly;
+      }
+    } catch (_) {
+      // Holo stays on our criteria only.
+    }
     if (playerData) controller.viewmodel.setPlayerData(playerData);
     nav.pushViewController(controller);
   }
@@ -1830,6 +1840,35 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   let marketWatchInstalled = false;
 
+  // "Holographic only", like FUT Genie: the market request gets hypercosmetic=foil. Only during a search
+  // whose criteria carry the holo flag (set by a holo snipe list).
+  let holoSearch = false;
+  function patchHoloParam() {
+    try {
+      let proto = window.UTHttpRequest && window.UTHttpRequest.prototype;
+      while (proto && !Object.prototype.hasOwnProperty.call(proto, "setUrlVariables")) proto = Object.getPrototypeOf(proto);
+      if (!proto || typeof proto.setUrlVariables !== "function") return false;
+      if (proto.setUrlVariables.__ptHolo || proto.setUrlVariables.__futgenieHoloPatched) return true;
+      const original = proto.setUrlVariables;
+      const wrapped = function (variables, ...rest) {
+        try {
+          const url = typeof this.url === "string" ? this.url : "";
+          if (holoSearch && variables && typeof variables === "object" && (!url || /\/transfermarket(?:$|\?)/.test(url))) {
+            variables = Object.assign({}, variables, { hypercosmetic: "foil" });
+          }
+        } catch (_) {
+          // Unchanged request.
+        }
+        return original.call(this, variables, ...rest);
+      };
+      wrapped.__ptHolo = true;
+      proto.setUrlVariables = wrapped;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function installMarketWatch() {
     if (marketWatchInstalled || typeof services === "undefined" || !services.Item || typeof services.Item.searchTransferMarket !== "function") return;
     marketWatchInstalled = true;
@@ -1841,7 +1880,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       } catch (_) {
         // Leave the search as it is.
       }
-      const observable = original.call(this, criteria, ...rest);
+      // Holo only without FUT Genie (phone): Genie adds the parameter itself when it's there.
+      const genieHolo = window.FutGenieDispatcher && window.FutGenieDispatcher.__futgenieHoloParamPatched;
+      holoSearch = !!(criteria && criteria.__futgenieHoloOnly === true && !genieHolo && patchHoloParam());
+      let observable;
+      try {
+        observable = original.call(this, criteria, ...rest);
+      } finally {
+        holoSearch = false;
+      }
       try {
         if (criteria && criteria.club && observable && typeof observable.observe === "function") {
           const snapshot = { club: criteria.club, level: criteria.level, maxBuy: criteria.maxBuy, offset: criteria.offset };
@@ -1930,6 +1977,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Max BIN so that selling at the Genie price leaves the desired profit after tax:
   // price × 0.95 − max ≥ max × profit%  →  max = price × 0.95 / (1 + profit%).
   function playerMax(list, player) {
+    // Holo snipe: a holographic card for the price of the normal one (its FUT Genie price).
+    if (list.holo && !(player.special && player.definitionId <= 0xFFFFFF)) {
+      const normal = geniePrice(player.definitionId);
+      if (normal) return roundDownToStep(normal.price);
+    }
     if (player.fixedMax) return player.fixedMax;
     if (player.special && player.definitionId <= 0xFFFFFF) return null;
     const entry = geniePrice(player.definitionId);
@@ -3216,6 +3268,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rule.player && list.mode === "bid") criteria.maxBid = rule.max;
       else criteria.maxBuy = rule.max;
     }
+    // Holo snipe lists: only holographic cards (FUT Genie's "Holographic only" flag; see installMarketWatch).
+    if (rule.player && list.holo) criteria.__futgenieHoloOnly = true;
     openFilters(criteria, playerData);
     list.done = list.done || {};
     list.done[rule.key] = Date.now();
@@ -3263,6 +3317,13 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function stopRun() {
+    // A holo run ends: your own searches afterwards are normal again.
+    try {
+      const criteria = services.User.getUser().marketSearchCriteria;
+      if (criteria) delete criteria.__futgenieHoloOnly;
+    } catch (_) {
+      // No saved criteria.
+    }
     run = null;
     saveRun();
   }
@@ -3376,6 +3437,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         el("div", "pt-run-title", `${rule.player.name} · ${list.mode === "bid" ? "max bod" : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"}`),
         el("div", "pt-run-sub", (list.fodderRating
           ? `${rule.player.rating || list.fodderRating}-rated · Genie ${rule.genie ? priceFormat.format(rule.genie.price) : "—"}` + (rule.player.fixedMax ? " · jouw doel" : ` · auto (winst ${profitFor(list)}%)`)
+          : list.holo ? `✨ alleen holo · max = normale prijs${rule.genie ? "" : " (geen Genie-prijs)"}`
           : rule.player.fixedMax ? "vaste max BIN" : rule.genie ? `Genie ${priceFormat.format(rule.genie.price)} · winst ${profitFor(list)}%` : "geen Genie-prijs") +
           (outlook ? ` · winst vanaf verkoop ≥ ${priceFormat.format(outlook.breakEven)}` : "") +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
@@ -5088,7 +5150,16 @@ function priceWatchMain(SCRIPT_VERSION) {
           const added = addPlayersToWatch(list.players);
           flashButton(toWatch, `✓ ${added} erbij`, true, "Op de Spelers-tab gezet", "➕ Naar Spelers", toWatch.title);
         });
-        [inventory, start, reset, remove, toWatch].forEach(button => { button.type = "button"; });
+        // Holo snipe: only holographic cards, max BIN = the normal card's FUT Genie price.
+        const holo = el("button", "pt-link-btn" + (list.holo ? " pt-holo-on" : ""), list.holo ? "✨ Alleen holo: aan" : "✨ Alleen holo");
+        holo.title = "Zoekt alleen holografische kaarten, met de prijs van de normale kaart (FUT Genie) als max BIN. " +
+          "Zelfde extra zoekfilter als FUT Genie's \"Holographic only\"; die zit niet in EA's eigen app.";
+        holo.addEventListener("click", () => {
+          list.holo = !list.holo;
+          if (list.holo) showToast("✨ Alleen holo staat aan. Let op: dit filter zit niet in EA's eigen app (FUT Genie waarschuwt er ook voor); gebruik het met mate.", true);
+          saveStock();
+        });
+        [inventory, start, reset, remove, toWatch, holo].forEach(button => { button.type = "button"; });
         start.addEventListener("click", () => startRun(list.id));
         reset.addEventListener("click", () => { list.done = {}; saveStock(); });
         // Two-step delete instead of a blocking confirm() dialog.
@@ -5107,7 +5178,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             remove.textContent = "Verwijderen";
           }, 3000);
         });
-        buttons.append(goalLabel, inventory, start, ...(isPlayers ? [toWatch] : []), reset, remove);
+        buttons.append(goalLabel, inventory, start, ...(isPlayers ? [toWatch] : []), ...(isPlayers && !list.fodderRating ? [holo] : []), reset, remove);
         header.append(title, buttons);
 
         if (isFodder) {
@@ -5560,6 +5631,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-stock-card { margin-top: 20px; }
 .pt-watch-view .pt-muted { color: #8d9aae; }
 
+.pt-watch-view .pt-holo-on { color: #e7b6ff; font-weight: 700; }
 .pt-link-btn {
   padding: 6px 10px;
   cursor: pointer;

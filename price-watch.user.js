@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.20.0
+// @version      2.21.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -337,6 +337,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const RELAY_DEFAULT_GIST = ""; // your own gist: paste its link under "Live via je pc"
   const RELAY_FILE = "price-watch-prices.json";
   const RELAY_LIST_FILE = "price-watch-phone-list.json";
+  const RELAY_SETTINGS_FILE = "price-watch-phone-settings.json"; // settings changed on the phone, for the pc
   const RELAY_PUSH_MS = 5 * 60 * 1000;
   const RELAY_PULL_MS = 2 * 60 * 1000;
   const RELAY_LIST_CHECK_MS = 60 * 1000;
@@ -456,7 +457,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const extraIds = [...new Set(readJson(TL_IDS_KEY, []).concat(getStock().filter(list => list.type === "players")
         .flatMap(list => list.players.filter(player => !(player.special && player.definitionId <= 0xFFFFFF)).map(player => player.definitionId))))];
       await fetchGeniePrices(getWatch().map(entry => entry.definitionId).concat(extraIds));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds) };
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay() };
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
     } catch (error) {
@@ -542,6 +543,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         // Kept in memory for this session.
       }
       if (data.s && typeof data.s === "object") listPatch.pcTransfer = data.s;
+      if (data.cr && typeof data.cr === "object") listPatch.pcClubRise = data.cr;
       saveRelay({ receivedAt: Date.now(), pricesAt: data.t, ...listPatch, error: "" });
     } catch (error) {
       saveRelay({ receivedAt: Date.now(), error: error.message });
@@ -561,6 +563,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       .then(() => pushPhoneList(false));
     window.setInterval(async () => {
       await checkPhoneList(false);
+      await checkPhoneSettings();
       await pushRelay(false);
       await pullRelay(false);
       await pushPhoneList(false);
@@ -2190,6 +2193,69 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
+  function topRisers(state) {
+    return state.cards.filter(card => card.now && card.base && card.now >= state.min)
+      .sort((a, b) => b.now / b.base - a.now / a.base).slice(0, 5)
+      .map(card => ({ n: card.n, r: card.r, b: card.b, base: card.base, now: card.now }));
+  }
+
+  // What the pc puts in the gist for the phone (settings + status, not the whole club).
+  function clubRiseForRelay() {
+    const state = getClubRise();
+    return { on: state.on, pct: state.pct, min: state.min, settingsAt: state.settingsAt || 0, scannedAt: state.scannedAt,
+      checkedAt: state.checkedAt, count: state.cards.length, top: topRisers(state), at: Date.now() };
+  }
+
+  // Pc: its own state. Phone: the pc's state from the gist, with a change sent from here on top until the pc has it.
+  function clubRiseView() {
+    if (genie()) {
+      const state = getClubRise();
+      return { ...state, count: state.cards.length, top: topRisers(state), busy: !!clubRiseBusy, busyText: clubRiseBusy };
+    }
+    const relay = getRelay();
+    const pc = relay.pcClubRise || { on: false, pct: 20, min: 10000, count: 0, top: [] };
+    const sent = relay.phoneRise;
+    const pending = !!(sent && sent.at > (pc.settingsAt || 0));
+    return { ...pc, ...(pending ? { on: sent.on, pct: sent.pct, min: sent.min } : {}), top: pc.top || [], pending, busy: false, pcAt: pc.at || 0 };
+  }
+
+  function changeClubRise(patch) {
+    if (genie()) {
+      const { scanAt, ...settings } = patch;
+      saveClubRise({ ...settings, settingsAt: Date.now() });
+      if (scanAt || (settings.on && !getClubRise().cards.length)) scanClubRise();
+      pushRelay(true);
+      return;
+    }
+    // Phone: into its own gist file; the pc reads it every minute.
+    const view = clubRiseView();
+    const sent = { on: view.on, pct: view.pct, min: view.min, ...patch, at: Date.now() };
+    saveRelay({ phoneRise: sent });
+    const relay = getRelay();
+    relayCall("push", { gistId: relay.gistId, file: RELAY_SETTINGS_FILE, content: JSON.stringify(sent) })
+      .catch(error => showToast(`Instelling niet verstuurd: ${error.message}`, false));
+  }
+
+  // Pc: a change from the phone (newer than the last one here) wins; "scanAt": read the club now.
+  let phoneSettingsCheckedAt = 0;
+  async function checkPhoneSettings() {
+    const relay = getRelay();
+    if (!genie() || !relay.hasToken || !relay.gistId || Date.now() - phoneSettingsCheckedAt < RELAY_LIST_CHECK_MS) return;
+    phoneSettingsCheckedAt = Date.now();
+    let sent;
+    try {
+      sent = JSON.parse(await relayCall("pull", { gistId: relay.gistId, file: RELAY_SETTINGS_FILE }));
+    } catch (_) {
+      return; // no file yet: nothing set on the phone
+    }
+    const state = getClubRise();
+    if (!sent || !(sent.at > (state.settingsAt || 0))) return;
+    saveClubRise({ on: !!sent.on, pct: Math.max(5, Number(sent.pct) || 20), min: Math.max(0, Number(sent.min) || 0), settingsAt: sent.at });
+    if (sent.on && (sent.scanAt || !state.cards.length)) await scanClubRise();
+    showToast(`Price Watch: clubkaart-meldingen ${sent.on ? `aan (${sent.pct}%)` : "uit"} gezet vanaf je telefoon.`, true);
+    pushRelay(true);
+  }
+
   let clubRiseStarted = false;
   function startClubRise() {
     if (clubRiseStarted || !genie()) return;
@@ -2368,17 +2434,17 @@ function priceWatchMain(SCRIPT_VERSION) {
     const riseLine = el("div", "pt-tl-line");
     const riseList = el("div", "pt-tl-sales");
     riseBlock.append(el("h3", "pt-tl-title", "📈 Prijsstijging van je clubkaarten"), riseRow, riseLine, riseList);
-    const riseState = getClubRise();
-    riseOn.checked = riseState.on;
-    risePct.value = String(riseState.pct);
-    riseMin.value = priceFormat.format(riseState.min);
-    riseOn.addEventListener("change", () => {
-      saveClubRise({ on: riseOn.checked });
-      if (riseOn.checked && !getClubRise().cards.length) scanClubRise();
-    });
-    risePct.addEventListener("change", () => saveClubRise({ pct: Math.max(5, parsePrice(risePct.value) || 20) }));
-    riseMin.addEventListener("change", () => saveClubRise({ min: parsePrice(riseMin.value) || 0 }));
-    riseScan.addEventListener("click", () => scanClubRise());
+    const fillRiseInputs = () => {
+      const view = clubRiseView();
+      riseOn.checked = view.on;
+      if (document.activeElement !== risePct) risePct.value = String(view.pct);
+      if (document.activeElement !== riseMin) riseMin.value = priceFormat.format(view.min);
+    };
+    fillRiseInputs();
+    riseOn.addEventListener("change", () => changeClubRise({ on: riseOn.checked }));
+    risePct.addEventListener("change", () => changeClubRise({ pct: Math.max(5, parsePrice(risePct.value) || 20) }));
+    riseMin.addEventListener("change", () => changeClubRise({ min: parsePrice(riseMin.value) || 0 }));
+    riseScan.addEventListener("click", () => changeClubRise({ scanAt: Date.now() }));
 
     card.append(statusBlock, relistBlock, searchBlock, riseBlock);
 
@@ -2411,17 +2477,21 @@ function priceWatchMain(SCRIPT_VERSION) {
       searchLine.textContent = `${counts.tenMinutes} in 10 min · ${counts.hour} in het afgelopen uur · ${counts.day} in 24 uur`;
       searchLine.classList.toggle("pt-neg", counts.hour >= searchLimit() * 0.8);
 
-      const rise = getClubRise();
-      riseBlock.style.display = genie() ? "" : "none";
-      riseScan.disabled = !!clubRiseBusy;
-      riseLine.textContent = !rise.on
+      const rise = clubRiseView();
+      const relay = getRelay();
+      // Phone: set it here, the pc (FUT Genie) does the work; needs the token to send.
+      riseBlock.style.display = genie() || (relay.hasToken && relay.gistId) ? "" : "none";
+      riseScan.disabled = rise.busy;
+      if (!riseBlock.contains(document.activeElement)) fillRiseInputs();
+      const via = genie() ? "" : rise.pcAt ? ` · stand van je pc ${formatDayTime(rise.pcAt)}` : " · nog niets van je pc ontvangen";
+      riseLine.textContent = (rise.pending ? "⏳ Verstuurd, je pc neemt het binnen een minuut over (web app op je pc moet open zijn). " : "") + (!rise.on
         ? "Uit. Zet aan om een melding (ook op je telefoon) te krijgen als een verhandelbare kaart in je club flink stijgt t.o.v. je aankoopprijs."
-        : (clubRiseBusy ? `Bezig: ${clubRiseBusy} · ` : "") + (rise.cards.length
-          ? `${rise.cards.length} kaarten gevolgd · club gelezen ${formatDayTime(rise.scannedAt)}` + (rise.checkedAt ? ` · prijzen ${formatTime(rise.checkedAt)}` : "")
-          : "Club nog niet gelezen.");
+        : (rise.busyText ? `Bezig: ${rise.busyText} · ` : "") + (rise.count
+          ? `${rise.count} kaarten gevolgd · club gelezen ${formatDayTime(rise.scannedAt)}` + (rise.checkedAt ? ` · prijzen ${formatTime(rise.checkedAt)}` : "")
+          : "Club nog niet gelezen.")) + via;
       riseList.textContent = "";
       if (rise.on) {
-        rise.cards.filter(c => c.now && c.base && c.now >= rise.min).sort((a, b) => b.now / b.base - a.now / a.base).slice(0, 5).forEach(c => {
+        rise.top.forEach(c => {
           const change = Math.round((c.now / c.base - 1) * 100);
           const line = el("div", "pt-tl-sale", `${c.n} (${c.r}): ${c.b ? "gekocht" : "was"} ${priceFormat.format(c.base)} → ${priceFormat.format(c.now)} `);
           line.appendChild(el("span", change >= 0 ? "pt-pos" : "pt-neg", `${change >= 0 ? "+" : ""}${change}%`));

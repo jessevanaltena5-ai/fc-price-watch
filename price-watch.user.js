@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.14.0
+// @version      2.15.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -547,7 +547,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
+  let relayStarted = false;
   function startRelay() {
+    if (relayStarted) return;
+    relayStarted = true;
     relayCall("status", {}).then(status => saveRelay({ hasToken: !!status.hasToken })).catch(() => {})
       .then(() => checkPhoneList(true))
       .then(() => { pushRelay(false); return pullRelay(true); })
@@ -6045,6 +6048,12 @@ function priceWatchMain(SCRIPT_VERSION) {
   report("geladen, wacht op de web app…", true);
 
   function tick() {
+    // Pc with FUT Genie: prices to the gist (and target pushes) also while EA isn't logged in, e.g. after a
+    // refresh once you're playing the game. Genie gets its prices from its own server, not from EA.
+    if (!relayStarted && genie()) {
+      addStyles();
+      startRelay();
+    }
     if (!appReady()) {
       if (Date.now() - startedAt > 45000 && !waitReported) {
         report("EA-app nog niet gevonden (nog niet ingelogd?)", false);

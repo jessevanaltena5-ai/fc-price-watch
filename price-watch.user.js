@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.16.0
+// @version      2.17.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -730,7 +730,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!force && Date.now() - genieRequestedAt < GENIE_REFRESH_MS) return;
 
     const ids = getWatch().map(entry => entry.definitionId)
-      .concat(getStock().filter(list => list.type === "players").flatMap(list => list.players.map(player => player.definitionId)));
+      .concat(getStock().filter(list => list.type === "players").flatMap(list => list.players.flatMap(player => player.normalId ? [player.definitionId, player.normalId] : [player.definitionId])));
     if (!ids.length) return;
 
     genieRequestedAt = Date.now();
@@ -1979,7 +1979,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function playerMax(list, player) {
     // Holo snipe: a holographic card for the price of the normal one (its FUT Genie price).
     if (list.holo && !(player.special && player.definitionId <= 0xFFFFFF)) {
-      const normal = geniePrice(player.definitionId);
+      const normal = geniePrice(player.normalId || player.definitionId);
       if (normal) return roundDownToStep(normal.price);
     }
     if (player.fixedMax) return player.fixedMax;
@@ -2426,6 +2426,31 @@ function priceWatchMain(SCRIPT_VERSION) {
   const VERSION_SLOTS = 32;
   const cardVersionCache = new Map(); // regular id -> Promise<[{ definitionId, rating, rarity }]>
 
+  // Holographic cards: EA marks the item ("hyper cosmetics"); FUT Genie (pc) also has a catalogue of them.
+  const holoIds = new Set();
+  let holoCatalogue = null;
+  function loadHoloCatalogue() {
+    if (holoCatalogue) return holoCatalogue;
+    const dispatcher = window.FutGenieDispatcher;
+    if (!dispatcher || typeof dispatcher._galleryHolographicCatalogue !== "function") return Promise.resolve();
+    holoCatalogue = Promise.resolve(dispatcher._galleryHolographicCatalogue())
+      .then(items => {
+        (items || []).forEach(item => { if (Number(item.resourceId) > 0) holoIds.add(Number(item.resourceId)); });
+        if (!holoIds.size) holoCatalogue = null; // ask again next time
+      })
+      .catch(() => { holoCatalogue = null; });
+    return holoCatalogue;
+  }
+  function itemIsHolo(item) {
+    try {
+      if (typeof item.hasHyperCosmetics === "function" && item.hasHyperCosmetics()) return true;
+    } catch (_) {
+      // Not known for this item.
+    }
+    return item.holographic === true;
+  }
+  const isHolo = version => !!version && (version.holo || holoIds.has(version.definitionId));
+
   // Versions of several players in one concept search (name lookalikes of a tip line).
   function cardVersionsMany(baseIds) {
     const missing = [...new Set(baseIds)].filter(id => !cardVersionCache.has(id));
@@ -2452,7 +2477,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       missing.forEach(baseId => {
         const promise = request.then(items => items
           .filter(item => item && (item.definitionId & 0xFFFFFF) === baseId)
-          .map(item => ({ definitionId: item.definitionId, rating: item.rating, rarity: item.rareflag }))
+          .map(item => ({ definitionId: item.definitionId, rating: item.rating, rarity: item.rareflag, holo: itemIsHolo(item) }))
           .sort((a, b) => b.rating - a.rating || a.definitionId - b.definitionId));
         cardVersionCache.set(baseId, promise);
         // Failed or empty: ask again next time.
@@ -2472,7 +2497,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function pickVersion(versions, tipRating, tipCoins) {
-    const pool = versions.filter(version => version.rating === tipRating);
+    const rated = versions.filter(version => version.rating === tipRating);
+    // A tip means the normal card; a holo of it only if that's all there is.
+    const pool = rated.some(version => !isHolo(version)) ? rated.filter(version => !isHolo(version)) : rated;
     if (!pool.length) return null;
     return [...pool].sort((a, b) => versionCost(a, tipCoins) - versionCost(b, tipCoins))[0];
   }
@@ -2480,7 +2507,14 @@ function priceWatchMain(SCRIPT_VERSION) {
   function versionLabel(version, baseId) {
     const price = (geniePrice(version.definitionId) || {}).price;
     const kind = version.definitionId === baseId ? "Gewoon" : rarityName(version.rarity);
-    return `${kind} ${version.rating}` + (price ? ` · Genie ${priceFormat.format(price)}` : " · geen prijs");
+    return `${isHolo(version) ? "✨ Holo " : ""}${kind} ${version.rating}` + (price ? ` · Genie ${priceFormat.format(price)}` : " · geen prijs");
+  }
+
+  // The holo twin of a normal version (same rating and rarity), and the normal one of a holo.
+  function holoTwin(versions, version) {
+    if (!version) return null;
+    return versions.find(other => other.definitionId !== version.definitionId && other.rating === version.rating &&
+      other.rarity === version.rarity && isHolo(other) !== isHolo(version)) || null;
   }
 
   function parsePlayerTip(text) {
@@ -3269,7 +3303,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       else criteria.maxBuy = rule.max;
     }
     // Holo snipe lists: only holographic cards (FUT Genie's "Holographic only" flag; see installMarketWatch).
-    if (rule.player && list.holo) criteria.__futgenieHoloOnly = true;
+    if (rule.player && (list.holo || rule.player.holo)) criteria.__futgenieHoloOnly = true;
     openFilters(criteria, playerData);
     list.done = list.done || {};
     list.done[rule.key] = Date.now();
@@ -3302,7 +3336,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       run = { listId, index: 0 };
       runLoading = true;
       saveRun();
-      await fetchGeniePrices(list.players.map(player => player.definitionId));
+      await fetchGeniePrices(list.players.flatMap(player => player.normalId ? [player.definitionId, player.normalId] : [player.definitionId]));
       runPricesAt = Date.now();
       runLoading = false;
       const price = player => (geniePrice(player.definitionId) || { price: 0 }).price;
@@ -4341,7 +4375,18 @@ function priceWatchMain(SCRIPT_VERSION) {
       profit.style.width = "64px";
       profitLabelEl.append(el("span", "pt-stock-level-name", "Winst"), profit,
         el("span", "pt-muted", `% na 5% belasting, bij verkoop op de FUT Genie-prijs · leeg = ${DEFAULT_PROFIT}%`));
-      settings.append(windows.element, profitLabelEl);
+      // Holo snipe: the holo version of each card, for the normal card's price.
+      let holoMode = false;
+      const holoLabel = el("label", "pt-stock-level");
+      const holoCheck = el("input");
+      holoCheck.type = "checkbox";
+      holoLabel.append(holoCheck, el("span", "pt-stock-level-name", "✨ Holo's"),
+        el("span", "pt-muted", "op de prijs van de normale kaart (max BIN = Genie-prijs van de normale versie)"));
+      holoCheck.addEventListener("change", () => {
+        holoMode = holoCheck.checked;
+        rows.forEach(row => row.applyHolo());
+      });
+      settings.append(windows.element, profitLabelEl, holoLabel);
 
       // Players
       const table = el("table", "pt-watch-table pt-stock-review");
@@ -4454,6 +4499,29 @@ function priceWatchMain(SCRIPT_VERSION) {
           sync();
           versionSelect.value = pick ? String(pick.definitionId) : "";
           if (versionSelect.selectedIndex < 0) versionSelect.selectedIndex = 0;
+          applyHolo();
+        };
+        // Holo mode: the holo twin of the chosen card, max BIN = the normal card's Genie price.
+        const applyHolo = () => {
+          if (!versionState.versions.length) return;
+          const chosen = versionState.versions.find(entry => String(entry.definitionId) === versionSelect.value) || null;
+          const normal = isHolo(chosen) ? holoTwin(versionState.versions, chosen) : chosen;
+          const holoCard = normal ? holoTwin(versionState.versions, normal) : null;
+          if (holoMode) {
+            if (holoCard) {
+              versionSelect.value = String(holoCard.definitionId);
+              const normalPrice = (geniePrice(normal.definitionId) || {}).price;
+              if (normalPrice) maxInput.value = roundDownToStep(normalPrice);
+              versionSelect.title = "";
+            } else {
+              versionSelect.title = "Geen holo-versie van deze kaart gevonden";
+              check.checked = false;
+            }
+          } else {
+            if (isHolo(chosen) && normal) versionSelect.value = String(normal.definitionId);
+            maxInput.value = item.fixedMax || "";
+            versionSelect.title = "";
+          }
         };
         const checkCell = el("td", "pt-col-check");
         checkCell.appendChild(check);
@@ -4469,13 +4537,19 @@ function priceWatchMain(SCRIPT_VERSION) {
             ? versionState.versions.find(entry => String(entry.definitionId) === versionSelect.value) || null
             : null;
         };
-        return { check, select, sync, maxInput, tipRating: item.tipRating, priced: item.priced, loadVersions, version };
+        // The normal card of a chosen holo (its Genie price is the max BIN).
+        const normalOf = () => {
+          const chosen = version();
+          return isHolo(chosen) ? holoTwin(versionState.versions, chosen) : null;
+        };
+        return { check, select, sync, maxInput, tipRating: item.tipRating, priced: item.priced, loadVersions, version, applyHolo, normalOf };
       });
       fetchGeniePrices(parsed.players.filter(item => item.player).map(item => item.player.id))
         .then(() => rows.forEach(row => row.sync()));
       // Versions one player at a time, with a pause like the club searches.
       (async () => {
         const pricedRows = rows.filter(row => row.select.value);
+        await loadHoloCatalogue();
         for (let i = 0; i < pricedRows.length; i++) {
           // The first wait also lets the table reach the page; stop when the review step was left.
           await new Promise(resolve => window.setTimeout(resolve, i ? CLUB_SEARCH_DELAY_MS : 0));
@@ -4496,9 +4570,16 @@ function priceWatchMain(SCRIPT_VERSION) {
         const seen = new Set();
         const players = rows
           .filter(row => row.check.checked && row.select.value)
-          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), version: row.version(), fixedMax: parsePrice(row.maxInput.value), tipRating: row.tipRating }))
+          .map(row => ({ player: index.find(entry => String(entry.id) === row.select.value), version: row.version(), normal: row.normalOf(),
+            fixedMax: parsePrice(row.maxInput.value), tipRating: row.tipRating }))
           .filter(({ player, version }) => player && !seen.has(version ? version.definitionId : player.id) && seen.add(version ? version.definitionId : player.id))
-          .map(({ player, version, fixedMax, tipRating }) => {
+          .map(({ player, version, normal, fixedMax, tipRating }) => {
+            if (version && isHolo(version)) {
+              // Holo: its own id, the normal twin's id for the price (max BIN = normal card's Genie price).
+              return { definitionId: version.definitionId, name: `${player.display} ${version.rating} ${rarityName(version.rarity)} ✨ Holo`,
+                rating: version.rating, special: version.definitionId !== player.id, rarity: version.rarity, holo: true,
+                normalId: normal ? normal.definitionId : null, fixedMax: holoMode ? null : fixedMax };
+            }
             if (version && version.definitionId !== player.id) {
               // The exact version: its own id (Genie price, stock count) and rarity for the market filter.
               return { definitionId: version.definitionId, name: `${player.display} ${version.rating} ${rarityName(version.rarity)}`,
@@ -4524,6 +4605,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           profit: Number.isFinite(profitValue) ? profitValue : null,
           windows: windows.read(),
           players,
+          holo: holoMode || players.some(player => player.holo),
           done: {}
         });
         saveStock();

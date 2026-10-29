@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.21.1
+// @version      2.22.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1879,6 +1879,33 @@ function priceWatchMain(SCRIPT_VERSION) {
     else scheduleListingPoll();
   }
 
+  // Test button: the transfer list fresh from EA now. Watches for the real request to EA's tradepile,
+  // so a cached copy shows up as a failed test. Changes found are reported like a normal check.
+  async function testTransferPoll() {
+    const requests = [];
+    let observer = null;
+    try {
+      observer = new PerformanceObserver(list => list.getEntries().forEach(entry => { if (/tradepile/i.test(entry.name)) requests.push(entry); }));
+      observer.observe({ type: "resource" });
+    } catch (_) {
+      observer = null; // can't see requests: only the result counts
+    }
+    lastTransferLoad = Date.now();
+    ownTransferPoll = true;
+    const items = await requestPile("requestTransferItems");
+    ownTransferPoll = false;
+    await new Promise(resolve => window.setTimeout(resolve, 800)); // resource entries come in a bit later
+    if (observer) observer.disconnect();
+    if (!items) return { ok: false, text: "Transferlijst ophalen mislukt (niet ingelogd in de web app?)." };
+    const count = state => items.filter(item => { const a = auctionOf(item); return a && a.tradeState === state; }).length;
+    const left = items.map(item => { const a = auctionOf(item); return a && a.tradeState === "active" ? Number(a.expires) : 0; }).filter(seconds => seconds > 0);
+    const fresh = !observer || requests.length > 0;
+    const text = `Transferlijst ${!observer ? "opgehaald" : fresh ? "vers van EA opgehaald" : "NIET vers opgehaald (oude kopie, geen verzoek naar EA gezien)"}: ` +
+      `${count("active")} actief, ${count("closed")} verkocht, ${count("expired")} verlopen` +
+      (left.length ? ` · eerstvolgende loopt af over ${Math.max(1, Math.round(Math.min(...left) / 60))} min` : "");
+    return { ok: fresh, text };
+  }
+
   function scheduleListingAlerts(groups) {
     listingTimers.forEach(timer => window.clearTimeout(timer));
     listingTimers = (groups || getListingEnds())
@@ -2285,6 +2312,26 @@ function priceWatchMain(SCRIPT_VERSION) {
     const salesLine = el("div", "pt-tl-line");
     const salesList = el("div", "pt-tl-sales");
     statusBlock.append(el("h3", "pt-tl-title", "📋 Transferlijst"), statusLine, salesLine, salesList);
+    // Test: fetch the list now, result to your phone via ntfy (only a pc with FUT Genie sends ntfy).
+    if (genie()) {
+      const testButton = el("button", "pt-watch-refresh", "🧪 Test: lijst nu ophalen + ntfy");
+      testButton.type = "button";
+      const testInfo = el("div", "pt-tl-line pt-muted");
+      statusBlock.append(testButton, testInfo);
+      testButton.addEventListener("click", async () => {
+        testButton.disabled = true;
+        testInfo.textContent = "Transferlijst bij EA ophalen…";
+        const result = await testTransferPoll();
+        testInfo.textContent = result.text;
+        try {
+          const sent = await relayCall("notify", { title: result.ok ? "Test transferlijst geslaagd" : "Test transferlijst mislukt", text: result.text });
+          testInfo.textContent += sent ? " · ntfy-melding verstuurd" : " · geen ntfy-topic ingesteld (Instellingen → meldingen)";
+        } catch (error) {
+          testInfo.textContent += ` · ntfy mislukt: ${error.message}`;
+        }
+        testButton.disabled = false;
+      });
+    }
 
     // Relist with a markup.
     const relistBlock = el("div", "pt-tl-block");

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.19.0
+// @version      2.19.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6134,6 +6134,106 @@ function priceWatchMain(SCRIPT_VERSION) {
       hooked.__ptWatchHooked = true;
       Panel.prototype[method] = hooked;
     });
+    const QuickList = window.UTQuickListPanelViewController;
+    if (QuickList && QuickList.prototype.renderView && !QuickList.prototype.renderView.__ptQuickList) {
+      const original = QuickList.prototype.renderView;
+      const hooked = function () {
+        const result = original.apply(this, arguments);
+        try {
+          addQuickListMarkup(this);
+        } catch (error) {
+          console.warn("Price Watch: opslag-knoppen bij listen mislukt.", error);
+        }
+        return result;
+      };
+      hooked.__ptQuickList = true;
+      QuickList.prototype.renderView = hooked;
+    }
+  }
+
+  // Phone (FUT Genie has its own buttons on the pc): BIN = what you paid + 10% / 15% / your own %,
+  // start price one step lower, and the profit after tax at the BIN in the field. You press List yourself.
+  function addQuickListMarkup(controller) {
+    if (genie()) return;
+    const view = controller && typeof controller.getView === "function" ? controller.getView() : null;
+    const actions = view && view.__panelActions;
+    const item = controller.item;
+    if (!actions || !item || typeof view.setBuyNowValue !== "function") return;
+    const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
+    let row = actions.querySelector(".pt-ql");
+    if (!bought) {
+      if (row) row.remove();
+      return;
+    }
+    const binNow = () => Number(view._buyNowNumericStepper && view._buyNowNumericStepper.getValue && view._buyNowNumericStepper.getValue()) || 0;
+    const showProfit = () => {
+      const bin = binNow();
+      const profit = row.querySelector(".pt-ql-profit");
+      profit.textContent = "";
+      if (!bin) return;
+      const net = netProfit(bin, row.__ptBought);
+      profit.append(`Bij BIN ${priceFormat.format(bin)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(net)} na tax`),
+        ` · break-even ${priceFormat.format(roundUpToStep(row.__ptBought / (1 - EA_TAX)))}`);
+    };
+    const apply = pct => {
+      const bin = Math.max(200, roundUpToStep(row.__ptBought * (1 + pct / 100)));
+      view.setBuyNowValue(bin);
+      let start = 0;
+      try {
+        start = window.UTCurrencyInputControl.getIncrementBelowVal(binNow() || bin);
+      } catch (_) {
+        // Our own price ladder below.
+      }
+      view.setBidValue(start > 0 ? start : Math.max(150, priceStepBelow(binNow() || bin)));
+      showProfit();
+    };
+    if (!row) {
+      row = el("div", "panelActionRow pt-ql");
+      const buttons = el("div", "pt-ql-buttons");
+      [10, 15].forEach(pct => {
+        const button = el("button", "btn-standard pt-ql-btn", `+${pct}%`);
+        button.type = "button";
+        button.addEventListener("click", event => {
+          event.preventDefault();
+          event.stopPropagation();
+          apply(pct);
+        });
+        buttons.appendChild(button);
+      });
+      const custom = el("input", "pt-target-input pt-ql-custom");
+      custom.inputMode = "decimal";
+      custom.placeholder = "%";
+      custom.value = String(relistSettings().pct);
+      const ok = el("button", "btn-standard pt-ql-btn", "+ eigen %");
+      ok.type = "button";
+      ok.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const pct = Number(String(custom.value).replace(",", "."));
+        if (!Number.isFinite(pct) || pct <= -50 || pct > 500) return;
+        writeJson(RELIST_KEY, { ...relistSettings(), pct });
+        apply(pct);
+      });
+      buttons.append(custom, ok);
+      row.append(el("div", "pt-ql-title pt-muted", "Opslag op je aankoopprijs"), buttons, el("div", "pt-ql-profit"));
+      const listButton = actions.querySelector("button.call-to-action");
+      if (listButton && listButton.parentNode === actions) actions.insertBefore(row, listButton);
+      else actions.appendChild(row);
+      // Typing or +/- in EA's BIN field: profit follows.
+      try {
+        const input = view._buyNowNumericStepper.getInput();
+        if (input && typeof input.addTarget === "function" && window.EventType && !input.__ptProfit) {
+          input.__ptProfit = true;
+          input.addTarget(input, () => { if (row.isConnected) showProfit(); }, window.EventType.CHANGE);
+        }
+      } catch (_) {
+        // Profit then follows our buttons only.
+      }
+      actions.addEventListener("input", event => { if (event.target !== custom && row.isConnected) showProfit(); });
+      actions.addEventListener("click", () => window.setTimeout(() => { if (row.isConnected) showProfit(); }, 50));
+    }
+    row.__ptBought = bought;
+    showProfit();
   }
 
   // ---------------------------------------------------------------------------
@@ -6322,6 +6422,12 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-pos { color: #5fd38d; }
 .pt-neg { color: #ff7b7b; }
 .pt-profit-info { font-size: 13px; padding: 6px 4px; text-align: center; }
+.pt-ql { display: block; padding: 6px 0; }
+.pt-ql-title { font-size: 13px; margin-bottom: 6px; }
+.pt-ql-buttons { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.pt-ql-btn { flex: 1 1 auto; min-width: 70px; margin: 0 !important; }
+.pt-ql-custom { width: 64px; }
+.pt-ql-profit { font-size: 14px; margin-top: 8px; }
 .pt-search-count { font-size: 12px; padding: 0 6px; white-space: nowrap; opacity: .85; }
 .pt-search-count.pt-search-hot { color: #ff7b7b; opacity: 1; font-weight: bold; }
 
@@ -6726,7 +6832,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // iPhone: the EA app swallows the click that should follow a tap, so our buttons never fire. Turn a real
   // tap (finger didn't move) on our own controls into a click ourselves, and cancel the native one.
   if ("ontouchstart" in window) {
-    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-picker";
+    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-picker, .pt-ql";
     function openSelectPicker(select) {
       document.querySelectorAll(".pt-picker").forEach(old => old.remove());
       const overlay = el("div", "pt-picker");

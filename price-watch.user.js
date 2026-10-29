@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.22.0
+// @version      2.23.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1796,8 +1796,26 @@ function priceWatchMain(SCRIPT_VERSION) {
   const LISTING_MIN_GAP_MS = 60 * 1000;
   let listingPollTimer = null;
   let dueGroups = [];
-  let ownTransferPoll = false;
+  let ownTransferPoll = ""; // why the script loads the list itself; "" = you (or EA) did
   let lastTransferLoad = 0;
+  const TL_LOG_KEY = "pt_tl_log_v1"; // last checks, shown in the Transfers tab
+  let lastActivity = 0;
+  ["pointerdown", "keydown", "wheel"].forEach(type => document.addEventListener(type, () => { lastActivity = Date.now(); }, { capture: true, passive: true }));
+
+  function logTransferCheck(entry) {
+    const log = readJson(TL_LOG_KEY, []);
+    const last = log[log.length - 1];
+    // The same result again (FUT Genie loads the list often): just move the time and count.
+    if (last && last.why === entry.why && last.text === entry.text) Object.assign(last, { at: Date.now(), n: (last.n || 1) + 1 });
+    else log.push({ at: Date.now(), ...entry });
+    writeJson(TL_LOG_KEY, log.slice(-15));
+    listeners.forEach(listener => listener());
+  }
+
+  // Someone at the pc right now: the tab is in front and was used in the last minute.
+  function watchingPc() {
+    return !document.hidden && document.hasFocus() && Date.now() - lastActivity < 60 * 1000;
+  }
 
   function getSeenTrades() {
     try {
@@ -1808,8 +1826,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
-  // quiet: you loaded the list yourself (you see it), or the first time ever: only remember.
-  function reportTransferChanges(items, quiet) {
+  // Every load of the list counts (yours, EA's, FUT Genie's): what's new since the last one is reported once.
+  // The first time ever only remembers. Returns what it found, for the log.
+  function reportTransferChanges(items) {
     const seen = getSeenTrades();
     const now = new Set();
     const sold = [];
@@ -1832,7 +1851,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (seen) recordTransferStatus(items, sold.map(sale => ({ n: sale.name, p: sale.price, b: sale.bought, at: Date.now() })));
     else recordTransferStatus(items, []);
     if ((sold.length || expired) && seen && genie()) window.setTimeout(() => pushRelay(true), 3000); // phone sees it soon
-    if (quiet || !seen || (!sold.length && !expired)) return;
+    if (!seen || (!sold.length && !expired)) return { sold: sold.length, expired, sent: !seen ? "eerste keer: alleen onthouden" : "" };
     const parts = [];
     if (sold.length) {
       const total = sold.reduce((sum, sale) => sum + sale.price, 0);
@@ -1842,40 +1861,44 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (expired) parts.push(`⏰ ${expired === 1 ? "1 kaart" : `${expired} kaarten`} niet verkocht – opnieuw listen (Price Watch → Transfers: met opslag op je aankoopprijs)`);
     if (chimeOn()) playChime();
     showToast(`Transferlijst: ${parts.join(" · ")}`, true);
-    // Looking at this tab: the toast is enough. Elsewhere: also on your phone.
-    if (document.hidden || !document.hasFocus()) {
-      const title = sold.length && expired ? "Verkocht + verlopen" : sold.length ? `${sold.length} verkocht` : "Transferlijst verlopen";
-      relayCall("notify", { title, text: parts.join("\n") }).catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
-    }
+    // Busy at the pc right now: the toast is enough. Otherwise also on your phone.
+    if (watchingPc()) return { sold: sold.length, expired, sent: "alleen in beeld (je zat achter de pc)" };
+    const title = sold.length && expired ? "Verkocht + verlopen" : sold.length ? `${sold.length} verkocht` : "Transferlijst verlopen";
+    relayCall("notify", { title, text: parts.join("\n") }).then(
+      sent => logTransferCheck({ why: "melding", text: sent ? "ntfy verstuurd" : "geen ntfy-topic ingesteld" }),
+      error => logTransferCheck({ why: "melding", text: `ntfy mislukt: ${error.message}` }));
+    return { sold: sold.length, expired, sent: "ntfy" };
   }
 
-  function scheduleListingPoll(delay) {
+  function scheduleListingPoll(delay, why) {
     window.clearTimeout(listingPollTimer);
     listingPollTimer = null;
     if (delay == null) {
       if (!getListingEnds().length) return; // nothing listed: nothing to watch
       delay = LISTING_POLL_MS;
+      why = "elke 5 min";
     }
-    listingPollTimer = window.setTimeout(() => pollTransferList(), delay);
+    listingPollTimer = window.setTimeout(() => pollTransferList(why), delay);
   }
 
   // One request covers the whole list, and never more than one a minute however many listings end.
   // Ended listings wait in dueGroups; when the list can't be loaded (logged out) you still hear them.
-  async function pollTransferList() {
+  async function pollTransferList(why) {
     const wait = lastTransferLoad + LISTING_MIN_GAP_MS - Date.now();
-    if (wait > 0) return scheduleListingPoll(dueGroups.length ? wait : null);
+    if (wait > 0) return scheduleListingPoll(dueGroups.length ? wait : null, why);
     const due = dueGroups;
     dueGroups = [];
     lastTransferLoad = Date.now();
-    ownTransferPoll = true;
+    ownTransferPoll = why || "controle";
     const items = await requestPile("requestTransferItems");
-    ownTransferPoll = false;
+    ownTransferPoll = "";
     if (!items) {
+      logTransferCheck({ why: why || "controle", text: "transferlijst ophalen mislukt (niet ingelogd?)" });
       if (due.length) listingAlert({ count: due.reduce((sum, group) => sum + group.count, 0) });
       return scheduleListingPoll();
     }
     // The wrapper in installListingWatch did the rest; a listing at 0 seconds: look again in a minute.
-    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(LISTING_MIN_GAP_MS + 2000);
+    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(LISTING_MIN_GAP_MS + 2000, "listing op 0 sec, nog eens");
     else scheduleListingPoll();
   }
 
@@ -1891,9 +1914,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       observer = null; // can't see requests: only the result counts
     }
     lastTransferLoad = Date.now();
-    ownTransferPoll = true;
+    ownTransferPoll = "test";
     const items = await requestPile("requestTransferItems");
-    ownTransferPoll = false;
+    ownTransferPoll = "";
     await new Promise(resolve => window.setTimeout(resolve, 800)); // resource entries come in a bit later
     if (observer) observer.disconnect();
     if (!items) return { ok: false, text: "Transferlijst ophalen mislukt (niet ingelogd in de web app?)." };
@@ -1917,7 +1940,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function listingDue(group) {
     saveListingEnds(getListingEnds().filter(item => item.end !== group.end));
     dueGroups.push(group);
-    scheduleListingPoll(0);
+    scheduleListingPoll(0, "listing afgelopen");
   }
 
   // Fallback when the transfer list can't be loaded: only the timer is known.
@@ -1961,8 +1984,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       const items = (response.response && response.response.items) || (response.data && response.data.items);
       if (!Array.isArray(items)) return;
       lastTransferLoad = Date.now();
+      const why = ownTransferPoll || "geladen door jou, de web app of FUT Genie";
       recordTransferList(items);
-      reportTransferChanges(items, !ownTransferPoll);
+      const found = reportTransferChanges(items);
+      const active = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "active"; }).length;
+      logTransferCheck({ why, text: `${active} actief · ${found.sold ? `${found.sold} nieuw verkocht` : "niets nieuw verkocht"} · ${found.expired ? `${found.expired} nieuw verlopen` : "niets nieuw verlopen"}${found.sent ? ` → ${found.sent}` : ""}` });
     });
     // Listing one card: (item, startingBid, buyNowPrice, duration in seconds).
     wrap("list", (response, args) => {
@@ -1980,7 +2006,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }, 1500));
     scheduleListingAlerts();
     // Sold while the page was closed, or listed from the game/app: look once shortly after loading.
-    scheduleListingPoll(20 * 1000);
+    scheduleListingPoll(20 * 1000, "na laden");
   }
 
   // --- Transfer list status and sales, for the Transfers tab (and via the gist on your phone) ------
@@ -2313,11 +2339,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     const salesList = el("div", "pt-tl-sales");
     statusBlock.append(el("h3", "pt-tl-title", "📋 Transferlijst"), statusLine, salesLine, salesList);
     // Test: fetch the list now, result to your phone via ntfy (only a pc with FUT Genie sends ntfy).
+    const checkLog = el("div", "pt-tl-sales");
     if (genie()) {
       const testButton = el("button", "pt-watch-refresh", "🧪 Test: lijst nu ophalen + ntfy");
       testButton.type = "button";
       const testInfo = el("div", "pt-tl-line pt-muted");
-      statusBlock.append(testButton, testInfo);
+      statusBlock.append(testButton, testInfo, el("div", "pt-tl-line", "Laatste controles (nieuwste bovenaan):"), checkLog);
       testButton.addEventListener("click", async () => {
         testButton.disabled = true;
         testInfo.textContent = "Transferlijst bij EA ophalen…";
@@ -2511,6 +2538,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       salesLine.textContent = sales.length
         ? `Verkocht in 24 uur: ${sales.length} · ${priceFormat.format(income)} na tax` + (known.length ? ` · winst ${signedCoins(profit)}${known.length < sales.length ? ` (van ${known.length} met aankoopprijs)` : ""}` : "")
         : "Verkocht in 24 uur: nog niets gezien.";
+      checkLog.textContent = "";
+      readJson(TL_LOG_KEY, []).slice().reverse().forEach(entry => {
+        checkLog.appendChild(el("div", "pt-tl-sale pt-muted", `${formatDayTime(entry.at)}${entry.n > 1 ? ` (${entry.n}×)` : ""} · ${entry.why}: ${entry.text}`));
+      });
       salesList.textContent = "";
       sales.slice(0, 10).forEach(sale => {
         const line = el("div", "pt-tl-sale", `${formatTime(sale.at)} ${sale.n} ${priceFormat.format(sale.p)}`);

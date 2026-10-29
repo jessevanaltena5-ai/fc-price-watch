@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.17.0
+// @version      2.18.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1762,27 +1762,117 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // The transfer list as the web app loaded it: active listings and when they end (replaces what we had).
+  // Returns how many listings are at 0 seconds but not yet sold/expired on EA's side.
   function recordTransferList(items) {
     const now = Date.now();
+    let ending = 0;
     const ends = items.map(item => {
       const auction = auctionOf(item);
       if (!auction) return null;
       const active = typeof auction.isActiveTrade === "function" ? auction.isActiveTrade() : auction.tradeState === "active";
       const seconds = Number(auction.expires);
+      if (active && !(seconds > 0)) ending++;
       return active && seconds > 0 ? now + seconds * 1000 : null;
     }).filter(Boolean);
     saveListingEnds(groupEnds(ends));
+    return ending;
+  }
+
+  // --- Sold / expired: the script looks at your transfer list itself --------------------------------
+  // Every 5 minutes while you have listings, and right after a listing ends. Only the transfer list
+  // (what opening it in the web app does), never the market. Each sale/expiry is reported once.
+  const LISTING_SEEN_KEY = "pt_listing_seen_v1"; // ["tradeId:closed" | "tradeId:expired"]
+  const LISTING_POLL_MS = 5 * 60 * 1000;
+  let listingPollTimer = null;
+  let ownTransferPoll = false;
+  let lastTransferLoad = 0;
+
+  function getSeenTrades() {
+    try {
+      const value = JSON.parse(localStorage.getItem(LISTING_SEEN_KEY));
+      return Array.isArray(value) ? new Set(value) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // quiet: you loaded the list yourself (you see it), or the first time ever: only remember.
+  function reportTransferChanges(items, quiet) {
+    const seen = getSeenTrades();
+    const now = new Set();
+    const sold = [];
+    let expired = 0;
+    items.forEach(item => {
+      const auction = auctionOf(item);
+      if (!auction || !auction.tradeId || (auction.tradeState !== "closed" && auction.tradeState !== "expired")) return;
+      const key = `${auction.tradeId}:${auction.tradeState}`;
+      now.add(key);
+      if (seen && seen.has(key)) return;
+      if (auction.tradeState === "expired") expired++;
+      else sold.push({ name: playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item"), price: auction.currentBid || auction.buyNowPrice || 0 });
+    });
+    try {
+      localStorage.setItem(LISTING_SEEN_KEY, JSON.stringify([...now])); // only what's still in the list
+    } catch (_) {
+      // Reported again next time.
+    }
+    if (quiet || !seen || (!sold.length && !expired)) return;
+    const parts = [];
+    if (sold.length) {
+      const total = sold.reduce((sum, sale) => sum + sale.price, 0);
+      parts.push(`💰 ${sold.length} verkocht: ${sold.slice(0, 5).map(sale => `${sale.name} ${priceFormat.format(sale.price)}`).join(", ")}${sold.length > 5 ? ", …" : ""}` +
+        ` (+${priceFormat.format(Math.floor(total * 0.95))} na tax)`);
+    }
+    if (expired) parts.push(`⏰ ${expired === 1 ? "1 kaart" : `${expired} kaarten`} niet verkocht – opnieuw listen`);
+    if (chimeOn()) playChime();
+    showToast(`Transferlijst: ${parts.join(" · ")}`, true);
+    // Looking at this tab: the toast is enough. Elsewhere: also on your phone.
+    if (document.hidden || !document.hasFocus()) {
+      const title = sold.length && expired ? "Verkocht + verlopen" : sold.length ? `${sold.length} verkocht` : "Transferlijst verlopen";
+      relayCall("notify", { title, text: parts.join("\n") }).catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+    }
+  }
+
+  function scheduleListingPoll(delay) {
+    window.clearTimeout(listingPollTimer);
+    listingPollTimer = null;
+    if (delay == null) {
+      if (!getListingEnds().length) return; // nothing listed: nothing to watch
+      delay = LISTING_POLL_MS;
+    }
+    listingPollTimer = window.setTimeout(() => pollTransferList(), delay);
+  }
+
+  // group: a listing that just ended; when the list can't be loaded (logged out) you still hear it.
+  async function pollTransferList(group) {
+    if (!group && Date.now() - lastTransferLoad < 60 * 1000) return scheduleListingPoll(); // just loaded anyway
+    ownTransferPoll = true;
+    const items = await requestPile("requestTransferItems");
+    ownTransferPoll = false;
+    if (!items) {
+      if (group) listingAlert(group);
+      return scheduleListingPoll();
+    }
+    // The wrapper in installListingWatch did the rest; a listing at 0 seconds: look again shortly.
+    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(30 * 1000);
+    else scheduleListingPoll();
   }
 
   function scheduleListingAlerts(groups) {
     listingTimers.forEach(timer => window.clearTimeout(timer));
     listingTimers = (groups || getListingEnds())
       .filter(group => group.end > Date.now() - 10 * 60 * 1000) // missed by up to 10 min (page was closed): still say it
-      .map(group => window.setTimeout(() => listingAlert(group), Math.max(0, group.end - Date.now() + 5000)));
+      .map(group => window.setTimeout(() => listingDue(group), Math.max(0, group.end - Date.now() + 15000)));
+    if (!listingPollTimer) scheduleListingPoll();
   }
 
-  function listingAlert(group) {
+  function listingDue(group) {
     saveListingEnds(getListingEnds().filter(item => item.end !== group.end));
+    pollTransferList(group);
+  }
+
+  // Fallback when the transfer list can't be loaded: only the timer is known.
+  function listingAlert(group) {
     const what = group.count === 1 ? "1 kaart" : `${group.count} kaarten`;
     if (chimeOn()) playChime();
     showToast(`⏰ Transferlijst: listing van ${what} is afgelopen – wat niet verkocht is kun je opnieuw listen.`, true);
@@ -1820,7 +1910,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     };
     wrap("requestTransferItems", response => {
       const items = (response.response && response.response.items) || (response.data && response.data.items);
-      if (Array.isArray(items)) recordTransferList(items);
+      if (!Array.isArray(items)) return;
+      lastTransferLoad = Date.now();
+      recordTransferList(items);
+      reportTransferChanges(items, !ownTransferPoll);
     });
     // Listing one card: (item, startingBid, buyNowPrice, duration in seconds).
     wrap("list", (response, args) => {
@@ -1836,6 +1929,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       }
     }, 1500));
     scheduleListingAlerts();
+    // Sold while the page was closed, or listed from the game/app: look once shortly after loading.
+    scheduleListingPoll(20 * 1000);
   }
 
   let marketWatchInstalled = false;

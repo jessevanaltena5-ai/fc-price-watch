@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.18.1
+// @version      2.19.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -453,7 +453,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     relayBusy = true;
     try {
       await fetchGeniePrices(getWatch().map(entry => entry.definitionId));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0 };
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay() };
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
     } catch (error) {
@@ -538,6 +538,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       } catch (_) {
         // Kept in memory for this session.
       }
+      if (data.s && typeof data.s === "object") listPatch.pcTransfer = data.s;
       saveRelay({ receivedAt: Date.now(), pricesAt: data.t, ...listPatch, error: "" });
     } catch (error) {
       saveRelay({ receivedAt: Date.now(), error: error.message });
@@ -1548,15 +1549,18 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     const renderStock = buildStockSection(root);
     const renderFodder = buildFodderSection(root);
+    const renderTransfers = buildTransferSection(root);
     buildTabs(root, {
       watch: card,
       fodder: root.querySelector(".pt-fodder-card"),
-      lists: root.querySelector(".pt-stock-card")
+      lists: root.querySelector(".pt-stock-card"),
+      transfers: root.querySelector(".pt-transfer-card")
     });
     return () => {
       renderRows();
       renderStock();
       renderFodder();
+      renderTransfers();
     };
   }
 
@@ -1811,13 +1815,17 @@ function priceWatchMain(SCRIPT_VERSION) {
       now.add(key);
       if (seen && seen.has(key)) return;
       if (auction.tradeState === "expired") expired++;
-      else sold.push({ name: playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item"), price: auction.currentBid || auction.buyNowPrice || 0 });
+      else sold.push({ name: playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item"), price: auction.currentBid || auction.buyNowPrice || 0, bought: item.lastSalePrice > 0 ? item.lastSalePrice : 0 });
     });
     try {
       localStorage.setItem(LISTING_SEEN_KEY, JSON.stringify([...now])); // only what's still in the list
     } catch (_) {
       // Reported again next time.
     }
+    // Sales go into the log even when you looked yourself (not the first time: unknown when they sold).
+    if (seen) recordTransferStatus(items, sold.map(sale => ({ n: sale.name, p: sale.price, b: sale.bought, at: Date.now() })));
+    else recordTransferStatus(items, []);
+    if ((sold.length || expired) && seen && genie()) window.setTimeout(() => pushRelay(true), 3000); // phone sees it soon
     if (quiet || !seen || (!sold.length && !expired)) return;
     const parts = [];
     if (sold.length) {
@@ -1825,7 +1833,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       parts.push(`💰 ${sold.length} verkocht: ${sold.slice(0, 5).map(sale => `${sale.name} ${priceFormat.format(sale.price)}`).join(", ")}${sold.length > 5 ? ", …" : ""}` +
         ` (+${priceFormat.format(Math.floor(total * 0.95))} na tax)`);
     }
-    if (expired) parts.push(`⏰ ${expired === 1 ? "1 kaart" : `${expired} kaarten`} niet verkocht – opnieuw listen`);
+    if (expired) parts.push(`⏰ ${expired === 1 ? "1 kaart" : `${expired} kaarten`} niet verkocht – opnieuw listen (Price Watch → Transfers: met opslag op je aankoopprijs)`);
     if (chimeOn()) playChime();
     showToast(`Transferlijst: ${parts.join(" · ")}`, true);
     // Looking at this tab: the toast is enough. Elsewhere: also on your phone.
@@ -1941,6 +1949,493 @@ function priceWatchMain(SCRIPT_VERSION) {
     scheduleListingPoll(20 * 1000);
   }
 
+  // --- Transfer list status and sales, for the Transfers tab (and via the gist on your phone) ------
+  const TL_STATUS_KEY = "pt_tl_status_v1"; // { at, active, next, expired, sold }
+  const SALES_KEY = "pt_sales_v1"; // [{ n, p, b, at }], last 7 days
+  const SALES_KEEP_MS = 7 * 24 * 3600 * 1000;
+
+  function readJson(key, fallback) {
+    try {
+      const value = JSON.parse(localStorage.getItem(key));
+      return value == null ? fallback : value;
+    } catch {
+      return fallback;
+    }
+  }
+
+  function writeJson(key, value) {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch (_) {
+      // Only for this session.
+    }
+  }
+
+  function recordTransferStatus(items, newSales) {
+    const count = state => items.filter(item => { const a = auctionOf(item); return a && a.tradeState === state; }).length;
+    const ends = getListingEnds();
+    writeJson(TL_STATUS_KEY, { at: Date.now(), active: count("active"), next: ends.length ? ends[0].end : 0, expired: count("expired"), sold: count("closed") });
+    if (newSales.length) {
+      const since = Date.now() - SALES_KEEP_MS;
+      writeJson(SALES_KEY, readJson(SALES_KEY, []).filter(sale => sale.at > since).concat(newSales).slice(-300));
+    }
+    listeners.forEach(listener => listener());
+  }
+
+  // What the pc puts in the gist: status + the sales of the last 24 hours.
+  function transferStatusForRelay() {
+    const since = Date.now() - 24 * 3600 * 1000;
+    return { ...readJson(TL_STATUS_KEY, {}), sales: readJson(SALES_KEY, []).filter(sale => sale.at > since).slice(-40) };
+  }
+
+  // Newest of this device's own view and the pc's (via the gist).
+  function transferStatusNow() {
+    const own = { ...readJson(TL_STATUS_KEY, {}), sales: readJson(SALES_KEY, []), own: true };
+    const pc = getRelay().pcTransfer;
+    return pc && (pc.at || 0) > (own.at || 0) ? { ...pc, own: false } : own;
+  }
+
+  // Profit after the 5% tax when selling at `price` a card bought for `bought`.
+  function netProfit(price, bought) {
+    return Math.floor(price * (1 - EA_TAX)) - bought;
+  }
+
+  function signedCoins(value) {
+    return `${value >= 0 ? "+" : "−"}${priceFormat.format(Math.abs(value))}`;
+  }
+
+  // --- Search counter: your own transfer market searches on this device, against a soft ban ---------
+  // EA doesn't publish a limit; a few hundred searches an hour is where people start getting blocked.
+  const SEARCH_LOG_KEY = "pt_search_log_v1"; // timestamps, last 24 h
+  const SEARCH_LIMIT_KEY = "pt_search_limit_v1";
+  const SEARCH_LIMIT_DEFAULT = 300; // per hour
+  let searchLog = null;
+
+  function getSearchLog() {
+    if (!searchLog) {
+      searchLog = readJson(SEARCH_LOG_KEY, []);
+      if (!Array.isArray(searchLog)) searchLog = [];
+    }
+    const since = Date.now() - 24 * 3600 * 1000;
+    while (searchLog.length && searchLog[0] < since) searchLog.shift();
+    return searchLog;
+  }
+
+  function searchLimit() {
+    const value = Number(readJson(SEARCH_LIMIT_KEY, SEARCH_LIMIT_DEFAULT));
+    return value >= 10 ? value : SEARCH_LIMIT_DEFAULT;
+  }
+
+  function searchCounts() {
+    const log = getSearchLog();
+    const now = Date.now();
+    return { hour: log.filter(time => time > now - 3600 * 1000).length, tenMinutes: log.filter(time => time > now - 600 * 1000).length, day: log.length };
+  }
+
+  function logSearch() {
+    getSearchLog().push(Date.now());
+    writeJson(SEARCH_LOG_KEY, getSearchLog());
+    const { hour } = searchCounts();
+    const limit = searchLimit();
+    if (hour === Math.round(limit * 0.8)) {
+      showToast(`🔎 ${hour} zoekopdrachten het afgelopen uur – rustig aan, rond ${limit} per uur kan EA de markt tijdelijk blokkeren.`, false);
+    } else if (hour === limit || (hour > limit && hour % 25 === 0)) {
+      if (chimeOn()) playChime();
+      showToast(`🛑 ${hour} zoekopdrachten in een uur (grens ${limit}). Neem 15–30 minuten pauze van de transfermarkt.`, false);
+    }
+    updateSearchBadges();
+  }
+
+  function updateSearchBadges() {
+    const counts = searchCounts();
+    const limit = searchLimit();
+    document.querySelectorAll(".pt-search-count").forEach(node => {
+      node.textContent = `🔎 ${counts.hour}/u`;
+      node.title = `Jouw zoekopdrachten op dit apparaat: ${counts.tenMinutes} in 10 min, ${counts.hour} in het afgelopen uur, ${counts.day} in 24 uur (waarschuwing bij ${limit} per uur)`;
+      node.classList.toggle("pt-search-hot", counts.hour >= limit * 0.8);
+    });
+  }
+
+  // --- Relist with a markup on what you paid: expired cards → BIN = bought price + x% -------------
+  // Only when you press the button; one card at a time with a pause, like listing them yourself.
+  const RELIST_KEY = "pt_relist_v1"; // { pct, duration }
+  const RELIST_DURATIONS = [[3600, "1 uur"], [10800, "3 uur"], [21600, "6 uur"], [43200, "12 uur"], [86400, "1 dag"], [259200, "3 dagen"]];
+  const RELIST_PAUSE_MS = 1500;
+
+  function relistSettings() {
+    return Object.assign({ pct: 10, duration: 3600 }, readJson(RELIST_KEY, {}));
+  }
+
+  function relistPlan(items, pct) {
+    return items.map(item => {
+      const name = playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item");
+      const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
+      const genieNow = (geniePrice(item.definitionId) || {}).price || 0;
+      if (!bought) return { item, name, genie: genieNow, skip: true };
+      const bin = Math.max(200, roundUpToStep(bought * (1 + pct / 100)));
+      return { item, name, bought, bin, start: Math.max(150, priceStepBelow(bin)), net: netProfit(bin, bought), genie: genieNow };
+    });
+  }
+
+  function listItem(item, start, bin, duration) {
+    return new Promise(resolve => {
+      const owner = {};
+      const timer = window.setTimeout(() => resolve(false), 15000);
+      try {
+        services.Item.list(item, start, bin, duration).observe(owner, (observable, response) => {
+          observable.unobserve(owner);
+          window.clearTimeout(timer);
+          resolve(!!(response && response.success));
+        });
+      } catch (error) {
+        window.clearTimeout(timer);
+        resolve(false);
+      }
+    });
+  }
+
+  // --- Club price rises (pc, FUT Genie): a push when a tradeable card in your club went up x% ------
+  // Compared with what you paid, or (packed cards) the price when the script first saw it. The club is
+  // read like the Club screen does, every 12 hours; prices come from FUT Genie every 15 minutes.
+  const CLUB_RISE_KEY = "pt_club_rise_v1"; // { on, pct, min, scannedAt, checkedAt, cards: [{ i, d, n, r, b, base, now, alerted }] }
+  const CLUB_RISE_SCAN_MS = 12 * 3600 * 1000;
+  const CLUB_RISE_CHECK_MS = 15 * 60 * 1000;
+  let clubRiseBusy = "";
+
+  function getClubRise() {
+    return Object.assign({ on: false, pct: 20, min: 10000, scannedAt: 0, checkedAt: 0, cards: [] }, readJson(CLUB_RISE_KEY, {}));
+  }
+
+  function saveClubRise(patch) {
+    writeJson(CLUB_RISE_KEY, Object.assign(getClubRise(), patch));
+    listeners.forEach(listener => listener());
+  }
+
+  async function scanClubRise() {
+    if (!genie() || clubRiseBusy || typeof services === "undefined" || !services.Club) return;
+    clubRiseBusy = "club lezen…";
+    listeners.forEach(listener => listener());
+    try {
+      const items = await clubItems(() => {});
+      const old = new Map(getClubRise().cards.map(card => [card.i, card]));
+      const cards = items.filter(item => item && item.isPlayer && item.isPlayer() && !item.concept &&
+          !(item.isTradeable && !item.isTradeable()) && !(item.isLimitedUse && item.isLimitedUse()))
+        .map(item => {
+          const before = old.get(item.id) || {};
+          return { i: item.id, d: item.definitionId, n: playerNameFor(item.definitionId, item.displayName), r: item.rating,
+            b: item.lastSalePrice > 0 ? item.lastSalePrice : 0, base: before.base || 0, now: before.now || 0, alerted: before.alerted || 0 };
+        });
+      saveClubRise({ cards, scannedAt: Date.now() });
+    } catch (error) {
+      saveClubRise({ scannedAt: Date.now() - CLUB_RISE_SCAN_MS + 30 * 60 * 1000 }); // try again in half an hour
+      console.warn("Price Watch: club lezen voor prijsstijgingen mislukt.", error);
+    } finally {
+      clubRiseBusy = "";
+    }
+    await checkClubRise(true);
+  }
+
+  async function checkClubRise(force) {
+    const state = getClubRise();
+    if (!genie() || !state.on || clubRiseBusy || !state.cards.length) return;
+    if (!force && Date.now() - state.checkedAt < CLUB_RISE_CHECK_MS) return;
+    clubRiseBusy = "prijzen…";
+    listeners.forEach(listener => listener());
+    try {
+      const ids = [...new Set(state.cards.map(card => card.d))];
+      for (let i = 0; i < ids.length; i += 150) await fetchGeniePrices(ids.slice(i, i + 150));
+      const risen = [];
+      state.cards.forEach(card => {
+        const price = (geniePrice(card.d) || {}).price;
+        if (!price) return;
+        card.now = price;
+        if (!card.base) card.base = card.b || price;
+        if (card.alerted && price < card.base * (1 + state.pct / 200)) card.alerted = 0; // fell back: start over
+        if (price < state.min) return;
+        if (price >= Math.max(card.base, card.alerted) * (1 + state.pct / 100)) {
+          risen.push(card);
+          card.alerted = price;
+        }
+      });
+      saveClubRise({ cards: state.cards, checkedAt: Date.now() });
+      if (risen.length) {
+        const lines = risen.sort((a, b) => b.now / b.base - a.now / a.base).slice(0, 6).map(card =>
+          `${card.n} (${card.r}): ${priceFormat.format(card.base)} → ${priceFormat.format(card.now)} (+${Math.round((card.now / card.base - 1) * 100)}%)` +
+          (card.b ? ` · verkopen = ${signedCoins(netProfit(card.now, card.b))} na tax` : ""));
+        if (chimeOn()) playChime();
+        showToast(`📈 Gestegen in je club: ${lines.join(" · ")}`, true);
+        relayCall("notify", { title: risen.length === 1 ? `${risen[0].n} gestegen` : `${risen.length} clubkaarten gestegen`, text: lines.join("\n") })
+          .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+      }
+    } finally {
+      clubRiseBusy = "";
+      listeners.forEach(listener => listener());
+    }
+  }
+
+  let clubRiseStarted = false;
+  function startClubRise() {
+    if (clubRiseStarted || !genie()) return;
+    clubRiseStarted = true;
+    const step = () => {
+      const state = getClubRise();
+      if (!state.on) return;
+      if (Date.now() - state.scannedAt > CLUB_RISE_SCAN_MS) scanClubRise();
+      else checkClubRise(false);
+    };
+    window.setTimeout(step, 60 * 1000);
+    window.setInterval(step, 60 * 1000);
+  }
+
+  // --- Transfers tab ----------------------------------------------------------------------------------
+  function buildTransferSection(root) {
+    const card = el("div", "pt-watch-card pt-transfer-card");
+    root.appendChild(card);
+    const heading = el("div", "pt-watch-heading");
+    heading.append(el("h2", "pt-watch-title", "Transfers"));
+    card.appendChild(heading);
+
+    // Status of the transfer list + recent sales.
+    const statusBlock = el("div", "pt-tl-block");
+    const statusLine = el("div", "pt-tl-line");
+    const salesLine = el("div", "pt-tl-line");
+    const salesList = el("div", "pt-tl-sales");
+    statusBlock.append(el("h3", "pt-tl-title", "📋 Transferlijst"), statusLine, salesLine, salesList);
+
+    // Relist with a markup.
+    const relistBlock = el("div", "pt-tl-block");
+    const settings = relistSettings();
+    const pctRow = el("div", "pt-stock-list-buttons");
+    const pctButtons = [10, 15].map(pct => {
+      const button = el("button", "pt-watch-refresh pt-pct-btn", `+${pct}%`);
+      button.type = "button";
+      button.__pct = pct;
+      return button;
+    });
+    const customLabel = el("label", "pt-goal");
+    const custom = el("input", "pt-target-input");
+    custom.inputMode = "numeric";
+    custom.placeholder = "eigen";
+    customLabel.append(el("span", "pt-muted", "of"), custom, el("span", "pt-muted", "%"));
+    const durationLabel = el("label", "pt-goal");
+    const duration = el("select", "pt-stock-select");
+    RELIST_DURATIONS.forEach(([seconds, label]) => duration.appendChild(new Option(label, String(seconds))));
+    duration.value = String(settings.duration);
+    durationLabel.append(el("span", "pt-muted", "Duur"), duration);
+    const load = el("button", "pt-watch-refresh", "↻ Verlopen kaarten laden");
+    const go = el("button", "btn-standard call-to-action pt-relist-go", "▶ Listen");
+    [load, go].forEach(button => { button.type = "button"; });
+    pctRow.append(...pctButtons, customLabel, durationLabel, load);
+    const relistInfo = el("div", "pt-tl-line pt-muted", "Kies een opslag: de kaarten die niet verkocht zijn gaan opnieuw op de lijst met BIN = aankoopprijs + dat percentage.");
+    const relistTable = el("div", "pt-tl-sales pt-relist-table");
+    relistBlock.append(el("h3", "pt-tl-title", "🔁 Opnieuw listen met opslag op je aankoopprijs"), pctRow, relistInfo, relistTable, go);
+
+    let expired = null;
+    let plan = [];
+    let relistBusy = false;
+    const pctNow = () => {
+      const typed = Number(String(custom.value).replace(",", "."));
+      return custom.value && Number.isFinite(typed) && typed > -50 && typed <= 500 ? typed : relistSettings().pct;
+    };
+    const showPlan = () => {
+      const pct = pctNow();
+      pctButtons.forEach(button => button.classList.toggle("pt-tab-active", !custom.value && button.__pct === pct));
+      relistTable.textContent = "";
+      if (!expired) {
+        go.style.display = "none";
+        return;
+      }
+      plan = relistPlan(expired, pct);
+      const ready = plan.filter(row => !row.skip);
+      plan.forEach(row => {
+        const line = el("div", "pt-tl-sale");
+        if (row.skip) {
+          line.textContent = `${row.name}: geen aankoopprijs bekend (bijv. uit een pack) – overgeslagen`;
+          line.classList.add("pt-muted");
+        } else {
+          line.append(`${row.name}: gekocht ${priceFormat.format(row.bought)} → BIN ${priceFormat.format(row.bin)} `,
+            el("span", row.net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(row.net)} na tax`),
+            row.genie ? el("span", row.genie < row.bin ? "pt-neg" : "pt-muted", ` · Genie ${priceFormat.format(row.genie)}${row.genie < row.bin ? " (lager dan je BIN)" : ""}`) : "");
+        }
+        relistTable.appendChild(line);
+      });
+      const total = ready.reduce((sum, row) => sum + row.net, 0);
+      relistInfo.textContent = expired.length
+        ? `${expired.length} verlopen · ${ready.length} met aankoopprijs · opslag ${pct}% · samen ${signedCoins(total)} winst na tax als alles verkoopt`
+        : "Geen verlopen kaarten op je transferlijst.";
+      go.textContent = `▶ ${ready.length} kaart(en) listen voor ${RELIST_DURATIONS.find(([seconds]) => seconds === Number(duration.value))[1]}`;
+      go.style.display = ready.length ? "" : "none";
+      go.disabled = relistBusy;
+    };
+    const loadExpired = async () => {
+      load.disabled = true;
+      relistInfo.textContent = "Transferlijst laden…";
+      const items = await requestPile("requestTransferItems");
+      load.disabled = false;
+      if (!items) {
+        relistInfo.textContent = "Transferlijst laden mislukt (niet ingelogd in de web app?).";
+        return;
+      }
+      expired = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "expired"; });
+      await fetchGeniePrices(expired.map(item => item.definitionId));
+      showPlan();
+    };
+    pctButtons.forEach(button => button.addEventListener("click", () => {
+      custom.value = "";
+      writeJson(RELIST_KEY, { ...relistSettings(), pct: button.__pct });
+      if (expired) showPlan();
+      else loadExpired();
+    }));
+    custom.addEventListener("input", () => {
+      if (custom.value && Number.isFinite(pctNow())) writeJson(RELIST_KEY, { ...relistSettings(), pct: pctNow() });
+      if (expired) showPlan();
+    });
+    custom.addEventListener("change", () => { if (!expired) loadExpired(); });
+    duration.addEventListener("change", () => {
+      writeJson(RELIST_KEY, { ...relistSettings(), duration: Number(duration.value) });
+      showPlan();
+    });
+    load.addEventListener("click", loadExpired);
+    go.addEventListener("click", async () => {
+      const rows = plan.filter(row => !row.skip);
+      if (!rows.length || relistBusy) return;
+      relistBusy = true;
+      go.disabled = true;
+      let listed = 0;
+      let failed = 0;
+      for (let i = 0; i < rows.length; i++) {
+        if (i) await new Promise(resolve => window.setTimeout(resolve, RELIST_PAUSE_MS));
+        relistInfo.textContent = `Listen ${i + 1}/${rows.length}: ${rows[i].name} voor ${priceFormat.format(rows[i].bin)}…`;
+        if (await listItem(rows[i].item, rows[i].start, rows[i].bin, Number(duration.value))) listed++;
+        else failed++;
+      }
+      relistBusy = false;
+      showToast(`🔁 ${listed} kaart(en) opnieuw gelist` + (failed ? `, ${failed} mislukt (bijv. buiten EA's prijsgrenzen voor die kaart)` : "") + ".", !failed);
+      await loadExpired();
+    });
+
+    // Search counter.
+    const searchBlock = el("div", "pt-tl-block");
+    const searchLine = el("div", "pt-tl-line");
+    const limitLabel = el("label", "pt-goal");
+    const limitInput = el("input", "pt-target-input");
+    limitInput.inputMode = "numeric";
+    limitInput.value = String(searchLimit());
+    limitInput.addEventListener("change", () => {
+      const value = parsePrice(limitInput.value);
+      writeJson(SEARCH_LIMIT_KEY, value && value >= 10 ? value : SEARCH_LIMIT_DEFAULT);
+      limitInput.value = String(searchLimit());
+      render();
+    });
+    limitLabel.append(el("span", "pt-muted", "Waarschuwen bij"), limitInput, el("span", "pt-muted", "per uur"));
+    searchBlock.append(el("h3", "pt-tl-title", "🔎 Zoekteller (tegen een softban)"), searchLine, limitLabel,
+      el("div", "pt-tl-line pt-muted", "Telt de transfermarkt-zoekopdrachten op dit apparaat (de pc en je telefoon tellen elk apart; EA telt ze samen). Op 80% en op de grens krijg je een waarschuwing."));
+
+    // Club price rises.
+    const riseBlock = el("div", "pt-tl-block");
+    const riseRow = el("div", "pt-stock-list-buttons");
+    const riseOnLabel = el("label", "pt-goal");
+    const riseOn = el("input");
+    riseOn.type = "checkbox";
+    riseOnLabel.append(riseOn, el("span", "", "Melden"));
+    const risePctLabel = el("label", "pt-goal");
+    const risePct = el("input", "pt-target-input");
+    const riseMinLabel = el("label", "pt-goal");
+    const riseMin = el("input", "pt-target-input");
+    [risePct, riseMin].forEach(input => { input.inputMode = "numeric"; });
+    risePctLabel.append(el("span", "pt-muted", "bij"), risePct, el("span", "pt-muted", "% stijging"));
+    riseMinLabel.append(el("span", "pt-muted", "kaarten vanaf"), riseMin);
+    const riseScan = el("button", "pt-watch-refresh", "↻ Club nu lezen");
+    riseScan.type = "button";
+    riseRow.append(riseOnLabel, risePctLabel, riseMinLabel, riseScan);
+    const riseLine = el("div", "pt-tl-line");
+    const riseList = el("div", "pt-tl-sales");
+    riseBlock.append(el("h3", "pt-tl-title", "📈 Prijsstijging van je clubkaarten"), riseRow, riseLine, riseList);
+    const riseState = getClubRise();
+    riseOn.checked = riseState.on;
+    risePct.value = String(riseState.pct);
+    riseMin.value = priceFormat.format(riseState.min);
+    riseOn.addEventListener("change", () => {
+      saveClubRise({ on: riseOn.checked });
+      if (riseOn.checked && !getClubRise().cards.length) scanClubRise();
+    });
+    risePct.addEventListener("change", () => saveClubRise({ pct: Math.max(5, parsePrice(risePct.value) || 20) }));
+    riseMin.addEventListener("change", () => saveClubRise({ min: parsePrice(riseMin.value) || 0 }));
+    riseScan.addEventListener("click", () => scanClubRise());
+
+    card.append(statusBlock, relistBlock, searchBlock, riseBlock);
+
+    function render() {
+      const status = transferStatusNow();
+      const where = status.own ? "" : " (via je pc)";
+      statusLine.textContent = status.at
+        ? `${status.active || 0} gelist` + (status.next > Date.now() ? ` · volgende loopt af om ${formatTime(status.next)}` : "") +
+          ` · ${status.expired || 0} verlopen · ${status.sold || 0} verkocht (nog niet opgeruimd) · bijgewerkt ${formatDayTime(status.at)}${where}`
+        : "Nog niet bekend: open één keer je transferlijst in de web app.";
+      const since = Date.now() - 24 * 3600 * 1000;
+      const sales = (status.sales || []).filter(sale => sale.at > since).reverse();
+      const income = sales.reduce((sum, sale) => sum + Math.floor(sale.p * (1 - EA_TAX)), 0);
+      const known = sales.filter(sale => sale.b > 0);
+      const profit = known.reduce((sum, sale) => sum + netProfit(sale.p, sale.b), 0);
+      salesLine.textContent = sales.length
+        ? `Verkocht in 24 uur: ${sales.length} · ${priceFormat.format(income)} na tax` + (known.length ? ` · winst ${signedCoins(profit)}${known.length < sales.length ? ` (van ${known.length} met aankoopprijs)` : ""}` : "")
+        : "Verkocht in 24 uur: nog niets gezien.";
+      salesList.textContent = "";
+      sales.slice(0, 10).forEach(sale => {
+        const line = el("div", "pt-tl-sale", `${formatTime(sale.at)} ${sale.n} ${priceFormat.format(sale.p)}`);
+        if (sale.b > 0) {
+          const net = netProfit(sale.p, sale.b);
+          line.append(` (gekocht ${priceFormat.format(sale.b)} → `, el("span", net >= 0 ? "pt-pos" : "pt-neg", signedCoins(net)), ")");
+        }
+        salesList.appendChild(line);
+      });
+
+      const counts = searchCounts();
+      searchLine.textContent = `${counts.tenMinutes} in 10 min · ${counts.hour} in het afgelopen uur · ${counts.day} in 24 uur`;
+      searchLine.classList.toggle("pt-neg", counts.hour >= searchLimit() * 0.8);
+
+      const rise = getClubRise();
+      riseBlock.style.display = genie() ? "" : "none";
+      riseScan.disabled = !!clubRiseBusy;
+      riseLine.textContent = !rise.on
+        ? "Uit. Zet aan om een melding (ook op je telefoon) te krijgen als een verhandelbare kaart in je club flink stijgt t.o.v. je aankoopprijs."
+        : (clubRiseBusy ? `Bezig: ${clubRiseBusy} · ` : "") + (rise.cards.length
+          ? `${rise.cards.length} kaarten gevolgd · club gelezen ${formatDayTime(rise.scannedAt)}` + (rise.checkedAt ? ` · prijzen ${formatTime(rise.checkedAt)}` : "")
+          : "Club nog niet gelezen.");
+      riseList.textContent = "";
+      if (rise.on) {
+        rise.cards.filter(c => c.now && c.base && c.now >= rise.min).sort((a, b) => b.now / b.base - a.now / a.base).slice(0, 5).forEach(c => {
+          const change = Math.round((c.now / c.base - 1) * 100);
+          const line = el("div", "pt-tl-sale", `${c.n} (${c.r}): ${c.b ? "gekocht" : "was"} ${priceFormat.format(c.base)} → ${priceFormat.format(c.now)} `);
+          line.appendChild(el("span", change >= 0 ? "pt-pos" : "pt-neg", `${change >= 0 ? "+" : ""}${change}%`));
+          if (c.b) line.append(` · verkopen ${signedCoins(netProfit(c.now, c.b))} na tax`);
+          riseList.appendChild(line);
+        });
+      }
+    }
+    return render;
+  }
+
+  // Phone (no FUT Genie, which shows this itself on the pc): what you paid, break-even and profit after tax.
+  function addProfitInfo(root, item) {
+    let info = root.querySelector(".pt-profit-info");
+    const bought = item.lastSalePrice > 0 && !(item.isTradeable && !item.isTradeable()) ? item.lastSalePrice : 0;
+    if (genie() || !bought) {
+      if (info) info.remove();
+      return;
+    }
+    if (!info) {
+      info = el("div", "pt-profit-info");
+      (root.querySelector(".ut-button-group") || root).appendChild(info);
+    }
+    const price = (geniePrice(item.definitionId) || {}).price;
+    info.textContent = `Gekocht ${priceFormat.format(bought)} · break-even BIN ${priceFormat.format(roundUpToStep(bought / (1 - EA_TAX)))}`;
+    if (price) {
+      const net = netProfit(price, bought);
+      info.append(` · bij ${priceFormat.format(price)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(net)} na tax`));
+    }
+  }
+
   let marketWatchInstalled = false;
 
   // "Holographic only", like FUT Genie: the market request gets hypercosmetic=foil. Only during a search
@@ -1985,6 +2480,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       }
       // Holo only without FUT Genie (phone): Genie adds the parameter itself when it's there.
       const genieHolo = window.FutGenieDispatcher && window.FutGenieDispatcher.__futgenieHoloParamPatched;
+      try {
+        logSearch();
+      } catch (_) {
+        // Counting never blocks the search.
+      }
       holoSearch = !!(criteria && criteria.__futgenieHoloOnly === true && !genieHolo && patchHoloParam());
       let observable;
       try {
@@ -3548,7 +4048,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       marketInput.addEventListener("keydown", event => { if (event.key === "Enter") marketSet.click(); });
       marketClear.addEventListener("click", () => setMarket(null));
       market.append(marketInput, marketSet, marketBuy, marketClear);
-      runBar.append(info, market, prev, next, flip, stop);
+      runBar.append(info, market, prev, next, flip, stop, el("span", "pt-search-count"));
+      updateSearchBadges();
       document.body.appendChild(runBar);
     }
 
@@ -4158,7 +4659,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         loadFodderCheapest(false);
       }
     };
-    [["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"]].forEach(([key, label]) => {
+    [["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["transfers", "Transfers"]].forEach(([key, label]) => {
       const button = el("button", "pt-tab", label);
       button.type = "button";
       button.addEventListener("click", () => show(key));
@@ -5613,6 +6114,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     button.__ptItem = item;
     watchButtonState(button, item);
+    addProfitInfo(root, item);
   }
 
   function hookPanels() {
@@ -5811,6 +6313,17 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-empty { padding: 40px 0 32px; text-align: center; color: #9aa6b8; font-size: 15px; }
 
 .pt-watch-add.pt-watching { opacity: .8; }
+.pt-transfer-card .pt-tl-block { margin: 14px 0; padding: 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; }
+.pt-tl-title { margin: 0 0 8px; font-size: 15px; }
+.pt-tl-line { font-size: 13px; margin: 6px 0; }
+.pt-tl-sales { font-size: 13px; }
+.pt-tl-sale { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,.06); }
+.pt-relist-go { margin-top: 10px; }
+.pt-pos { color: #5fd38d; }
+.pt-neg { color: #ff7b7b; }
+.pt-profit-info { font-size: 13px; padding: 6px 4px; text-align: center; }
+.pt-search-count { font-size: 12px; padding: 0 6px; white-space: nowrap; opacity: .85; }
+.pt-search-count.pt-search-hot { color: #ff7b7b; opacity: 1; font-weight: bold; }
 
 /* Stock lists */
 .pt-stock-card { margin-top: 20px; }
@@ -6359,6 +6872,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       installMarketWatch();
       installMinBidWrap();
       installListingWatch();
+      startClubRise();
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.
       startRelay();

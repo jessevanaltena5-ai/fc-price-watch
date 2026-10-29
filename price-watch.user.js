@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.24.0
+// @version      2.25.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -457,7 +457,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const extraIds = [...new Set(readJson(TL_IDS_KEY, []).concat(getStock().filter(list => list.type === "players")
         .flatMap(list => list.players.filter(player => !(player.special && player.definitionId <= 0xFFFFFF)).map(player => player.definitionId))))];
       await fetchGeniePrices(getWatch().map(entry => entry.definitionId).concat(extraIds));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay() };
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}) };
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
     } catch (error) {
@@ -544,6 +544,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       }
       if (data.s && typeof data.s === "object") listPatch.pcTransfer = data.s;
       if (data.cr && typeof data.cr === "object") listPatch.pcClubRise = data.cr;
+      if (data.bm && typeof data.bm === "object") writeJson(BOUGHT_KEY, { ...data.bm, ...readJson(BOUGHT_KEY, {}) });
       saveRelay({ receivedAt: Date.now(), pricesAt: data.t, ...listPatch, error: "" });
     } catch (error) {
       saveRelay({ receivedAt: Date.now(), error: error.message });
@@ -1840,7 +1841,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       now.add(key);
       if (seen && seen.has(key)) return;
       if (auction.tradeState === "expired") expired++;
-      else sold.push({ name: playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item"), price: auction.currentBid || auction.buyNowPrice || 0, bought: item.lastSalePrice > 0 ? item.lastSalePrice : 0 });
+      else sold.push({ name: playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item"), price: auction.currentBid || auction.buyNowPrice || 0, bought: boughtPrice(item) });
     });
     try {
       localStorage.setItem(LISTING_SEEN_KEY, JSON.stringify([...now])); // only what's still in the list
@@ -2015,6 +2016,21 @@ function priceWatchMain(SCRIPT_VERSION) {
   const SALES_KEY = "pt_sales_v1"; // [{ n, p, b, at }], last 7 days
   const SALES_KEEP_MS = 7 * 24 * 3600 * 1000;
   const TL_IDS_KEY = "pt_tl_ids_v1"; // definitionIds on the transfer list (not sold)
+  // What you paid, per card on the transfer list: EA drops it (lastSalePrice) once a card is sold.
+  const BOUGHT_KEY = "pt_bought_v1"; // { itemId: coins }, only cards still on the list
+  function rememberBought(items) {
+    const known = readJson(BOUGHT_KEY, {});
+    const next = {};
+    items.forEach(item => {
+      const price = item.lastSalePrice > 0 ? item.lastSalePrice : known[item.id];
+      if (item.id && price > 0) next[item.id] = price;
+    });
+    writeJson(BOUGHT_KEY, next);
+  }
+
+  function boughtPrice(item) {
+    return item.lastSalePrice > 0 ? item.lastSalePrice : readJson(BOUGHT_KEY, {})[item.id] || 0;
+  }
 
   function readJson(key, fallback) {
     try {
@@ -2144,7 +2160,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function relistPlan(items, pct) {
     return items.map(item => {
       const name = playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item");
-      const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
+      const bought = boughtPrice(item);
       const genieNow = (geniePrice(item.definitionId) || {}).price || 0;
       if (!bought) return { item, name, genie: genieNow, skip: true };
       const bin = Math.max(200, roundUpToStep(bought * (1 + pct / 100)));
@@ -6370,6 +6386,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   let transferListController = null;
 
   function rememberTransferItems(items) {
+    rememberBought(items);
     lastTransferItems = items;
     transferItemIds = new Set(items.map(item => item.id).filter(Boolean));
     if (transferListController) addTransferSummary(transferListController);
@@ -6383,7 +6400,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const listed = state === "active" || state === "expired";
     const market = (geniePrice(item.definitionId) || {}).price || 0;
     const price = sold ? auction.currentBid || auction.buyNowPrice || 0 : listed ? auction.buyNowPrice || 0 : market;
-    const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
+    const bought = boughtPrice(item);
     return { sold, listed, market, price, bought, net: bought && price ? netProfit(price, bought) : null, quickSell: Number(item.discardValue) || 0 };
   }
 
@@ -6429,33 +6446,40 @@ function priceWatchMain(SCRIPT_VERSION) {
       tile("Quick sell niet verkocht", priceFormat.format(sum(open, row => row.quickSell))));
   }
 
+  // "35.3k", like FUT Genie's list.
+  function shortCoins(value) {
+    if (value >= 1e6) return `${+(value / 1e6).toFixed(2)}M`;
+    return value >= 1000 ? `${+(value / 1000).toFixed(1)}k` : String(value);
+  }
+
+  // Like FUT Genie: top right the profit after tax (sold: what you made, listed: at your BIN, not listed:
+  // at the FUT Genie price), ⚠ when it's a loss. Under the stats of a card that isn't listed: FUT Genie
+  // price and what you paid; a listed card has EA's prices there, so that goes under the badge.
   function addTransferRowInfo(cell, item) {
     const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
     if (!root) return;
-    let line = root.querySelector(".pt-tl-row");
-    if (genie() || !item || !transferItemIds.has(item.id)) {
-      if (line) line.remove();
-      return;
-    }
-    if (!line) {
-      line = el("div", "pt-tl-row");
-      (root.querySelector(".entityContainer") || root).appendChild(line);
-    }
+    root.querySelectorAll(".pt-tl-badge, .pt-tl-row").forEach(node => node.remove());
+    if (genie() || !item || !transferItemIds.has(item.id)) return;
     const row = transferRowFacts(item);
-    line.textContent = "";
-    const parts = [];
-    if (row.bought) parts.push(`gekocht ${priceFormat.format(row.bought)}`);
-    if (row.sold) parts.push(`verkocht ${priceFormat.format(row.price)}`);
-    else if (row.listed && row.price) parts.push(`BIN ${priceFormat.format(row.price)}`);
-    line.append(parts.join(" · "));
-    if (row.net != null && (row.sold || row.listed)) line.append(parts.length ? " · " : "", el("span", row.net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(row.net)} na tax`));
-    if (row.market && !row.sold) {
-      const over = row.listed && row.price > row.market;
-      const marketNet = row.bought ? netProfit(row.market, row.bought) : null;
-      line.append(line.textContent ? " · " : "", el("span", over ? "pt-neg" : "pt-muted",
-        `${over ? "⚠ " : ""}Genie ${priceFormat.format(row.market)}` + (!row.listed && marketNet != null ? ` (${signedCoins(marketNet)} na tax)` : "")));
+    const over = row.listed && row.market > 0 && row.price > row.market;
+    const coin = () => el("span", "pt-coin");
+    const badge = el("div", "pt-tl-badge");
+    if (row.net != null) {
+      const profit = el("div", row.net >= 0 ? "pt-pos" : "pt-neg", `${row.net >= 0 ? "+" : "⚠ "}${priceFormat.format(Math.abs(row.net))}`);
+      profit.appendChild(coin());
+      badge.appendChild(profit);
     }
-    if (!line.textContent) line.remove();
+    if ((row.listed || row.sold) && row.market) badge.append(el("div", over ? "pt-tl-badge-sub pt-neg" : "pt-tl-badge-sub", `${over ? "⚠ boven " : ""}Genie ${shortCoins(row.market)}`));
+    if ((row.listed || row.sold) && !row.bought) badge.append(el("div", "pt-tl-badge-sub", "aankoopprijs onbekend"));
+    if (badge.childNodes.length) {
+      if (getComputedStyle(root).position === "static") root.style.position = "relative";
+      root.appendChild(badge);
+    }
+    if (row.listed || row.sold) return;
+    const line = el("div", "pt-tl-row");
+    if (row.market) line.append(el("span", "pt-tl-genie", shortCoins(row.market)), coin(), " Genie");
+    if (row.bought) line.append(row.market ? " · " : "", `gekocht ${shortCoins(row.bought)}`);
+    if (line.childNodes.length) (root.querySelector(".entityContainer") || root).appendChild(line);
   }
 
   // In EA's "List on Transfer Market" panel. With FUT Genie (pc) only what it lacks: BIN = what you paid
@@ -6806,6 +6830,15 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-tl-tile-value { font-size: 18px; font-weight: 700; margin-top: 2px; }
 .pt-tl-tile-note { font-size: 11px; color: #9aa6b8; }
 .pt-tl-row { font-size: 12px; margin-top: 4px; line-height: 1.3; white-space: normal; }
+.pt-tl-tile-label { font-size: 12px; }
+.pt-tl-tile-value { font-size: 22px; }
+.pt-tl-badge { position: absolute; top: 8px; right: 14px; z-index: 2; text-align: right; font-size: 15px; font-weight: 700; line-height: 1.25; pointer-events: none; }
+.pt-tl-badge-sub { font-size: 11px; font-weight: 600; color: #9aa6b8; }
+.pt-tl-badge-sub.pt-neg { color: #ff7b7b; }
+.pt-coin { display: inline-block; width: .85em; height: .85em; margin-left: 3px; vertical-align: -1px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #ffe9a0, #d6a92c 60%, #9c7414); box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); }
+.pt-tl-genie { color: #f0c94d; font-weight: 700; }
+.pt-tl-row { font-size: 14px; }
 .pt-ql { display: block; padding: 8px 0; }
 .pt-ql-title { font-size: 13px; margin-bottom: 6px; color: #9aa6b8; }
 .pt-ql-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }

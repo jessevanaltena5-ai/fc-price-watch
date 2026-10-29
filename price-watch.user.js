@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.18.0
+// @version      2.18.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1783,7 +1783,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   // (what opening it in the web app does), never the market. Each sale/expiry is reported once.
   const LISTING_SEEN_KEY = "pt_listing_seen_v1"; // ["tradeId:closed" | "tradeId:expired"]
   const LISTING_POLL_MS = 5 * 60 * 1000;
+  const LISTING_MIN_GAP_MS = 60 * 1000;
   let listingPollTimer = null;
+  let dueGroups = [];
   let ownTransferPoll = false;
   let lastTransferLoad = 0;
 
@@ -1843,18 +1845,23 @@ function priceWatchMain(SCRIPT_VERSION) {
     listingPollTimer = window.setTimeout(() => pollTransferList(), delay);
   }
 
-  // group: a listing that just ended; when the list can't be loaded (logged out) you still hear it.
-  async function pollTransferList(group) {
-    if (!group && Date.now() - lastTransferLoad < 60 * 1000) return scheduleListingPoll(); // just loaded anyway
+  // One request covers the whole list, and never more than one a minute however many listings end.
+  // Ended listings wait in dueGroups; when the list can't be loaded (logged out) you still hear them.
+  async function pollTransferList() {
+    const wait = lastTransferLoad + LISTING_MIN_GAP_MS - Date.now();
+    if (wait > 0) return scheduleListingPoll(dueGroups.length ? wait : null);
+    const due = dueGroups;
+    dueGroups = [];
+    lastTransferLoad = Date.now();
     ownTransferPoll = true;
     const items = await requestPile("requestTransferItems");
     ownTransferPoll = false;
     if (!items) {
-      if (group) listingAlert(group);
+      if (due.length) listingAlert({ count: due.reduce((sum, group) => sum + group.count, 0) });
       return scheduleListingPoll();
     }
-    // The wrapper in installListingWatch did the rest; a listing at 0 seconds: look again shortly.
-    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(30 * 1000);
+    // The wrapper in installListingWatch did the rest; a listing at 0 seconds: look again in a minute.
+    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(LISTING_MIN_GAP_MS + 2000);
     else scheduleListingPoll();
   }
 
@@ -1868,7 +1875,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   function listingDue(group) {
     saveListingEnds(getListingEnds().filter(item => item.end !== group.end));
-    pollTransferList(group);
+    dueGroups.push(group);
+    scheduleListingPoll(0);
   }
 
   // Fallback when the transfer list can't be loaded: only the timer is known.

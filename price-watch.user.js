@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.2
+// @version      2.29.3
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4527,8 +4527,16 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   let runBar = null;
-  const RUN_NEXT_GUARD_MS = 500; // a double tap or double click on "Volgende" is one step
-  let runNextAt = 0;
+  // One press on ◀ / "Volgende" is one step. A FUT Genie shortcut on these buttons fires two clicks at once
+  // (a dispatched click plus element.click()), and a double click or double tap also counts once.
+  const RUN_STEP_GUARD_MS = 300;
+  let runStepAt = 0;
+
+  function runStepAllowed() {
+    if (!run || Date.now() - runStepAt < RUN_STEP_GUARD_MS) return false;
+    runStepAt = Date.now();
+    return true;
+  }
 
   function renderRunBar() {
     const list = run && getStock().find(item => item.id === run.listId);
@@ -4571,11 +4579,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       prev.title = "Vorige klaarzetten";
       next.title = "Volgende club/kwaliteit klaarzetten (zoeken doe je zelf)";
       stop.title = "Stock-ronde stoppen";
-      prev.addEventListener("click", () => run && goToRule(run.listId, run.index - 1));
+      prev.addEventListener("click", () => runStepAllowed() && goToRule(run.listId, run.index - 1));
       // At the last rule "Volgende" starts over at the first one.
       next.addEventListener("click", () => {
-        if (!run || Date.now() - runNextAt < RUN_NEXT_GUARD_MS) return;
-        runNextAt = Date.now();
+        if (!runStepAllowed()) return;
         const list = getStock().find(item => item.id === run.listId);
         const count = list ? stockRules(list).length : 0;
         const atEnd = run.index + 1 >= count;

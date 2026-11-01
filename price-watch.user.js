@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.1
+// @version      2.29.2
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4527,6 +4527,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   let runBar = null;
+  const RUN_NEXT_GUARD_MS = 500; // a double tap or double click on "Volgende" is one step
+  let runNextAt = 0;
 
   function renderRunBar() {
     const list = run && getStock().find(item => item.id === run.listId);
@@ -4572,7 +4574,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       prev.addEventListener("click", () => run && goToRule(run.listId, run.index - 1));
       // At the last rule "Volgende" starts over at the first one.
       next.addEventListener("click", () => {
-        if (!run) return;
+        if (!run || Date.now() - runNextAt < RUN_NEXT_GUARD_MS) return;
+        runNextAt = Date.now();
         const list = getStock().find(item => item.id === run.listId);
         const count = list ? stockRules(list).length : 0;
         const atEnd = run.index + 1 >= count;
@@ -7689,6 +7692,17 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio]";
     let start = null;
+    // iOS can't always cancel the native click (touchend not cancelable, e.g. just after scrolling): it then
+    // follows our own click, and one tap would count twice. Swallow it.
+    const NATIVE_CLICK_MS = 700;
+    let ownClick = false;
+    let swallowClicksUntil = 0;
+    document.addEventListener("click", event => {
+      if (ownClick || Date.now() >= swallowClicksUntil) return;
+      if (!(event.target instanceof Element) || !event.target.closest(OUR_AREAS)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    }, true);
     document.addEventListener("touchstart", event => {
       const touch = event.touches[0];
       start = touch && event.touches.length === 1 ? { x: touch.clientX, y: touch.clientY } : null;
@@ -7714,7 +7728,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       const target = event.target instanceof Element ? event.target.closest(TAPPABLE) : null;
       if (!target || !target.closest(OUR_AREAS) || target.disabled) return;
       event.preventDefault();
+      ownClick = true;
       target.click();
+      ownClick = false;
+      swallowClicksUntil = Date.now() + NATIVE_CLICK_MS;
     }, { capture: true, passive: false });
   }
 

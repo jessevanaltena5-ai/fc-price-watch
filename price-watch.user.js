@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.26.0
-// @description  Eigen Price Watch-tab in de FC web app met FUT Genie-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
+// @version      2.29.0
+// @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
 // @run-at       document-idle
@@ -13,6 +13,7 @@
 // @connect      api.github.com
 // @connect      gist.githubusercontent.com
 // @connect      ntfy.sh
+// @connect      r2.fut.gg
 // @require      https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
 // @updateURL    https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
@@ -290,6 +291,112 @@ function priceWatchMain(SCRIPT_VERSION) {
   let genieLoading = false;
   let genieRefetch = false;
 
+  // FUT.GG live PC price feed. The manifest hash changes when a new immutable feed is published.
+  // IDs from player-prices-index are reconstructed as id0, then cumulative deltas in d; p[i] is that ID's PC price.
+  const FUTGG_GAME_YEAR = 27;
+  const FUTGG_MANIFEST_URL = `https://r2.fut.gg/${FUTGG_GAME_YEAR}/manifest.json`;
+  const FUTGG_REFRESH_MS = 60 * 1000;
+  let futggPrices = Object.create(null);
+  let futggPricesAt = 0;
+  let futggManifestAt = 0;
+  let futggLoading = null;
+  let futggFeedKey = "";
+  let futggLastError = "Nog geen fout geregistreerd";
+  let futggStage = "nog niet gestart";
+
+  let futggRequestCounter = 0;
+  function futggRequestJson(url) {
+    return new Promise((resolve, reject) => {
+      // This part runs in EA's page context, where Tampermonkey's GM_* APIs are not exposed.
+      // Send the request through the userscript sandbox bridge installed at the bottom of this file.
+      const requestId = `futgg-${Date.now()}-${++futggRequestCounter}`;
+      let settled = false;
+      const cleanup = () => {
+        document.removeEventListener("pt-futgg-response", onResponse);
+        window.clearTimeout(timeoutId);
+      };
+      const onResponse = event => {
+        let data;
+        try { data = JSON.parse(event.detail); } catch (_) { return; }
+        if (!data || data.id !== requestId || settled) return;
+        settled = true;
+        cleanup();
+        if (!data.ok) return reject(new Error(data.error || "Onbekende fout bij FUT.GG-aanvraag"));
+        if (data.status < 200 || data.status >= 300) return reject(new Error(`HTTP ${data.status} bij FUT.GG`));
+        try { resolve(JSON.parse(data.responseText)); }
+        catch (error) { reject(new Error(`Ongeldige FUT.GG JSON: ${error.message}`)); }
+      };
+      const timeoutId = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error("Timeout: geen antwoord van Tampermonkey-verzoekbrug"));
+      }, 25000);
+      document.addEventListener("pt-futgg-response", onResponse);
+      document.dispatchEvent(new CustomEvent("pt-futgg-request", { detail: JSON.stringify({ id: requestId, url }) }));
+    });
+  }
+
+  async function refreshFutggPrices(force = false) {
+    if (futggLoading) return futggLoading;
+    if (!force && Date.now() - futggManifestAt < FUTGG_REFRESH_MS) return false;
+    futggLoading = (async () => {
+      try {
+        futggStage = "manifest ophalen";
+        futggLastError = "";
+        // Cache-buster only for the small manifest; its entries point to immutable, hash-versioned JSON files.
+        const manifest = await futggRequestJson(`${FUTGG_MANIFEST_URL}?_=${Date.now()}`);
+        futggManifestAt = Date.now();
+        const version = manifest && manifest._version;
+        const indexHash = manifest && manifest["player-prices-index"];
+        const pcHash = manifest && manifest["player-prices-pc-dyn"];
+        if (version == null || !indexHash || !pcHash) throw new Error("FUT.GG-manifest mist prijsindex of PC-feed");
+        const feedKey = `${version}:${indexHash}:${pcHash}`;
+        if (!force && feedKey === futggFeedKey && futggPricesAt) return true;
+        const base = `https://r2.fut.gg/${FUTGG_GAME_YEAR}`;
+        futggStage = "PC-prijsfeed en index ophalen";
+        const [index, feed] = await Promise.all([
+          futggRequestJson(`${base}/player-prices-index.v${version}.${indexHash}.json`),
+          futggRequestJson(`${base}/player-prices-pc-dyn.v${version}.${pcHash}.json`)
+        ]);
+        futggStage = "feed en index controleren";
+        if (!Array.isArray(index.d) || !Array.isArray(feed.p) || feed.p.length !== index.d.length + 1) {
+          throw new Error("FUT.GG prijsfeed en index hebben verschillende lengtes");
+        }
+        const next = Object.create(null);
+        let id = Number(index.id0);
+        if (!Number.isFinite(id)) throw new Error("FUT.GG-index heeft geen geldige start-ID");
+        if (Number(feed.p[0]) > 0) next[String(id)] = Number(feed.p[0]);
+        for (let i = 0; i < index.d.length; i++) {
+          id += Number(index.d[i]);
+          const price = Number(feed.p[i + 1]);
+          if (Number.isFinite(price) && price > 0) next[String(id)] = price;
+        }
+        futggPrices = next;
+        futggPricesAt = Date.now();
+        futggStage = "succesvol bijgewerkt";
+        futggLastError = "geen";
+        futggFeedKey = feedKey;
+        console.info(`Price Watch: FUT.GG PC-feed bijgewerkt (${Object.keys(next).length} prijzen).`);
+        logFutggPriceDiagnostics();
+        listeners.forEach(listener => listener());
+        return true;
+      } catch (error) {
+        futggLastError = error && error.message ? error.message : String(error);
+        console.warn("Price Watch: FUT.GG PC-prijzen ophalen mislukt; bestaande prijsbron blijft actief.", error);
+        logFutggPriceDiagnostics();
+        return false;
+      } finally {
+        futggLoading = null;
+      }
+    })();
+    return futggLoading;
+  }
+
+  // Check the manifest each minute; its hash changes when FUT.GG publishes a new dynamic feed.
+  window.setInterval(() => refreshFutggPrices(false), FUTGG_REFRESH_MS);
+  window.setTimeout(() => refreshFutggPrices(true), 2500);
+
   function genie() {
     const g = window.FutGenie;
     return g && typeof g.fetchBulkPrices === "function" ? g : null;
@@ -309,10 +416,37 @@ function priceWatchMain(SCRIPT_VERSION) {
     return transferredPrices;
   }
 
-  function geniePrice(definitionId) {
+  function futggPriceFor(definitionId, resourceId) {
+    // FUT.GG's price index can key a special by its EA resource/player ID rather than
+    // the full UT definitionId. Try exact ID first, then the explicit resourceId,
+    // then the game's static player data. Never substitute a different card version.
+    const ids = [definitionId, resourceId].filter(value => Number.isFinite(Number(value)) && Number(value) > 0).map(Number);
+    try {
+      const baseId = Number(definitionId) & 0xFFFFFF;
+      const data = baseId && repositories && repositories.Item && repositories.Item.getStaticDataByDefId(baseId);
+      if (data) {
+        [data.resourceId, data.id, data.baseId].forEach(value => {
+          if (Number.isFinite(Number(value)) && Number(value) > 0) ids.push(Number(value));
+        });
+      }
+    } catch (_) { /* Static player data is not always available during startup. */ }
+    for (const id of [...new Set(ids)]) {
+      const price = futggPrices[String(id)];
+      if (Number.isFinite(price) && price > 0) return { price, id };
+    }
+    return null;
+  }
+
+  function geniePrice(definitionId, resourceId) {
+    // Prefer the direct FUT.GG PC-market feed. Resolve special-card IDs without
+    // falling back to a different card version in the FUT.GG feed.
+    const direct = futggPriceFor(definitionId, resourceId);
+    if (direct) {
+      return { price: direct.price, _fetchedAt: futggPricesAt, _futgg: true, _futggId: direct.id };
+    }
     const g = genie();
     const entry = g && g._cachedPrices ? g._cachedPrices[definitionId] : null;
-    if (entry && entry.price > 0) return entry;
+    if (entry && entry.price > 0) return { ...entry, _genie: true };
     // Without the extension, the newest of: FUT Genie via your own login (phone), your own lowest-price
     // search, or the price from the last transfer.
     const candidates = [
@@ -324,6 +458,93 @@ function priceWatchMain(SCRIPT_VERSION) {
     const [[price, fetchedAt], source] = candidates.reduce((best, item) => (item[0][1] > best[0][1] ? item : best));
     return { price, _fetchedAt: fetchedAt, [source]: true };
   }
+
+  // Diagnostic logging: show exactly which IDs from the FUT.GG feed match watched cards.
+  // Shows a compact on-page alert; no DevTools needed (EA pauses DevTools on debugger statements).
+  function logFutggPriceDiagnostics(forceShow = false) {
+    try {
+      const rows = getWatch().map(entry => {
+        const defId = Number(entry.definitionId);
+        const resourceId = Number(entry.resourceId || 0);
+        const ids = [defId, resourceId];
+        try {
+          const baseId = defId & 0xFFFFFF;
+          const data = baseId && repositories && repositories.Item && repositories.Item.getStaticDataByDefId(baseId);
+          if (data) [data.resourceId, data.id, data.baseId].forEach(value => {
+            if (Number.isFinite(Number(value)) && Number(value) > 0) ids.push(Number(value));
+          });
+        } catch (_) {}
+        const uniqueIds = [...new Set(ids.filter(id => Number.isFinite(id) && id > 0))];
+        const matches = uniqueIds.filter(id => Number(futggPrices[String(id)]) > 0)
+          .map(id => ({ id, price: Number(futggPrices[String(id)]) }));
+        const selected = geniePrice(entry.definitionId, entry.resourceId);
+        let selectedSource = "geen prijs gevonden";
+        if (selected && selected._futgg) selectedSource = `FUT.GG (ID ${selected._futggId})`;
+        else if (selected && selected._fetchedAt && selected._remote) selectedSource = "remote/cache";
+        else if (selected && selected._market) selectedSource = "markt-cache";
+        else if (selected && selected._transferred) selectedSource = "overgezette prijs";
+        else if (selected && selected.price > 0) selectedSource = "FUT Genie/cache of fallback (niet FUT.GG)";
+        return {
+          player: entry.name,
+          rating: entry.rating || "",
+          definitionId: defId,
+          resourceId: resourceId || "not stored",
+          feedMatches: matches.map(match => `${match.id}=${match.price}`).join("; ") || "NO MATCH",
+          selectedPrice: selected ? selected.price : "geen prijs",
+          selectedSource
+        };
+      });
+      const relevant = rows.filter(row => /de jong|barcola|mora|smenyo|gy[oö]keres/i.test(row.player));
+      const displayRows = relevant.length ? relevant : rows.slice(0, 8);
+      const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
+      const report = `FUT.GG PC-feed diagnose (v2.28.4)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
+      if (typeof window !== "undefined") {
+        // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
+        // Routine refreshes may update an already-open panel, but must never open it.
+        const existingPanel = document.getElementById("pt-futgg-diagnostic-panel");
+        if (!forceShow && !existingPanel) return;
+        const render = () => {
+          if (!document.body) return window.setTimeout(render, 250);
+          let panel = document.getElementById("pt-futgg-diagnostic-panel");
+          if (!panel) {
+            panel = document.createElement("div");
+            panel.id = "pt-futgg-diagnostic-panel";
+            panel.style.cssText = "position:fixed;right:18px;top:70px;z-index:2147483647;width:min(680px,calc(100vw - 36px));max-height:70vh;overflow:auto;background:#101722;color:#f3f6fb;border:2px solid #63b3ff;border-radius:10px;box-shadow:0 12px 40px #000b;padding:14px;font:13px/1.5 system-ui,sans-serif;white-space:normal";
+            const head = document.createElement("div");
+            head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;font-weight:700;font-size:15px";
+            head.appendChild(document.createTextNode("FUT.GG PC-feed diagnose"));
+            const close = document.createElement("button"); close.textContent = "Sluiten";
+            close.style.cssText = "background:#334155;color:white;border:0;border-radius:5px;padding:5px 9px;cursor:pointer";
+            close.addEventListener("click", () => panel.remove()); head.appendChild(close);
+            panel.appendChild(head);
+            const body = document.createElement("pre"); body.id = "pt-futgg-diagnostic-report";
+            body.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;margin:0;font:12px/1.5 ui-monospace,monospace";
+            panel.appendChild(body);
+            const copy = document.createElement("button"); copy.textContent = "Diagnose kopiëren";
+            copy.style.cssText = "margin-top:10px;background:#2563eb;color:white;border:0;border-radius:5px;padding:7px 10px;cursor:pointer";
+            copy.addEventListener("click", () => { const text = body.textContent; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copy.textContent = "Gekopieerd"; }).catch(() => window.prompt("Kopieer diagnose:", text)); else window.prompt("Kopieer diagnose:", text); });
+            panel.appendChild(copy); document.body.appendChild(panel);
+          }
+          const body = panel.querySelector("#pt-futgg-diagnostic-report");
+          if (body) body.textContent = report;
+        };
+        render();
+      }
+    } catch (error) {
+      console.warn("FUT.GG DIAGNOSTIC logging failed:", error);
+    }
+  }
+
+  // Diagnostics are hidden by default. Press Ctrl+Shift+D to toggle the panel.
+  document.addEventListener("keydown", event => {
+    if (!(event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyD")) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const panel = document.getElementById("pt-futgg-diagnostic-panel");
+    if (panel) panel.remove();
+    else logFutggPriceDiagnostics(true);
+  }, true);
 
   // --- Live via your pc: the pc (with FUT Genie) puts your list + prices in your own secret GitHub gist
   // every 5 minutes, the phone reads it every 2 minutes. With the token on the phone too, list changes made
@@ -887,7 +1108,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const watch = getWatch();
     const prices = {};
     watch.forEach(entry => {
-      const price = geniePrice(entry.definitionId);
+      const price = geniePrice(entry.definitionId, entry.resourceId);
       if (price) prices[entry.definitionId] = [price.price, Number(price._fetchedAt) || now];
     });
     return {
@@ -1227,7 +1448,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const hits = new Set();
     const newlyHit = [];
     getWatch().forEach(entry => {
-      const price = (geniePrice(entry.definitionId) || {}).price;
+      const price = (geniePrice(entry.definitionId, entry.resourceId) || {}).price;
       const previous = lastSeenPrice.get(entry.definitionId);
       if (price) lastSeenPrice.set(entry.definitionId, price);
       if (!entry.target || !price || price > entry.target) return;
@@ -1246,7 +1467,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
   // Seed once the first prices are in; after that every update (Genie on the pc, the gist on the phone) counts.
   listeners.add(() => {
-    if (!atTarget && !getWatch().some(entry => geniePrice(entry.definitionId))) return;
+    if (!atTarget && !getWatch().some(entry => geniePrice(entry.definitionId, entry.resourceId))) return;
     checkTargetHits();
   });
 
@@ -1277,7 +1498,31 @@ function priceWatchMain(SCRIPT_VERSION) {
     heading.append(title, status);
     const refresh = el("button", "pt-watch-refresh", "↻ Prijzen verversen");
     refresh.type = "button";
-    refresh.addEventListener("click", () => refreshGeniePrices(true));
+    refresh.addEventListener("click", async () => {
+      if (refresh.dataset.refreshing === "1") return;
+      refresh.dataset.refreshing = "1";
+      refresh.disabled = true;
+      refresh.textContent = "↻ Bezig met verversen…";
+      try {
+        // Force a fresh FUT.GG manifest + PC feed download, and refresh FUT Genie too when available.
+        const futggPromise = refreshFutggPrices(true);
+        refreshGeniePrices(true);
+        const futggOk = await futggPromise;
+        const count = Object.keys(futggPrices).length;
+        const time = futggPricesAt ? new Date(futggPricesAt).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "onbekend";
+        if (futggOk && count) {
+          showToast(`✅ FUT.GG PC-prijzen opnieuw opgehaald: ${count.toLocaleString("nl-NL")} prijzen (${time}). ${genie() ? "FUT Genie-refresh ook gestart." : "Geen FUT Genie gevonden; telefoonprijzen worden via de relay bijgewerkt."}`, true);
+        } else {
+          showToast(`⚠️ FUT.GG verversen mislukt: ${futggLastError || "onbekende fout"}. ${genie() ? "FUT Genie-refresh is wel gestart." : ""}`, false);
+        }
+      } catch (error) {
+        showToast(`Prijzen verversen mislukt: ${error && error.message ? error.message : error}`, false);
+      } finally {
+        refresh.dataset.refreshing = "0";
+        refresh.disabled = false;
+        refresh.textContent = "↻ Prijzen verversen";
+      }
+    });
     const transfer = el("button", "pt-watch-refresh", "⇄ Overzetten");
     transfer.type = "button";
     transfer.title = "Lijst + prijzen naar je telefoon (QR-code) of een code van je pc plakken";
@@ -1303,11 +1548,28 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (chimeOn()) playChime(); // let you hear it
     });
     showChime();
+    const oneClick = el("button", "pt-watch-refresh");
+    oneClick.type = "button";
+    const showOneClick = () => {
+      oneClick.textContent = oneClickOn() ? "⚡ 1-klik" : "🛑 Pop-up";
+      oneClick.title = oneClickOn()
+        ? "Buy Now koopt direct, zonder bevestigings-pop-up (klik om de pop-up terug te zetten)"
+        : "Buy Now vraagt om bevestiging (klik voor kopen zonder pop-up). Staat One click Buy Now in FUT Genie aan, dan slaat Genie de pop-up nog steeds over.";
+    };
+    oneClick.addEventListener("click", () => {
+      try {
+        localStorage.setItem(ONE_CLICK_KEY, oneClickOn() ? "off" : "on");
+      } catch (_) {
+        // Only for this session.
+      }
+      showOneClick();
+    });
+    showOneClick();
     const push = el("button", "pt-watch-refresh", "📲");
     push.type = "button";
     push.title = "Pushmelding op je telefoon (ntfy) als een speler op doel zit, ook als hij vergrendeld is";
     const actions = el("div", "pt-watch-actions");
-    actions.append(walk, chime, push, transfer, refresh);
+    actions.append(walk, oneClick, chime, push, transfer, refresh);
     const pushPanel = buildPushPanel();
     pushPanel.style.display = "none";
     push.addEventListener("click", () => {
@@ -1331,7 +1593,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       ["Speler", "pt-col-name"],
       ["Rating", "pt-col-rating"],
       ["Rarity", "pt-col-rarity"],
-      ["Genie (PC)", "pt-col-price"],
+      ["Marketprijs", "pt-col-price"],
       ["PC-instapdoel", "pt-col-target"],
       ["Afstand", "pt-col-distance pt-sortable"],
       ["", "pt-col-remove"]
@@ -1436,6 +1698,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       nameCell.appendChild(nameWrap);
 
       const priceCell = el("td", "pt-col-price");
+      const priceValue = el("span", "pt-price-value");
+      const priceSource = el("span", "pt-price-source");
+      priceCell.append(priceValue, priceSource);
       const targetCell = el("td", "pt-col-target");
       const input = el("input", "pt-target-input");
       input.type = "text";
@@ -1460,9 +1725,28 @@ function priceWatchMain(SCRIPT_VERSION) {
         el("td", "pt-col-rarity", entry.rarity != null ? rarityName(entry.rarity) : ""), priceCell, targetCell, distanceCell, removeCell);
 
       const update = () => {
-        const genieEntry = geniePrice(entry.definitionId);
+        const genieEntry = geniePrice(entry.definitionId, entry.resourceId);
         const price = genieEntry ? genieEntry.price : null;
-        priceCell.textContent = price !== null ? priceFormat.format(price) : "—";
+        priceValue.textContent = price !== null ? priceFormat.format(price) : "—";
+        let sourceLabel = "";
+        let sourceTitle = "Geen prijsbron beschikbaar";
+        if (genieEntry && genieEntry._futgg) {
+          sourceLabel = "GG";
+          sourceTitle = `FUT.GG PC-feed · ID ${genieEntry._futggId}`;
+        } else if (genieEntry && genieEntry._genie) {
+          sourceLabel = "G";
+          sourceTitle = "FUT Genie (PC)";
+        } else if (genieEntry && genieEntry._market) {
+          sourceLabel = "";
+          sourceTitle = "Laagste BIN op de markt (zelf gezocht)";
+        } else if (genieEntry && genieEntry._transferred) {
+          sourceTitle = "Overgezette prijs (bron niet bevestigd)";
+        } else if (genieEntry && genieEntry._remote) {
+          sourceTitle = "Overige gesynchroniseerde prijsbron";
+        }
+        priceSource.textContent = sourceLabel;
+        priceSource.style.display = sourceLabel ? "inline-flex" : "none";
+        priceSource.title = sourceTitle;
         priceCell.classList.toggle("pt-missing", price === null);
         lowest.style.display = genie() || relayFresh() ? "none" : "";
         priceCell.classList.toggle("pt-transferred", !!(genieEntry && genieEntry._transferred));
@@ -1534,11 +1818,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       const hits = list.filter(entry => (rowsById.get(entry.definitionId).row.__ptPercent ?? Infinity) <= 0).length;
       const summary = `${list.length} speler(s)` + (hits ? ` · ${hits} op of onder doel` : "");
       if (genie()) {
-        status.textContent = genieLoading
-          ? `${summary} · prijzen ophalen bij FUT Genie…`
-          : genieRequestedAt
-            ? `${summary} · FUT Genie (PC) opgehaald om ${formatTime(genieRequestedAt)} · ververst elke 5 min`
-            : summary;
+        status.textContent = futggPricesAt
+          ? `${summary} · FUT.GG PC-feed bijgewerkt om ${formatTime(futggPricesAt)} · manifest elke minuut gecontroleerd` + (genieLoading ? " · FUT Genie ook actief" : "")
+          : genieLoading
+            ? `${summary} · prijzen ophalen bij FUT Genie…`
+            : genieRequestedAt
+              ? `${summary} · FUT Genie (PC) opgehaald om ${formatTime(genieRequestedAt)} · ververst elke 5 min`
+              : summary;
         return;
       }
       const pricesFrom = transferredAt(list.map(entry => entry.definitionId));
@@ -1731,6 +2017,52 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
       }, 80);
     });
+  }
+
+  // --- One click Buy Now: no confirmation pop-up after your own click on Buy Now --------------------
+  // Same route as FUT Genie's setting. Anything unusual (auction over, too few coins, purchased pile
+  // full) goes through EA's own flow, so you still get its message. Never buys without your click.
+  const ONE_CLICK_KEY = "pt_one_click_v1"; // "off" = keep EA's pop-up
+  const ONE_CLICK_REPEAT_MS = 1500; // a double click must not send a second buy
+  let oneClickInstalled = false;
+  let lastOneClick = { id: null, at: 0 };
+
+  function oneClickOn() {
+    try {
+      return localStorage.getItem(ONE_CLICK_KEY) !== "off";
+    } catch {
+      return true;
+    }
+  }
+
+  function oneClickPrice(controller) {
+    const item = controller.viewmodel.current();
+    const auction = item.getAuctionData();
+    if (auction.getSecondsRemaining() <= 0 || !(auction.buyNowPrice > 0)) return null;
+    if (repositories.Item.numItemsInCache(window.ItemPile.PURCHASED) >= window.MAX_NEW_ITEMS) return null;
+    const coins = services.User.getUser().getCurrency(window.GameCurrency.COINS).amount;
+    return auction.canBuy(coins) ? { id: item.id, price: auction.buyNowPrice } : null;
+  }
+
+  function installOneClickBuyNow() {
+    const proto = window.UTItemDetailsViewController && window.UTItemDetailsViewController.prototype;
+    if (oneClickInstalled || !proto || typeof proto.onBuyNow !== "function" || typeof proto.eBidConfirmed !== "function") return;
+    oneClickInstalled = true;
+    const original = proto.onBuyNow;
+    proto.onBuyNow = function () {
+      if (!oneClickOn()) return original.apply(this, arguments);
+      let buy = null;
+      try {
+        buy = oneClickPrice(this);
+      } catch (error) {
+        console.warn("Price Watch: one click Buy Now niet mogelijk, EA's pop-up volgt.", error);
+      }
+      if (!buy) return original.apply(this, arguments);
+      if (buy.id === lastOneClick.id && Date.now() - lastOneClick.at < ONE_CLICK_REPEAT_MS) return undefined;
+      lastOneClick = { id: buy.id, at: Date.now() };
+      this.requestedBid = buy.price;
+      return this.eBidConfirmed();
+    };
   }
 
   // --- Transfer list timer: a pling (+ ntfy) when your listings run out ----------------------------
@@ -2189,7 +2521,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     return items.map(item => {
       const name = playerNameFor(item.definitionId, (item._staticData && item._staticData.name) || "item");
       const bought = boughtPrice(item);
-      const genieNow = (geniePrice(item.definitionId) || {}).price || 0;
+      const genieNow = (geniePrice(item.definitionId, item.resourceId) || {}).price || 0;
       if (!bought) return { item, name, genie: genieNow, skip: true };
       const bin = Math.max(200, roundUpToStep(bought * (1 + pct / 100)));
       return { item, name, bought, bin, start: Math.max(150, priceStepBelow(bin)), net: netProfit(bin, bought), genie: genieNow };
@@ -2639,7 +2971,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       info = el("div", "pt-profit-info");
       (root.querySelector(".ut-button-group") || root).appendChild(info);
     }
-    const price = (geniePrice(item.definitionId) || {}).price;
+    const price = (geniePrice(item.definitionId, item.resourceId) || {}).price;
     info.textContent = `Gekocht ${priceFormat.format(bought)} · break-even BIN ${priceFormat.format(roundUpToStep(bought / (1 - EA_TAX)))}`;
     if (price) {
       const net = netProfit(price, bought);
@@ -4125,9 +4457,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       criteria.level = SearchLevel[rule.level.toUpperCase()];
     }
     if (rule.max) {
-      // Fodder cycles in bid mode filter on max bid; everything else on max buy now.
+      // Fodder cycles in bid mode filter on max bid; BIN mode filters on max buy now.
       if (rule.player && list.mode === "bid") criteria.maxBid = rule.max;
       else criteria.maxBuy = rule.max;
+    }
+    // Each completed fodder BIN cycle raises the minimum bid by 50 coins.
+    // The first cycle keeps EA's default minimum; the first restart starts at 150.
+    if (rule.player && list.fodderRating && list.mode === "bin") {
+      criteria.minBid = Math.max(0, Number(list.fodderBidMin) || 0);
     }
     // Holo snipe lists: only holographic cards (FUT Genie's "Holographic only" flag; see installMarketWatch).
     if (rule.player && (list.holo || rule.player.holo)) criteria.__futgenieHoloOnly = true;
@@ -4238,7 +4575,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (!run) return;
         const list = getStock().find(item => item.id === run.listId);
         const count = list ? stockRules(list).length : 0;
-        goToRule(run.listId, run.index + 1 >= count ? 0 : run.index + 1);
+        const atEnd = run.index + 1 >= count;
+        if (atEnd && list && list.fodderRating && list.mode === "bin") {
+          // First completed BIN cycle -> 150, then 200, 250, etc. Persist per fodder cycle.
+          list.fodderBidMin = (Number(list.fodderBidMin) || 100) + 50;
+          saveStock();
+          showToast(`🔼 Volgende BIN-foddercyclus: minimum bod ${priceFormat.format(list.fodderBidMin)}`, true);
+        }
+        goToRule(run.listId, atEnd ? 0 : run.index + 1);
       });
       stop.addEventListener("click", stopRun);
 
@@ -6328,7 +6672,8 @@ function priceWatchMain(SCRIPT_VERSION) {
             definitionId: current.definitionId,
             name: playerNameFor(current.definitionId, current.displayName),
             rating: current.rating,
-            rarity: current.rareflag
+            rarity: current.rareflag,
+            resourceId: Number(current.resourceId) || null
           });
         }
         watchButtonState(button, current);
@@ -6426,7 +6771,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const state = auction.tradeState;
     const sold = state === "closed";
     const listed = state === "active" || state === "expired";
-    const market = (geniePrice(item.definitionId) || {}).price || 0;
+    const market = (geniePrice(item.definitionId, item.resourceId) || {}).price || 0;
     const price = sold ? auction.currentBid || auction.buyNowPrice || 0 : listed ? auction.buyNowPrice || 0 : market;
     const bought = boughtPrice(item);
     return { sold, listed, market, price, bought, net: bought && price ? netProfit(price, bought) : null, quickSell: Number(item.discardValue) || 0 };
@@ -6577,7 +6922,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (full) {
       // The price: FUT Genie from your pc when it sent one for this card, otherwise search when you tap.
       const priceButton = button("", "", async node => {
-        const known = (geniePrice(item.definitionId) || {}).price;
+        const known = (geniePrice(item.definitionId, item.resourceId) || {}).price;
         if (known) return setBin(known);
         if (marketBusy) return;
         node.disabled = true;
@@ -6594,7 +6939,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
       priceButton.classList.add("pt-ql-gold");
       refreshPrice = () => {
-        const entry = geniePrice(item.definitionId);
+        const entry = geniePrice(item.definitionId, item.resourceId);
         if (entry) {
           const source = entry._market ? "Laagste BIN" : "Genie-prijs";
           priceButton.textContent = `${source} ${priceFormat.format(entry.price)}`;
@@ -6756,15 +7101,18 @@ function priceWatchMain(SCRIPT_VERSION) {
 
 .pt-watch-table .pt-col-name     { width: 27%; }
 .pt-watch-table .pt-col-rating   { width: 7%; text-align: center; }
-.pt-watch-table .pt-col-rarity   { width: 19%; }
-.pt-watch-table .pt-col-price    { width: 13%; text-align: right; }
+.pt-watch-table .pt-col-rarity   { width: 18%; }
+.pt-watch-table .pt-col-price    { width: 15%; text-align: right; }
 .pt-watch-table .pt-col-target   { width: 14%; padding-left: 24px; }
-.pt-watch-table .pt-col-distance { width: 16%; text-align: right; }
+.pt-watch-table .pt-col-distance { width: 15%; text-align: right; }
 .pt-watch-table .pt-col-remove   { width: 4%; text-align: right; }
 
 .pt-watch-table td.pt-col-rating { font-weight: 700; }
 .pt-watch-table td.pt-col-rarity { color: #aab5c5; }
-.pt-watch-table td.pt-col-price  { font-weight: 700; font-variant-numeric: tabular-nums; color: #fff; }
+.pt-watch-table td.pt-col-price  { font-weight: 700; font-variant-numeric: tabular-nums; color: #fff; overflow: visible; white-space: nowrap; }
+.pt-watch-table .pt-price-value { white-space: nowrap; }
+.pt-watch-table .pt-price-source { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 20px; box-sizing: border-box; margin-left: 5px; min-width: 20px; height: 15px; padding: 0 3px; border: 1px solid #526174; border-radius: 4px; color: #aebdd0; font-size: 9px; font-weight: 800; line-height: 1; vertical-align: 2px; }
+.pt-watch-table .pt-price-source[title^="FUT.GG"] { color: #78d6ff; border-color: #287ca4; }
 .pt-watch-table td.pt-missing    { color: #6b7789; font-weight: 400; }
 
 .pt-watch-table .pt-sortable { cursor: pointer; user-select: none; }
@@ -7438,6 +7786,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       installMarketWatch();
       installMinBidWrap();
       installListingWatch();
+      installOneClickBuyNow();
       startClubRise();
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.
@@ -7654,6 +8003,43 @@ function priceWatchMain(SCRIPT_VERSION) {
     handle(message).then(result => reply({ ok: true, result }), error => reply({ ok: false, error: error.message }));
   });
 })();
+
+// FUT.GG request bridge: run GM_xmlhttpRequest in the Tampermonkey sandbox, not in the
+// injected EA page context. Only allow the exact FUT.GG R2 host to avoid turning this into an
+// arbitrary cross-origin request proxy.
+try {
+  document.addEventListener("pt-futgg-request", event => {
+    let request;
+    try { request = JSON.parse(event.detail); } catch (_) { return; }
+    const reply = payload => document.dispatchEvent(new CustomEvent("pt-futgg-response", { detail: JSON.stringify({ id: request && request.id, ...payload }) }));
+    if (!request || typeof request.id !== "string" || typeof request.url !== "string") return;
+    let parsed;
+    try { parsed = new URL(request.url); } catch (_) { reply({ ok: false, error: "Ongeldige FUT.GG URL" }); return; }
+    if (parsed.protocol !== "https:" || parsed.hostname !== "r2.fut.gg") {
+      reply({ ok: false, error: "Geblokkeerde URL: alleen https://r2.fut.gg toegestaan" });
+      return;
+    }
+    if (typeof GM_xmlhttpRequest !== "function") {
+      reply({ ok: false, error: "GM_xmlhttpRequest ontbreekt in Tampermonkey-sandbox; controleer userscript-manager en @grant" });
+      return;
+    }
+    try {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url: parsed.href,
+        headers: { "Accept": "application/json", "Cache-Control": "no-cache" },
+        onload: response => reply({ ok: true, status: response.status, responseText: response.responseText }),
+        onerror: () => reply({ ok: false, error: "Netwerkfout bij FUT.GG (GM_xmlhttpRequest onerror)" }),
+        ontimeout: () => reply({ ok: false, error: "Time-out bij FUT.GG (GM_xmlhttpRequest)" }),
+        timeout: 20000
+      });
+    } catch (error) {
+      reply({ ok: false, error: `GM_xmlhttpRequest startfout: ${error && error.message ? error.message : String(error)}` });
+    }
+  });
+} catch (error) {
+  console.warn("Price Watch: FUT.GG-verzoekbrug kon niet worden gestart", error);
+}
 
 // Run inside the page itself (not Tampermonkey's sandbox), so the EA app's objects are reachable on
 // every browser, including Safari on iOS.

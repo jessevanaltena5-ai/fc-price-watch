@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.0
+// @version      2.29.1
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5077,7 +5077,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       inventory.disabled = !!fodderInventoryProgress;
       inventory.textContent = fodderInventoryProgress ? `📦 ${fodderInventoryProgress}` : "📦 Voorraad bijwerken";
       status.textContent = !genie()
-        ? "FUT Genie is niet geladen: geen marktprijzen per rating."
+        ? "Spelersprijzen van FUT.GG of je pc. Mediaan per rating alleen met FUT Genie."
         : fodderMarketLoading ? "Fodderprijzen ophalen bij FUT Genie…"
           : fodderMarket
             ? `FUT Genie-marktprijzen (PC) per rating, gewone kaarten · bijgewerkt ${fodderMarket.lastUpdated ? formatDayTime(new Date(fodderMarket.lastUpdated).getTime()) : "onbekend"}`
@@ -5112,7 +5112,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           minCell.textContent = fodderCheapestLoading ? "…" : market ? priceFormat.format(market.min) : "—";
         }
         const lowSample = market && market.n < FODDER_LOW_SAMPLE;
-        const medCell = el("td", "pt-col-price pt-muted", market ? `${priceFormat.format(market.med)}${lowSample ? " ⚠️" : ""}` : "—");
+        const medCell = el("td", "pt-col-price pt-muted" + (market ? "" : " pt-no-med"), market ?`${priceFormat.format(market.med)}${lowSample ? " ⚠️" : ""}` : "—");
         if (market) {
           medCell.title = `Gemiddeld ${priceFormat.format(market.avg)} · ${market.n} waarnemingen` +
             (lowSample ? "\nWeinig waarnemingen: mediaan is onbetrouwbaar, kijk naar het minimum of FUTBIN." : "");
@@ -7599,6 +7599,32 @@ function priceWatchMain(SCRIPT_VERSION) {
   .pt-players-table .pt-col-remove   { width: 6%; }
   .pt-players-table td.pt-col-distance { white-space: normal; line-height: 1.2; }
   .pt-players-table .pt-distance { font-size: 11px; padding: 2px 4px; }
+  /* Fodder: every rating is a small block instead of a table row that doesn't fit */
+  .pt-fodder-table, .pt-fodder-table tbody { display: block; width: 100%; }
+  .pt-fodder-table thead { display: none; }
+  .pt-fodder-table tr {
+    display: grid;
+    grid-template-columns: 92px minmax(0, 1fr) auto;
+    grid-template-areas: "rating cheapest cheapest" "target distance level" "stock stock stock" "price price price";
+    gap: 6px 8px;
+    align-items: center;
+    padding: 10px 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, .1);
+  }
+  .pt-fodder-table td { display: block; width: auto; height: auto; padding: 0; border: 0; white-space: normal; overflow: visible; text-align: left; }
+  .pt-fodder-table td.pt-col-rating { grid-area: rating; width: auto; text-align: left; }
+  .pt-fodder-table td.pt-col-cheapest { grid-area: cheapest; width: auto; }
+  .pt-fodder-table td.pt-col-target { grid-area: target; width: auto; padding-left: 0; }
+  .pt-fodder-table td.pt-col-distance { grid-area: distance; width: auto; text-align: left; }
+  .pt-fodder-table td.pt-col-level { grid-area: level; width: auto; text-align: right; }
+  .pt-fodder-table td.pt-col-stock { grid-area: stock; width: auto; }
+  .pt-fodder-table td.pt-col-price { grid-area: price; width: auto; text-align: left; font-weight: 400; color: #8d9aae; }
+  .pt-fodder-table td.pt-col-price::before { content: "Mediaan "; }
+  .pt-fodder-table td.pt-no-med, .pt-fodder-table td.pt-col-stock:empty { display: none; }
+  .pt-fodder-table .pt-level-detail { margin-top: 2px; white-space: normal; }
+  .pt-fodder-table .pt-distance { font-size: 11px; padding: 2px 6px; }
+  .pt-fodder-table .pt-level-btn { padding: 6px 9px; font-size: 13px; }
+  .pt-fodder-table .pt-target-input::placeholder { font-size: 12px; }
   .pt-watch-table .pt-sortable::after { content: ""; }
   .pt-watch-table .pt-sortable.pt-sorted::after { content: " ▲"; }
   .pt-name-wrap .pt-icon-btn:not(.pt-transfer-search):not(.pt-lowest) { display: none; }

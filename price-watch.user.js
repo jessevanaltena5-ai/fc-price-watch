@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.4
+// @version      2.29.5
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1007,12 +1007,22 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (own && own !== criteria) {
         if (criteria.__futgenieHoloOnly) own.__futgenieHoloOnly = true;
         else delete own.__futgenieHoloOnly;
+        if (criteria.minBid) own.minBid = criteria.minBid;
       }
     } catch (_) {
       // Holo stays on our criteria only.
     }
     if (playerData) controller.viewmodel.setPlayerData(playerData);
     nav.pushViewController(controller);
+    if (criteria.minBid) window.setTimeout(() => showMinBid(criteria.minBid), 150);
+  }
+
+  // The filter screen doesn't always show a prepared min bid: fill its first price field.
+  function showMinBid(value) {
+    const inputs = filterPriceInputs();
+    if (inputs.length !== 4 || parsePrice(inputs[0].value) === value) return;
+    inputs[0].value = String(value);
+    ["input", "change", "blur"].forEach(type => inputs[0].dispatchEvent(new Event(type, { bubbles: true })));
   }
 
   function baseCriteria() {
@@ -4438,6 +4448,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     listeners.forEach(listener => listener());
   }
 
+  // Every completed BIN round raises the min bid by 50 (the first round keeps EA's default, the first restart
+  // is 150). Not for bid lists, and not on a card whose max BIN is at or below it.
+  function applyRunMinBid(list, rule, criteria) {
+    const min = Number(list.fodderBidMin) || 0;
+    if (!min || list.mode === "bid") return;
+    criteria.minBid = rule.max && min >= rule.max ? 0 : min;
+  }
+
   function prepareRule(list, rule) {
     const criteria = baseCriteria();
     let playerData = null;
@@ -4450,6 +4468,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (list.mode === "bid") criteria.maxBid = rule.max;
         else criteria.maxBuy = rule.max;
       }
+      applyRunMinBid(list, rule, criteria);
       openFilters(criteria, null);
       list.done = list.done || {};
       list.done[rule.key] = Date.now();
@@ -4463,6 +4482,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rule.league) criteria.league = rule.league.id;
       if (rule.position) criteria.position = rule.position;
       if (rule.max) criteria.maxBuy = rule.max;
+      applyRunMinBid(list, rule, criteria);
       openFilters(criteria, null);
       list.done = list.done || {};
       list.done[rule.key] = Date.now();
@@ -4493,11 +4513,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rule.player && list.mode === "bid") criteria.maxBid = rule.max;
       else criteria.maxBuy = rule.max;
     }
-    // Each completed fodder BIN cycle raises the minimum bid by 50 coins.
-    // The first cycle keeps EA's default minimum; the first restart starts at 150.
-    if (rule.player && list.fodderRating && list.mode === "bin") {
-      criteria.minBid = Math.max(0, Number(list.fodderBidMin) || 0);
-    }
+    applyRunMinBid(list, rule, criteria);
     // Holo snipe lists: only holographic cards (FUT Genie's "Holographic only" flag; see installMarketWatch).
     if (rule.player && (list.holo || rule.player.holo)) criteria.__futgenieHoloOnly = true;
     openFilters(criteria, playerData);
@@ -4559,15 +4575,25 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   let runBar = null;
-  // One press on ◀ / "Volgende" is one step. A FUT Genie shortcut on these buttons fires two clicks at once
-  // (a dispatched click plus element.click()), and a double click or double tap also counts once.
+  // One press on ◀ / "Volgende" is one step. A FUT Genie shortcut on these buttons fires two clicks right after
+  // each other (a dispatched click plus element.click()), and a double click or double tap also counts once.
+  // The wait counts from the END of the step: opening the filter screen can take longer than the wait itself,
+  // and Genie's second click only runs after that. A held key (Genie doesn't check for repeats) is one press too.
   const RUN_STEP_GUARD_MS = 300;
   let runStepAt = 0;
+  let runKeyHeld = false;
+  // On window, so it runs before FUT Genie's listener on document.
+  window.addEventListener("keydown", event => { runKeyHeld = event.repeat; }, true);
+  window.addEventListener("keyup", () => { runKeyHeld = false; }, true);
 
-  function runStepAllowed() {
-    if (!run || Date.now() - runStepAt < RUN_STEP_GUARD_MS) return false;
+  function runStep(action) {
+    if (!run || runKeyHeld || Date.now() - runStepAt < RUN_STEP_GUARD_MS) return;
     runStepAt = Date.now();
-    return true;
+    try {
+      action();
+    } finally {
+      runStepAt = Date.now();
+    }
   }
 
   function renderRunBar() {
@@ -4611,21 +4637,21 @@ function priceWatchMain(SCRIPT_VERSION) {
       prev.title = "Vorige klaarzetten";
       next.title = "Volgende club/kwaliteit klaarzetten (zoeken doe je zelf)";
       stop.title = "Stock-ronde stoppen";
-      prev.addEventListener("click", () => runStepAllowed() && goToRule(run.listId, run.index - 1));
+      prev.addEventListener("click", () => runStep(() => goToRule(run.listId, run.index - 1)));
       // At the last rule "Volgende" starts over at the first one.
-      next.addEventListener("click", () => {
-        if (!runStepAllowed()) return;
+      next.addEventListener("click", () => runStep(() => {
         const list = getStock().find(item => item.id === run.listId);
-        const count = list ? stockRules(list).length : 0;
-        const atEnd = run.index + 1 >= count;
-        if (atEnd && list && list.fodderRating && list.mode === "bin") {
-          // First completed BIN cycle -> 150, then 200, 250, etc. Persist per fodder cycle.
-          list.fodderBidMin = (Number(list.fodderBidMin) || 100) + 50;
+        const rules = list ? stockRules(list) : [];
+        const atEnd = run.index + 1 >= rules.length;
+        if (atEnd && list && list.mode !== "bid") {
+          // First completed BIN round -> 150, then 200, 250, etc. Above every max BIN it starts over at 0.
+          const raised = roundUpToStep((Number(list.fodderBidMin) || 100) + 50);
+          list.fodderBidMin = raised >= Math.max(...rules.map(rule => rule.max || Infinity)) ? 0 : raised;
           saveStock();
-          showToast(`🔼 Volgende BIN-foddercyclus: minimum bod ${priceFormat.format(list.fodderBidMin)}`, true);
+          showToast(list.fodderBidMin ? `🔼 Nieuwe ronde: min bid ${priceFormat.format(list.fodderBidMin)}` : "Nieuwe ronde: min bid weer op 0", true);
         }
         goToRule(run.listId, atEnd ? 0 : run.index + 1);
-      });
+      }));
       stop.addEventListener("click", stopRun);
 
       // Lazy flip: the cheapest BIN you saw → the filter becomes "market − under".

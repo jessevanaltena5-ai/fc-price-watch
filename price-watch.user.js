@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.3
+// @version      2.29.4
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3522,6 +3522,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (rating < 45 || rating > 99) return null;
     const columns = match[3].replace(/\(.*?\)/g, " ").split("/").map(column => column.trim()).filter(Boolean).slice(0, 2);
     if (!columns.length) return null;
+    return { name: match[1].trim(), rating, ...pickTipColumn(columns, platform) };
+  }
+
+  // The price for your platform out of "console / pc" columns.
+  function pickTipColumn(columns, platform) {
     const markOf = column => (/\bpc\b|\dpc\b/i.test(column) ? "pc" : /console|ps[45]?|xbox/i.test(column) ? "console" : null);
     let index = columns.length === 1 ? 0 : platform === "pc" ? 1 : 0;
     const marked = columns.findIndex(column => markOf(column) === platform);
@@ -3533,7 +3538,23 @@ function priceWatchMain(SCRIPT_VERSION) {
     const coins = /\bskip\b/i.test(column) || !price ? null : fodderCoins(price[1]);
     // The other platform's price still helps to recognise the card ("Felix-84 <197 / skip").
     const anyPrice = columns.map(text => !/\bskip\b/i.test(text) && text.match(/(\d+(?:[.,]\d+)?)/)).find(Boolean);
-    return { name: match[1].trim(), rating, coins, skip: !coins, fitCoins: coins || (anyPrice ? fodderCoins(anyPrice[1]) : null) };
+    return { coins, skip: !coins, fitCoins: coins || (anyPrice ? fodderCoins(anyPrice[1]) : null) };
+  }
+
+  // The same tips without a rating: "Pacho <120 / <105", "Saliba <16 / skip", "Hakimi low 90s / low 80s".
+  // Two columns are required: a single "Name <230" stays a follow-up price for an existing snipe list.
+  const TIP_PRICE_COLUMN = /^(?:skip|(?:[<≤~]|(?:low|mid|high)\s)?\s*\d+(?:[.,]\d+)?(?:\s*[-–]\s*\d+(?:[.,]\d+)?)?\s*(?:k|s)?\s*(?:pc|console|ps[45]?|xbox)?)$/i;
+
+  function parseUnratedPriceLine(rawLine, platform) {
+    if (PRICE_LINE.test(rawLine)) return null; // "Golds <650 / <700" is about quality, not a player
+    const line = rawLine.replace(/@\w+/g, " ").replace(/[•*_`>]+/g, " ").trim();
+    const at = line.search(/\s*[<≤~]|\s+(?:low|mid|high|skip)\b/i);
+    if (at <= 0) return null;
+    const name = line.slice(0, at).trim();
+    if (/\d/.test(name) || name.split(/\s+/).length > 4 || matchLeague(name)) return null;
+    const columns = line.slice(at).replace(/\(.*?\)/g, " ").split("/").map(column => column.trim()).filter(Boolean);
+    if (columns.length !== 2 || !columns.every(column => TIP_PRICE_COLUMN.test(column)) || columns.every(column => /^skip$/i.test(column))) return null;
+    return { name, rating: null, ...pickTipColumn(columns, platform) };
   }
 
   // The tip's rating is usually a special (TOTW/promo) of the player: "Hemp-88" while her regular card is 87.
@@ -3650,6 +3671,17 @@ function priceWatchMain(SCRIPT_VERSION) {
     return [...pool].sort((a, b) => versionCost(a, tipCoins) - versionCost(b, tipCoins))[0];
   }
 
+  // A priced tip without a rating: the regular card when its Genie price is within 1.5× of the tip's fit,
+  // otherwise the normal (non-holo) version closest to the tip price.
+  function pickUnratedVersion(versions, baseId, tipCoins) {
+    const regular = versions.find(version => version.definitionId === baseId) || null;
+    if (!tipCoins) return regular || versions[0] || null;
+    const FAR = Math.log(1.5);
+    if (regular && versionCost(regular, tipCoins) <= FAR) return regular;
+    const best = versions.filter(version => !isHolo(version)).sort((a, b) => versionCost(a, tipCoins) - versionCost(b, tipCoins))[0];
+    return best && versionCost(best, tipCoins) <= FAR ? best : regular || best || versions[0] || null;
+  }
+
   function versionLabel(version, baseId) {
     const price = (geniePrice(version.definitionId) || {}).price;
     const kind = version.definitionId === baseId ? "Gewoon" : rarityName(version.rarity);
@@ -3669,9 +3701,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     let skipped = 0;
     const platform = userPlatform();
     String(text || "").split(/\r?\n/).forEach(rawLine => {
-      const rated = parseRatedPriceLine(rawLine, platform);
+      const rated = parseRatedPriceLine(rawLine, platform) || parseUnratedPriceLine(rawLine, platform);
       if (rated) {
-        const match = matchRatedPlayer(rated.name, rated.rating);
+        const match = rated.rating ? matchRatedPlayer(rated.name, rated.rating) : matchPlayer(rated.name);
         if (!match.player) {
           skipped++;
           return;
@@ -3684,7 +3716,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
       rawLine.split(/[,;/]/).forEach(part => {
         const line = part.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–\d.)]+\s*/, "").trim();
-        if (!line || /\d/.test(line)) return;
+        if (!line || /\d/.test(line) || /^skip$/i.test(line)) return; // "skip" is a price column, not Oliver Skipp
         const words = line.split(/\s+/);
         if (words.length > 4 || line.length > 32 || /[.!?:]$/.test(line)) return; // prose
         if (matchLeague(line)) return;
@@ -5672,9 +5704,9 @@ function priceWatchMain(SCRIPT_VERSION) {
           const versions = byPlayer.get(player.id) || [];
           await fetchGeniePrices(versions.map(version => version.definitionId));
           if (select.value !== String(player.id)) return;
-          // No rating in the tip: the regular card, unless you pick another version.
+          // No rating in the tip: the regular card, unless the tip price is far from it and another version fits.
           const pick = item.tipRating ? pickVersion(versions, item.tipRating, parsePrice(maxInput.value) || item.fitCoins)
-            : versions.find(version => version.definitionId === player.id) || versions[0] || null;
+            : pickUnratedVersion(versions, player.id, parsePrice(maxInput.value) || item.fitCoins);
           versionState.playerId = player.id;
           versionState.versions = versions;
           versionSelect.value = "";

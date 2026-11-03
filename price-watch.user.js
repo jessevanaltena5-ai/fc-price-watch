@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.5
+// @version      2.29.6
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4053,7 +4053,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     roshn: 350, saudi: 350, spl: 350, "saudi pro league": 350,
     epl: 13, "premier league": 13, prem: 13,
     laliga: 53, "la liga": 53, "serie a": 31, bundesliga: 19, "ligue 1": 16, eredivisie: 10,
-    wsl: 2216, nwsl: 2221, mls: 39
+    wsl: 2216, "barclays wsl": 2216, nwsl: 2221, mls: 39
   };
 
   function levenshtein(a, b) {
@@ -4338,6 +4338,15 @@ function priceWatchMain(SCRIPT_VERSION) {
         };
         rules.push(current);
       } else if (current) {
+        // A follow-up line ("Pos: GK/ST", "<650/700 ideally prem") belongs to the rule above. A heading
+        // ("France - Ligue 1") or a sentence ("If Cards sell @ 900") ends it instead.
+        const probe = { nation: null, leagues: [], leaguesOptional: false, positions: [], max: null, ideal: null, unknown: [] };
+        readFilterLine(probe, line);
+        const unknownWords = probe.unknown.join(" ").split(/\s+/).filter(Boolean).length;
+        if (unknownWords > 1 || !(probe.positions.length || probe.max || probe.leaguesOptional)) {
+          current = null;
+          return;
+        }
         current.raw += ` · ${line}`;
       } else {
         return;
@@ -6166,7 +6175,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           const updateSteps = () => {
             const count = filterSteps(rule).length;
             steps.textContent = `${count} zoekopdracht${count === 1 ? "" : "en"}: ` + filterSteps(rule).map(filterStepLabel).join(" · ") +
-              (rule.unknown && rule.unknown.length ? ` · niet herkend: "${rule.unknown.join("\", \"")}"` : ""); +
+              (rule.unknown && rule.unknown.length ? ` · niet herkend: "${rule.unknown.join("\", \"")}"` : "") +
+              (rule.max ? "" : " · geen max BIN: je ziet de hele markt") +
               (rule.priceNote === "discard" && !rule.max ? " · ⚠ \"at discard\": vul de quick-sell-waarde in als max BIN" : "") +
               (rule.note ? ` · ${rule.note}` : "");
           };
@@ -6186,9 +6196,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       const message = el("span", "pt-muted");
       back.addEventListener("click", showPasteStep);
       save.addEventListener("click", () => {
-        const chosen = rules.filter(rule => rule.enabled !== false && rule.max && (rule.nation || rule.leagues.length));
+        // Without a max BIN the filter shows the whole market (tips like "if buy now isn't profitable, move on").
+        const chosen = rules.filter(rule => rule.enabled !== false && (rule.nation || rule.leagues.length));
         if (!chosen.length) {
-          message.textContent = "Kies minstens één regel met een land (of competitie) en een max BIN.";
+          message.textContent = "Kies minstens één regel met een land (of competitie).";
           return;
         }
         chosen.forEach(rule => { delete rule.unknown; });

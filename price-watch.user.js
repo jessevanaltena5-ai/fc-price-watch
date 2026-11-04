@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.7
+// @version      2.29.8
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1007,7 +1007,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (own && own !== criteria) {
         if (criteria.__futgenieHoloOnly) own.__futgenieHoloOnly = true;
         else delete own.__futgenieHoloOnly;
-        if (criteria.minBid) own.minBid = criteria.minBid;
+        own.minBid = criteria.minBid || 0;
       }
     } catch (_) {
       // Holo stays on our criteria only.
@@ -4573,6 +4573,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   async function startRun(listId) {
     const list = getStock().find(item => item.id === listId);
     if (!list || runLoading) return;
+    // A new run starts with EA's default min bid again; only "Opnieuw" within a run raises it.
+    if (list.fodderBidMin) {
+      list.fodderBidMin = 0;
+      saveStock();
+    }
     if (list.type === "players") {
       // Fresh prices first, then "higher cost cards first".
       run = { listId, index: 0 };
@@ -4599,6 +4604,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (criteria) delete criteria.__futgenieHoloOnly;
     } catch (_) {
       // No saved criteria.
+    }
+    const list = run && getStock().find(item => item.id === run.listId);
+    if (list && list.fodderBidMin) {
+      list.fodderBidMin = 0;
+      saveStock();
     }
     run = null;
     saveRun();

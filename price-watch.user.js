@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.6
+// @version      2.29.7
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1920,6 +1920,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     return Math.max(FLIP_MIN_BIN, roundDownToStep(marketPrice - list.flip.under));
   }
 
+  // Filter lists: sold instantly at `sell` → max BIN that leaves the list's profit % after the 5% tax
+  // (2.300 → 2.185 after tax → 5% profit → 2.000).
+  function filterBuyMax(list, sell) {
+    return roundDownToStep(sell * (1 - EA_TAX) / (1 + profitFor(list) / 100));
+  }
+
   function flipNet(sell, buy) {
     return Math.round(sell * (1 - EA_TAX) - buy);
   }
@@ -2000,7 +2006,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const inputs = filterPriceInputs();
     const shown = inputs.length === 4 ? { minBid: parsePrice(inputs[0].value), maxBuy: parsePrice(inputs[3].value) } : null;
     const minBid = Math.max((criteria && criteria.minBid) || 0, (shown && shown.minBid) || 0);
-    const maxBuy = (criteria && criteria.maxBuy) || (shown && shown.maxBuy) || 0;
+    const maxBuy = (shown && shown.maxBuy) || (criteria && criteria.maxBuy) || 0; // what you see first
     if (!maxBuy || minBid < maxBuy) return;
     if (criteria) criteria.minBid = 0;
     if (shown) {
@@ -2016,17 +2022,26 @@ function priceWatchMain(SCRIPT_VERSION) {
   function installMinBidWrap() {
     if (minBidWrapInstalled) return;
     minBidWrapInstalled = true;
-    document.addEventListener("keydown", event => {
-      if (event.key !== "ArrowRight") return;
-      // After FUT Genie has raised the value.
-      window.setTimeout(() => {
+    // Min bid at or above max buy now → back to 0. Checked after FUT Genie's arrow keys, EA's +/− buttons and
+    // typing in the price fields. On window in the capture phase: FUT Genie stops the arrow keys on document,
+    // so a listener there never heard them.
+    const check = () => {
+      if (!filterPriceInputs().length) return;
+      [80, 400].forEach(delay => window.setTimeout(() => {
         try {
           wrapMinBid();
         } catch (error) {
           console.warn("Price Watch: min bid terugzetten mislukt.", error);
         }
-      }, 80);
-    });
+      }, delay));
+    };
+    window.addEventListener("keydown", event => { if (/^Arrow/.test(event.key) || event.key === "Enter") check(); }, true);
+    window.addEventListener("click", event => {
+      if (event.target instanceof Element && event.target.closest(".search-prices")) check();
+    }, true);
+    window.addEventListener("change", event => {
+      if (event.target instanceof Element && event.target.closest(".search-prices")) check();
+    }, true);
   }
 
   // --- One click Buy Now: no confirmation pop-up after your own click on Buy Now --------------------
@@ -3075,14 +3090,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       }));
     }
     if (list.type === "filters") {
-      return list.rules.filter(rule => rule.enabled !== false).flatMap(rule => filterSteps(rule).map(step => ({
-        filter: rule,
-        position: step.position,
-        league: step.league,
-        max: rule.max,
-        ideal: rule.ideal,
-        key: `f${rule.id}|${step.position || "*"}|${step.league ? step.league.id : "*"}`
-      })));
+      return list.rules.filter(rule => rule.enabled !== false).flatMap(rule => filterSteps(rule).map(step => {
+        const key = `f${rule.id}|${step.position || "*"}|${step.league ? step.league.id : "*"}`;
+        // The instant-sell price you entered for this filter sets its max BIN.
+        const sell = list.sell && list.sell[key] || null;
+        return {
+          filter: rule,
+          position: step.position,
+          league: step.league,
+          sell,
+          max: sell ? filterBuyMax(list, sell.price) : rule.max,
+          ideal: sell ? null : rule.ideal,
+          key
+        };
+      }));
     }
     if (list.type === "players") {
       return list.players.map(player => ({
@@ -4693,7 +4714,42 @@ function priceWatchMain(SCRIPT_VERSION) {
       marketInput.addEventListener("keydown", event => { if (event.key === "Enter") marketSet.click(); });
       marketClear.addEventListener("click", () => setMarket(null));
       market.append(marketInput, marketSet, marketBuy, marketClear);
-      runBar.append(info, market, prev, next, flip, stop, el("span", "pt-search-count"));
+
+      // Filter lists: the price a card sells for instantly → max BIN for this filter, remembered; then the next one.
+      const sellBox = el("div", "pt-run-market pt-run-sell");
+      const sellInput = el("input", "pt-target-input");
+      sellInput.inputMode = "numeric";
+      sellInput.placeholder = "verkoop";
+      sellInput.title = "Prijs waarvoor de kaart direct verkoopt: max BIN = na 5% belasting min je winst-%";
+      const sellSave = el("button", "pt-run-btn", "OK ▶");
+      const sellClear = el("button", "pt-run-btn", "↺");
+      [sellSave, sellClear].forEach(button => { button.type = "button"; });
+      sellSave.title = "Onthouden en de volgende klaarzetten";
+      sellClear.title = "Verkoopprijs vergeten (weer de hele markt)";
+      const setSell = price => {
+        const list = run && getStock().find(item => item.id === run.listId);
+        const rule = list && stockRules(list)[run.index];
+        if (!rule || !rule.filter) return false;
+        list.sell = list.sell || {};
+        if (price) list.sell[rule.key] = { price, at: Date.now() };
+        else delete list.sell[rule.key];
+        sellInput.value = "";
+        sellInput.blur();
+        saveStock();
+        return true;
+      };
+      sellSave.addEventListener("click", () => {
+        const price = parsePrice(sellInput.value);
+        if (!price || !setSell(price)) return;
+        const list = getStock().find(item => item.id === run.listId);
+        const rule = list && stockRules(list)[run.index];
+        if (rule) showToast(`Onthouden: verkoop ${priceFormat.format(price)} → koop ≤ ${priceFormat.format(rule.max)} (${formatSigned(flipNet(price, rule.max))})`, true);
+        next.click();
+      });
+      sellInput.addEventListener("keydown", event => { if (event.key === "Enter") sellSave.click(); });
+      sellClear.addEventListener("click", () => { if (setSell(null)) goToRule(run.listId, run.index); });
+      sellBox.append(sellInput, sellSave, sellClear);
+      runBar.append(info, market, sellBox, prev, next, flip, stop, el("span", "pt-search-count"));
       updateSearchBadges();
       document.body.appendChild(runBar);
     }
@@ -4729,6 +4785,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       info.append(
         el("div", "pt-run-title", `${filterRuleTitle(rule.filter)}${rule.position ? ` · ${rule.position}` : ""} ≤ ${rule.max ? priceFormat.format(rule.max) : "—"}`),
         el("div", "pt-run-sub", `${rule.league ? rule.league.label : "alle competities"}` + (rule.ideal ? ` · ideaal ≤ ${priceFormat.format(rule.ideal)}` : "") +
+          (rule.sell ? ` · verkoop ${priceFormat.format(rule.sell.price)} = ${formatSigned(flipNet(rule.sell.price, rule.max))} na 5%` : " · vul in wat direct verkoopt") +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else if (list.flip && rule.market) {
@@ -4762,6 +4819,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     marketBox.style.display = list.flip && rule.club && !runLoading ? "" : "none";
     marketBox.lastChild.style.display = rule.market ? "" : "none";
     marketBox.querySelector(".pt-run-buy").style.display = rule.market ? "" : "none";
+    const sellBox = runBar.querySelector(".pt-run-sell");
+    sellBox.style.display = rule.filter && !runLoading ? "" : "none";
+    sellBox.lastChild.style.display = rule.sell ? "" : "none";
     if (state) info.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
 
     const nextButton = runBar.querySelector(".pt-run-next");

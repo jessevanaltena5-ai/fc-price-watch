@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.29.8
+// @version      2.30.0
 // @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -802,6 +802,16 @@ function priceWatchMain(SCRIPT_VERSION) {
   let marketPrices = null;
   let marketBusy = false;
   let marketBusySince = 0;
+  // Last lowest-price search per card: the cheapest prices with how many listings at each.
+  const lastLowest = {};
+
+  // "900 ×1 · 950 ×3 · 1.000 ×4+" ("+" = seen on a full page: there may be more at that price).
+  function formatLowestCounts(definitionId) {
+    const result = lastLowest[definitionId];
+    if (!result || !result.counts.length) return "";
+    return result.counts.map(({ price, count, exact }) => `${priceFormat.format(price)} ×${count}${exact ? "" : "+"}`).join(" · ") +
+      (result.certain ? "" : " (nog niet zeker de laagste)");
+  }
 
   function getMarketPrices() {
     if (marketPrices) return marketPrices;
@@ -851,11 +861,11 @@ function priceWatchMain(SCRIPT_VERSION) {
           return;
         }
         const items = (response.data && response.data.items) || [];
-        const prices = items.map(item => {
+        const listings = items.map(item => {
           const auction = typeof item.getAuctionData === "function" ? item.getAuctionData() : item._auction;
-          return auction && auction.buyNowPrice;
-        }).filter(price => price > 0);
-        resolve(prices.length ? Math.min(...prices) : null);
+          return { id: (auction && auction.tradeId) || item.id, price: auction && auction.buyNowPrice };
+        }).filter(listing => listing.price > 0);
+        resolve({ listings, full: items.length >= criteria.count });
       });
     });
   }
@@ -884,18 +894,46 @@ function priceWatchMain(SCRIPT_VERSION) {
     marketBusySince = Date.now();
     try {
       let lowest = null;
+      let certain = false;
+      // Every listing seen (by trade id), and the highest max buy whose page wasn't full: every listing
+      // at or below that price is in it, so those counts are exact.
+      const seen = new Map();
+      let exactUpTo = 0;
+      let maxBuy = null;
       for (let search = 1; search <= MARKET_MAX_SEARCHES; search++) {
         if (search > 1) {
           const [min, max] = MARKET_PAUSE_MS;
           await new Promise(resolve => window.setTimeout(resolve, min + Math.random() * (max - min)));
         }
         if (onProgress) onProgress(search, lowest);
-        const below = lowest ? priceStepBelow(lowest) : null;
-        if (below !== null && below < 150) break;
-        const cheapest = await searchMarketOnce(definitionId, below);
-        if (cheapest === null) break; // nothing cheaper: `lowest` is the lowest BIN
+        if (maxBuy !== null && maxBuy < 150) {
+          certain = true;
+          break;
+        }
+        const result = await searchMarketOnce(definitionId, maxBuy);
+        result.listings.forEach(listing => seen.set(listing.id, listing.price));
+        const cheapest = result.listings.length ? Math.min(...result.listings.map(listing => listing.price)) : null;
+        if (!result.full) {
+          // Every listing up to this max is on the page: `cheapest` is the lowest BIN and those counts are exact.
+          exactUpTo = Math.max(exactUpTo, maxBuy === null ? Infinity : maxBuy);
+          if (cheapest !== null) lowest = cheapest;
+          certain = true;
+          break;
+        }
+        // A full page: search again up to its cheapest price (that price included, so it gets counted),
+        // or just below it when the whole page was already at that price.
         lowest = cheapest;
+        maxBuy = maxBuy !== null && cheapest >= maxBuy ? priceStepBelow(cheapest) : cheapest;
       }
+      const counts = new Map();
+      seen.forEach(price => counts.set(price, (counts.get(price) || 0) + 1));
+      lastLowest[definitionId] = {
+        lowest,
+        certain,
+        at: Date.now(),
+        counts: [...counts.entries()].sort((a, b) => a[0] - b[0]).slice(0, 5)
+          .map(([price, count]) => ({ price, count, exact: price <= exactUpTo }))
+      };
       if (lowest) {
         getMarketPrices()[definitionId] = [lowest, Date.now()];
         try {
@@ -1680,7 +1718,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           // Phones show no tooltips: say the result on screen.
           const state = distanceState(entry.target, price);
           showToast(price
-            ? `${entry.name}: laagste BIN ${priceFormat.format(price)}` + (entry.target ? ` · afstand tot doel ${state.text}` : "")
+            ? `${entry.name}: ${formatLowestCounts(entry.definitionId) || `laagste BIN ${priceFormat.format(price)}`}` + (entry.target ? ` · afstand tot doel ${state.text}` : "")
             : `${entry.name}: niets te koop gevonden`, true);
           listeners.forEach(listener => listener());
         } catch (error) {
@@ -6832,7 +6870,57 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     button.__ptItem = item;
     watchButtonState(button, item);
+    addLowestButton(root, item);
     addProfitInfo(root, item);
+  }
+
+  // "🏷️ Laagste prijs" in the item panel: only searches when you click it (a few searches for this exact
+  // card, each just below the cheapest BIN found), then shows the cheapest prices with their counts.
+  function addLowestButton(root, item) {
+    let wrap = root.querySelector(".pt-lowest-wrap");
+    if (!wrap) {
+      wrap = el("div", "pt-lowest-wrap");
+      const button = el("button", "btn-standard pt-lowest-panel", "🏷️ Laagste prijs");
+      button.type = "button";
+      button.title = "Zoekt deze kaart op de markt (max 6 zoekopdrachten, alleen als je hier klikt) en telt de goedkoopste listings";
+      const out = el("div", "pt-lowest-out");
+      wrap.append(button, out);
+      wrap.__ptShow = () => {
+        const current = wrap.__ptItem;
+        const result = current && lastLowest[current.definitionId];
+        out.textContent = !result ? "" : result.counts.length
+          ? `${formatLowestCounts(current.definitionId)} · ${formatDayTime(result.at)}`
+          : `Niets te koop gevonden · ${formatDayTime(result.at)}`;
+      };
+      let lastClick = 0;
+      button.addEventListener("click", async event => {
+        event.preventDefault();
+        event.stopPropagation();
+        const current = wrap.__ptItem;
+        if (!current || Date.now() - lastClick < 600) return;
+        lastClick = Date.now();
+        if (marketBusy && Date.now() - marketBusySince < 60000) {
+          showToast("Er loopt nog een zoekopdracht – even wachten", false);
+          return;
+        }
+        marketBusy = false; // stuck for over a minute: release it
+        button.disabled = true;
+        out.textContent = "Zoeken…";
+        try {
+          await findLowestPrice(current.definitionId, search => { out.textContent = `Zoeken ${search}…`; });
+          if (wrap.__ptItem === current) wrap.__ptShow();
+          listeners.forEach(listener => listener());
+        } catch (error) {
+          console.warn("Price Watch: laagste prijs zoeken mislukt.", error);
+          out.textContent = `Zoeken mislukt: ${error.message}`;
+        } finally {
+          button.disabled = false;
+        }
+      });
+      (root.querySelector(".ut-button-group") || root).appendChild(wrap);
+    }
+    wrap.__ptItem = item;
+    wrap.__ptShow();
   }
 
   function hookPanels() {
@@ -7340,6 +7428,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-empty { padding: 40px 0 32px; text-align: center; color: #9aa6b8; font-size: 15px; }
 
 .pt-watch-add.pt-watching { opacity: .8; }
+.pt-lowest-wrap { display: flex; flex-direction: column; gap: 4px; }
+.pt-lowest-out { font-size: 13px; line-height: 1.4; color: #e8e8e8; text-align: center; padding: 0 6px; }
+.pt-lowest-out:empty { display: none; }
 .pt-transfer-card .pt-tl-block { margin: 14px 0; padding: 12px; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; }
 .pt-tl-title { margin: 0 0 8px; font-size: 15px; }
 .pt-tl-line { font-size: 13px; margin: 6px 0; }
@@ -7809,7 +7900,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // iPhone: the EA app swallows the click that should follow a tap, so our buttons never fire. Turn a real
   // tap (finger didn't move) on our own controls into a click ourselves, and cancel the native one.
   if ("ontouchstart" in window) {
-    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-picker, .pt-ql";
+    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-lowest-wrap, .pt-picker, .pt-ql";
     function openSelectPicker(select) {
       document.querySelectorAll(".pt-picker").forEach(old => old.remove());
       const overlay = el("div", "pt-picker");

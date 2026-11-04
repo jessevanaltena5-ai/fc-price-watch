@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.30.0
-// @description  Eigen Price Watch-tab in de FC web app met FUT.GG-PC-prijzen, PC-instapdoel, afstand (kleur + sortering), kopieerknop, transfermarkt-knop (vult alleen filters in), een "+ Price Watch"-knop bij elke kaart en stock-lijsten (tip plakken → club/kwaliteit/max BIN klaarzetten). Lijst + prijzen overzetten naar je telefoon via QR-code.
+// @version      2.31.2
+// @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
 // @run-at       document-idle
@@ -295,7 +295,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // IDs from player-prices-index are reconstructed as id0, then cumulative deltas in d; p[i] is that ID's PC price.
   const FUTGG_GAME_YEAR = 27;
   const FUTGG_MANIFEST_URL = `https://r2.fut.gg/${FUTGG_GAME_YEAR}/manifest.json`;
-  const FUTGG_REFRESH_MS = 60 * 1000;
+  const FUTGG_REFRESH_MS = 60 * 1000; // Check the external FUT.GG manifest each minute; this does not call EA market search.
   let futggPrices = Object.create(null);
   let futggPricesAt = 0;
   let futggManifestAt = 0;
@@ -393,7 +393,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     return futggLoading;
   }
 
-  // Check the manifest each minute; its hash changes when FUT.GG publishes a new dynamic feed.
+  // Check the small external manifest each minute; its hash changes when FUT.GG publishes a new dynamic feed.
   window.setInterval(() => refreshFutggPrices(false), FUTGG_REFRESH_MS);
   window.setTimeout(() => refreshFutggPrices(true), 2500);
 
@@ -497,7 +497,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const relevant = rows.filter(row => /de jong|barcola|mora|smenyo|gy[oö]keres/i.test(row.player));
       const displayRows = relevant.length ? relevant : rows.slice(0, 8);
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
-      const report = `FUT.GG PC-feed diagnose (v2.28.4)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const report = `FUT.GG PC-feed diagnose (v2.31.2)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -792,18 +792,155 @@ function priceWatchMain(SCRIPT_VERSION) {
     }, 30 * 1000);
   }
 
-  // --- Lowest market price, only without FUT Genie (phone) and only when you tap the button ---
-  // Searches the market for this exact card, then again just below the cheapest BIN found, until
-  // nothing cheaper turns up. Max MARKET_MAX_SEARCHES searches per tap, with a pause in between.
+  // --- Lowest market price: explicit user action only, with conservative request limits ---
+  // This uses EA's live transfer-market search endpoint. It is never run on page load, on a timer,
+  // or as part of the background FUT.GG feed. EA publishes no fixed safe request limit; these are
+  // intentionally strict local guardrails, not a guarantee against market restrictions.
 
   const MARKET_KEY = "pt_market_v1";
-  const MARKET_MAX_SEARCHES = 6;
-  const MARKET_PAUSE_MS = [1600, 2600];
+  const MARKET_SCAN_LOG_KEY = "pt_market_scan_log_v1";
+  const MARKET_SCAN_BACKOFF_KEY = "pt_market_scan_backoff_v1";
+  const MARKET_SCAN_BACKOFF_INFO_KEY = "pt_market_scan_backoff_info_v1";
+  const MARKET_MAX_SEARCHES = 3;                 // Up to three EA requests per tap (Paletools can do more).
+  const MARKET_PAUSE_MS = [12000, 18000];         // Random 12–18s between requests.
+  const MARKET_SCAN_MAX_10M = 3;                  // At most three scripted EA requests per 10 minutes.
+  const MARKET_SCAN_MAX_HOUR = 6;                // At most two full scans per hour.
+  const MARKET_CARD_COOLDOWN_MS = 15 * 60 * 1000; // Same card: wait 15 minutes before scanning again.
+  const MARKET_TOTAL_GUARD_10M = 8;               // Includes normal EA searches on this device.
+  const MARKET_TOTAL_GUARD_HOUR = 30;             // Includes normal EA searches on this device.
+  const MARKET_ERROR_BACKOFF_MS = 30 * 60 * 1000; // Any EA/search error pauses further scripted scans for 30m.
   let marketPrices = null;
   let marketBusy = false;
   let marketBusySince = 0;
+  // A device-activity guard can be overruled once with a second click on the same card.
+  // The arm exists only in memory and expires quickly; other safety limits remain in force.
+  const MARKET_OVERRIDE_ARM_MS = 30 * 1000;
+  const pendingMarketOverrides = new Map();
   // Last lowest-price search per card: the cheapest prices with how many listings at each.
   const lastLowest = {};
+
+  function getMarketScanLog() {
+    const now = Date.now();
+    const entries = readJson(MARKET_SCAN_LOG_KEY, []);
+    const valid = Array.isArray(entries) ? entries.filter(entry => entry && Number(entry.at) > now - 24 * 60 * 60 * 1000 && entry.id != null) : [];
+    if (!Array.isArray(entries) || valid.length !== entries.length) writeJson(MARKET_SCAN_LOG_KEY, valid);
+    return valid;
+  }
+
+  function waitLabel(until) {
+    const minutes = Math.max(1, Math.ceil((until - Date.now()) / 60000));
+    if (minutes < 60) return `ongeveer ${minutes} min.`;
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? `ongeveer ${hours} uur en ${rest} min.` : `ongeveer ${hours} uur`;
+  }
+
+  // When the rolling window is full, calculate when enough old entries expire for one slot to open.
+  function nextSearchSlot(entries, limit, windowMs) {
+    const sorted = entries.map(entry => Number(entry.at || entry)).filter(Number.isFinite).sort((a, b) => a - b);
+    if (sorted.length < limit) return Date.now();
+    return sorted[sorted.length - limit] + windowMs;
+  }
+
+  function marketScanBlockReason(definitionId, continuingScan = false, overrideDeviceGuard = false) {
+    const now = Date.now();
+    const backoffUntil = Number(readJson(MARKET_SCAN_BACKOFF_KEY, 0)) || 0;
+    if (backoffUntil > now) {
+      const minutes = Math.ceil((backoffUntil - now) / 60000);
+      const info = readJson(MARKET_SCAN_BACKOFF_INFO_KEY, {}) || {};
+      if (info.kind === "rateLimit") {
+        const status = info.status ? ` (HTTP ${info.status})` : "";
+        return `EA gaf een rate-limit-/Too Many Actions-signaal${status}. BIN-scans zijn uit voorzorg gepauzeerd; probeer over ongeveer ${minutes} min. opnieuw. Dit is een echte EA-reactie. De override kan deze pauze niet passeren.`;
+      }
+      if (info.kind === "timeout") {
+        return `EA heeft niet op tijd geantwoord. Price Watch pauzeert BIN-scans uit voorzorg nog ${minutes} min. Dit bewijst op zichzelf niet dat EA je heeft geblokkeerd.`;
+      }
+      return `EA gaf geen bruikbaar antwoord. Price Watch pauzeert BIN-scans uit voorzorg nog ${minutes} min. Dit is niet automatisch een softban.`;
+    }
+
+    const entries = getMarketScanLog();
+    const recent = entries.filter(entry => Number(entry.at) > now - 10 * 60 * 1000);
+    const hourly = entries.filter(entry => Number(entry.at) > now - 60 * 60 * 1000);
+    const lastCard = entries.filter(entry => String(entry.id) === String(definitionId))
+      .reduce((latest, entry) => Math.max(latest, Number(entry.at) || 0), 0);
+
+    if (!continuingScan && lastCard && now - lastCard < MARKET_CARD_COOLDOWN_MS) {
+      const until = lastCard + MARKET_CARD_COOLDOWN_MS;
+      return `Deze kaart is al door Price Watch gecontroleerd. Je kunt haar over ${waitLabel(until)} opnieuw scannen (15 min. kaartcooldown).`;
+    }
+    if (recent.length >= MARKET_SCAN_MAX_10M) {
+      const until = nextSearchSlot(recent, MARKET_SCAN_MAX_10M, 10 * 60 * 1000);
+      return `Price Watch-rem: ${recent.length}/${MARKET_SCAN_MAX_10M} eigen BIN-zoekacties gestart in 10 min. Een volgende scan kan over ${waitLabel(until)}. Dit is een lokale limiet, geen blokkademelding van EA.`;
+    }
+    if (hourly.length >= MARKET_SCAN_MAX_HOUR) {
+      const until = nextSearchSlot(hourly, MARKET_SCAN_MAX_HOUR, 60 * 60 * 1000);
+      return `Price Watch-rem: ${hourly.length}/${MARKET_SCAN_MAX_HOUR} eigen BIN-zoekacties gestart in 1 uur. Een volgende scan kan over ${waitLabel(until)}. Dit is een lokale limiet, geen blokkademelding van EA.`;
+    }
+
+    const total = searchCounts();
+    const allSearches = getSearchLog();
+    const totalRecent = allSearches.filter(at => Number(at) > now - 10 * 60 * 1000);
+    const totalHourly = allSearches.filter(at => Number(at) > now - 60 * 60 * 1000);
+    // Only the two device-wide local activity guards can be overruled. Script limits,
+    // same-card cooldown and any EA-error backoff are never bypassed.
+    if (!overrideDeviceGuard && total.tenMinutes >= MARKET_TOTAL_GUARD_10M) {
+      const until = nextSearchSlot(totalRecent, MARKET_TOTAL_GUARD_10M, 10 * 60 * 1000);
+      return `Lokale druktebeveiliging: ${total.tenMinutes}/${MARKET_TOTAL_GUARD_10M} transfermarktzoekacties gestart in 10 min. BIN-scan uitgesteld tot er ruimte is (over ${waitLabel(until)}). Dit is geen melding dat EA je heeft geblokkeerd.`;
+    }
+    if (!overrideDeviceGuard && total.hour >= MARKET_TOTAL_GUARD_HOUR) {
+      const until = nextSearchSlot(totalHourly, MARKET_TOTAL_GUARD_HOUR, 60 * 60 * 1000);
+      return `Lokale druktebeveiliging: ${total.hour}/${MARKET_TOTAL_GUARD_HOUR} transfermarktzoekacties gestart in 1 uur. BIN-scan uitgesteld tot er ruimte is (over ${waitLabel(until)}). Dit is geen melding dat EA je heeft geblokkeerd.`;
+    }
+    return "";
+  }
+
+  function isDeviceSearchGuard(reason) {
+    return typeof reason === "string" && reason.startsWith("Lokale druktebeveiliging:");
+  }
+
+  function armOrConfirmMarketOverride(definitionId, reason) {
+    const key = String(definitionId);
+    const now = Date.now();
+    const armedAt = pendingMarketOverrides.get(key) || 0;
+    if (!armedAt || now - armedAt > MARKET_OVERRIDE_ARM_MS) {
+      pendingMarketOverrides.set(key, now);
+      throw new Error(`${reason} Klik binnen 30 seconden nogmaals op 'Laagste prijs' om één extra, beperkte scan bewust toe te staan.`);
+    }
+
+    pendingMarketOverrides.delete(key);
+    let accepted = false;
+    try {
+      accepted = window.confirm(
+        "Price Watch heeft een lokale druktebeveiliging geactiveerd omdat er kort geleden veel transfermarktzoekacties op dit apparaat zijn gestart. Dit is geen melding dat EA je account heeft geblokkeerd.\n\n" +
+        "Wil je bewust één beperkte BIN-scan toestaan?\n\n" +
+        `• Maximaal ${MARKET_MAX_SEARCHES} EA-zoekopdrachten voor deze scan\n` +
+        "• 12–18 seconden pauze tussen zoekopdrachten\n" +
+        "• Eigen scannerlimieten, kaartcooldown en pauze na een EA-fout blijven actief\n\n" +
+        "Ook met deze beperking kan EA marktactiviteit afremmen. Er bestaat geen door EA bevestigde veilige grens. Doorgaan?"
+      );
+    } catch (_) {
+      accepted = false;
+    }
+    if (!accepted) throw new Error("Eenmalige override geannuleerd; er zijn geen extra zoekopdrachten gestart.");
+    return true;
+  }
+
+  function recordMarketScanRequest(definitionId) {
+    const entries = getMarketScanLog();
+    entries.push({ at: Date.now(), id: String(definitionId) });
+    writeJson(MARKET_SCAN_LOG_KEY, entries);
+  }
+
+  function setMarketScanBackoff(error) {
+    const kind = error && error.marketSignal === "rateLimit" ? "rateLimit"
+      : error && error.marketSignal === "timeout" ? "timeout" : "eaError";
+    writeJson(MARKET_SCAN_BACKOFF_KEY, Date.now() + MARKET_ERROR_BACKOFF_MS);
+    writeJson(MARKET_SCAN_BACKOFF_INFO_KEY, {
+      kind,
+      status: error && Number(error.status) ? Number(error.status) : null,
+      at: Date.now()
+    });
+  }
 
   // "900 ×1 · 950 ×3 · 1.000 ×4+" ("+" = seen on a full page: there may be more at that price).
   function formatLowestCounts(definitionId) {
@@ -851,13 +988,29 @@ function priceWatchMain(SCRIPT_VERSION) {
         } catch (_) {
           // Already done.
         }
-        reject(new Error("EA antwoordt niet (time-out)"));
+        const error = new Error("EA reageerde niet binnen 15 seconden (time-out).");
+        error.marketSignal = "timeout";
+        reject(error);
       }, 15000);
       observable.observe(context, (sender, response) => {
         window.clearTimeout(timeout);
         sender.unobserve(context);
         if (!response || !response.success) {
-          reject(new Error(`EA weigert de zoekopdracht${response && response.status ? ` (${response.status})` : ""} – even wachten`));
+          const status = Number(response && (response.status || response.statusCode)) || 0;
+          const detail = [
+            response && response.message,
+            response && response.error,
+            response && response.errorMessage,
+            response && response.reason,
+            response && response.responseText
+          ].filter(value => typeof value === "string").join(" ");
+          const rateLimited = status === 429 || /too\s+many\s+actions|rate.?limit|soft.?ban|temporarily\s+blocked/i.test(detail);
+          const error = new Error(rateLimited
+            ? `EA gaf een rate-limit-/Too Many Actions-signaal${status ? ` (HTTP ${status})` : ""}. Stop met scannen en probeer later opnieuw.`
+            : `EA gaf geen succesvolle reactie${status ? ` (HTTP ${status})` : ""}. Price Watch neemt uit voorzorg pauze.`);
+          error.marketSignal = rateLimited ? "rateLimit" : "eaError";
+          error.status = status || null;
+          reject(error);
           return;
         }
         const items = (response.data && response.data.items) || [];
@@ -890,13 +1043,26 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   async function findLowestPrice(definitionId, onProgress) {
     if (marketBusy) throw new Error("Er loopt al een zoekopdracht");
+    if (!definitionId) throw new Error("Speler-ID ontbreekt");
+    const initialBlock = marketScanBlockReason(definitionId);
+    let overrideDeviceGuard = false;
+    if (initialBlock) {
+      if (isDeviceSearchGuard(initialBlock)) {
+        overrideDeviceGuard = armOrConfirmMarketOverride(definitionId, initialBlock);
+      } else {
+        pendingMarketOverrides.delete(String(definitionId));
+        throw new Error(initialBlock);
+      }
+    } else {
+      pendingMarketOverrides.delete(String(definitionId));
+    }
     marketBusy = true;
     marketBusySince = Date.now();
+    let requestError = false;
     try {
       let lowest = null;
       let certain = false;
-      // Every listing seen (by trade id), and the highest max buy whose page wasn't full: every listing
-      // at or below that price is in it, so those counts are exact.
+      // Deduplicate listings by trade id. EA's result order is not guaranteed to be price order.
       const seen = new Map();
       let exactUpTo = 0;
       let maxBuy = null;
@@ -905,24 +1071,38 @@ function priceWatchMain(SCRIPT_VERSION) {
           const [min, max] = MARKET_PAUSE_MS;
           await new Promise(resolve => window.setTimeout(resolve, min + Math.random() * (max - min)));
         }
-        if (onProgress) onProgress(search, lowest);
         if (maxBuy !== null && maxBuy < 150) {
           certain = true;
           break;
         }
-        const result = await searchMarketOnce(definitionId, maxBuy);
+        // Check every request, not only once per run: manual EA searches also count toward the guard.
+        const block = marketScanBlockReason(definitionId, search > 1, overrideDeviceGuard);
+        if (block) {
+          if (search === 1) throw new Error(block);
+          certain = false;
+          break;
+        }
+        recordMarketScanRequest(definitionId);
+        if (onProgress) onProgress(search, lowest, MARKET_MAX_SEARCHES);
+        let result;
+        try {
+          result = await searchMarketOnce(definitionId, maxBuy);
+        } catch (error) {
+          requestError = true;
+          throw error; // Do not retry an EA error; the outer catch applies a long backoff.
+        }
         result.listings.forEach(listing => seen.set(listing.id, listing.price));
         const cheapest = result.listings.length ? Math.min(...result.listings.map(listing => listing.price)) : null;
         if (!result.full) {
-          // Every listing up to this max is on the page: `cheapest` is the lowest BIN and those counts are exact.
+          // A non-full result page contains all listings matching this query.
           exactUpTo = Math.max(exactUpTo, maxBuy === null ? Infinity : maxBuy);
           if (cheapest !== null) lowest = cheapest;
           certain = true;
           break;
         }
-        // A full page: search again up to its cheapest price (that price included, so it gets counted),
-        // or just below it when the whole page was already at that price.
         lowest = cheapest;
+        if (cheapest === null) break;
+        // Include the current price once; only step below when EA returned a full page at the same ceiling.
         maxBuy = maxBuy !== null && cheapest >= maxBuy ? priceStepBelow(cheapest) : cheapest;
       }
       const counts = new Map();
@@ -943,6 +1123,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
       }
       return lowest;
+    } catch (error) {
+      if (requestError) setMarketScanBackoff(error);
+      throw error;
     } finally {
       marketBusy = false;
       lowerClickShield();
@@ -1692,7 +1875,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           showToast(`Transfermarkt openen mislukt – ${error.message}`, false);
         }
       });
-      const LOWEST_TITLE = "Zoek de laagste BIN op de transfermarkt (een paar zoekopdrachten, alleen als je hier tikt)";
+      const LOWEST_TITLE = "Handmatige live BIN-scan: maximaal 3 EA-zoekopdrachten, 12–18s pauze. Bij de apparaatlimiet: klik binnen 30s nogmaals voor een eenmalige bevestigde uitzondering.";
       const lowest = el("button", "pt-icon-btn pt-lowest", "🏷️");
       lowest.type = "button";
       lowest.title = LOWEST_TITLE;
@@ -1705,11 +1888,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
         if (Date.now() - lastTap < 600) return;
         lastTap = Date.now();
-        if (marketBusy && Date.now() - marketBusySince < 60000) {
+        if (marketBusy) {
           showToast(`Er loopt nog een zoekopdracht (${Math.round((Date.now() - marketBusySince) / 1000)}s) – even wachten`, false);
           return;
         }
-        marketBusy = false; // a search stuck for over a minute: release it
+        lowest.disabled = true;
         lowest.textContent = "…";
         showToast(`${entry.name}: laagste prijs zoeken…`, true);
         try {
@@ -1725,6 +1908,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           console.warn("Price Watch: laagste prijs zoeken mislukt.", error);
           flashButton(lowest, "⚠️", false, error.message, "🏷️", LOWEST_TITLE);
           showToast(`${entry.name}: zoeken mislukt – ${error.message}`, false);
+        } finally {
+          lowest.disabled = false;
         }
       };
       // Only a real tap starts a search, never a scroll that happens to start on the button.
@@ -1748,7 +1933,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const priceCell = el("td", "pt-col-price");
       const priceValue = el("span", "pt-price-value");
       const priceSource = el("span", "pt-price-source");
-      priceCell.append(priceValue, priceSource);
+      const liveBinValue = el("span", "pt-price-live-bin");
+      priceCell.append(priceValue, priceSource, liveBinValue);
       const targetCell = el("td", "pt-col-target");
       const input = el("input", "pt-target-input");
       input.type = "text";
@@ -1795,8 +1981,30 @@ function priceWatchMain(SCRIPT_VERSION) {
         priceSource.textContent = sourceLabel;
         priceSource.style.display = sourceLabel ? "inline-flex" : "none";
         priceSource.title = sourceTitle;
+        const liveScan = lastLowest[entry.definitionId];
+        const savedMarket = getMarketPrices()[entry.definitionId];
+        const livePrice = liveScan && liveScan.lowest > 0 ? liveScan.lowest
+          : !liveScan && Array.isArray(savedMarket) && Number(savedMarket[0]) > 0 ? Number(savedMarket[0]) : null;
+        if (livePrice) {
+          const uncertain = !!(liveScan && !liveScan.certain);
+          liveBinValue.textContent = `EA BIN ${uncertain ? "≥ " : ""}${priceFormat.format(livePrice)}`;
+          liveBinValue.title = liveScan
+            ? `Laagste door Price Watch gevonden EA-BIN · ${liveScan.certain ? "resultaat compleet binnen de zoekfilters" : "resultaat is een voorlopige ondergrens; scanlimiet bereikt"} · ${formatDayTime(liveScan.at)}`
+            : `Eerder gevonden EA-BIN · ${formatDayTime(Number(savedMarket[1]) || Date.now())}`;
+          liveBinValue.classList.toggle("pt-live-uncertain", uncertain);
+          liveBinValue.style.display = "block";
+        } else if (liveScan) {
+          liveBinValue.textContent = "EA BIN geen aanbod";
+          liveBinValue.title = `Geen aanbod gevonden tijdens de EA-scan · ${formatDayTime(liveScan.at)}`;
+          liveBinValue.classList.remove("pt-live-uncertain");
+          liveBinValue.style.display = "block";
+        } else {
+          liveBinValue.textContent = "";
+          liveBinValue.title = "Nog geen handmatige EA-BIN-scan gedaan";
+          liveBinValue.style.display = "none";
+        }
         priceCell.classList.toggle("pt-missing", price === null);
-        lowest.style.display = genie() || relayFresh() ? "none" : "";
+        lowest.style.display = ""; // Keep EA live BIN lookup available next to FUT.GG / FUT Genie reference prices.
         priceCell.classList.toggle("pt-transferred", !!(genieEntry && genieEntry._transferred));
         priceCell.classList.toggle("pt-market", !!(genieEntry && genieEntry._market));
         priceCell.title = genieEntry
@@ -2518,11 +2726,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     return `${value >= 0 ? "+" : "−"}${priceFormat.format(Math.abs(value))}`;
   }
 
-  // --- Search counter: your own transfer market searches on this device, against a soft ban ---------
+  // --- Search counter: local visibility into transfer-market activity -------------------------------
   // EA doesn't publish a limit; a few hundred searches an hour is where people start getting blocked.
-  const SEARCH_LOG_KEY = "pt_search_log_v1"; // timestamps, last 24 h
+  const SEARCH_LOG_KEY = "pt_search_log_v1"; // timestamps of transfer-market search calls observed in this browser
   const SEARCH_LIMIT_KEY = "pt_search_limit_v1";
-  const SEARCH_LIMIT_DEFAULT = 300; // per hour
+  const SEARCH_ALERT_STATE_KEY = "pt_search_alert_state_v1";
+  const SEARCH_LIMIT_DEFAULT = 30; // Personal reminder threshold only; not an EA limit or a safe-use target.
+  const SEARCH_ALERT_COOLDOWN_MS = 60 * 60 * 1000; // At most one reminder of each level per hour.
   let searchLog = null;
 
   function getSearchLog() {
@@ -2546,16 +2756,26 @@ function priceWatchMain(SCRIPT_VERSION) {
     return { hour: log.filter(time => time > now - 3600 * 1000).length, tenMinutes: log.filter(time => time > now - 600 * 1000).length, day: log.length };
   }
 
+  function showSearchReminder(level, message) {
+    const now = Date.now();
+    const state = readJson(SEARCH_ALERT_STATE_KEY, {}) || {};
+    const last = Number(state[level]) || 0;
+    if (now - last < SEARCH_ALERT_COOLDOWN_MS) return;
+    state[level] = now;
+    writeJson(SEARCH_ALERT_STATE_KEY, state);
+    showToast(message, false);
+  }
+
   function logSearch() {
     getSearchLog().push(Date.now());
     writeJson(SEARCH_LOG_KEY, getSearchLog());
     const { hour } = searchCounts();
     const limit = searchLimit();
-    if (hour === Math.round(limit * 0.8)) {
-      showToast(`🔎 ${hour} zoekopdrachten het afgelopen uur – rustig aan, rond ${limit} per uur kan EA de markt tijdelijk blokkeren.`, false);
-    } else if (hour === limit || (hour > limit && hour % 25 === 0)) {
-      if (chimeOn()) playChime();
-      showToast(`🛑 ${hour} zoekopdrachten in een uur (grens ${limit}). Neem 15–30 minuten pauze van de transfermarkt.`, false);
+    const near = Math.max(1, Math.ceil(limit * 0.8));
+    if (hour >= limit) {
+      showSearchReminder("limit", `Zoekactiviteit hoog: ${hour}/${limit} transfermarktzoekacties gestart in het afgelopen uur. Dit is jouw lokale herinneringsgrens, geen melding of banstatus van EA.`);
+    } else if (hour >= near) {
+      showSearchReminder("near", `Let op: ${hour}/${limit} transfermarktzoekacties gestart in het afgelopen uur. Je nadert je zelf ingestelde herinneringsgrens. Dit zegt niet dat EA je heeft geblokkeerd.`);
     }
     updateSearchBadges();
   }
@@ -2565,8 +2785,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const limit = searchLimit();
     document.querySelectorAll(".pt-search-count").forEach(node => {
       node.textContent = `🔎 ${counts.hour}/u`;
-      node.title = `Jouw zoekopdrachten op dit apparaat: ${counts.tenMinutes} in 10 min, ${counts.hour} in het afgelopen uur, ${counts.day} in 24 uur (waarschuwing bij ${limit} per uur)`;
-      node.classList.toggle("pt-search-hot", counts.hour >= limit * 0.8);
+      node.title = `Waargenomen transfermarktzoekacties in deze browser: ${counts.tenMinutes} in 10 min, ${counts.hour} in 1 uur, ${counts.day} in 24 uur. Jouw herinneringsgrens: ${limit}/uur. Dit is geen EA-banstatus.`;
+      node.classList.toggle("pt-search-hot", counts.hour >= limit);
     });
   }
 
@@ -2926,8 +3146,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       render();
     });
     limitLabel.append(el("span", "pt-muted", "Waarschuwen bij"), limitInput, el("span", "pt-muted", "per uur"));
-    searchBlock.append(el("h3", "pt-tl-title", "🔎 Zoekteller (tegen een softban)"), searchLine, limitLabel,
-      el("div", "pt-tl-line pt-muted", "Telt de transfermarkt-zoekopdrachten op dit apparaat (de pc en je telefoon tellen elk apart; EA telt ze samen). Op 80% en op de grens krijg je een waarschuwing."));
+    searchBlock.append(el("h3", "pt-tl-title", "🔎 Transfermarkt-zoekteller"), searchLine, limitLabel,
+      el("div", "pt-tl-line pt-muted", "Telt transfermarktzoekacties die deze browser via de EA Web App ziet starten. Dit is alleen een persoonlijke herinneringsgrens: geen officiële EA-limiet en geen indicatie dat je account geblokkeerd is. Pc en telefoon hebben ieder hun eigen lokale teller; EA kan activiteit over apparaten combineren."),
+      el("div", "pt-tl-line pt-muted", "BIN-scan: alleen na een handmatige klik, maximaal 3 zoekopdrachten per scan met 12–18 seconden pauze, maximaal 3 eigen scannerverzoeken per 10 minuten en 6 per uur, plus 15 minuten cooldown per speler. Bij veel andere transfermarktactiviteit kan de lokale druktebeveiliging de scan uitstellen. Alleen een expliciete EA-rate-limitreactie wordt als zodanig gemeld; een time-out of algemene fout is niet automatisch een softban. De pauze na een fout duurt 30 minuten. Dit is geen garantie tegen marktbeperkingen."));
 
     // Club price rises.
     const riseBlock = el("div", "pt-tl-block");
@@ -2994,7 +3215,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       const counts = searchCounts();
       searchLine.textContent = `${counts.tenMinutes} in 10 min · ${counts.hour} in het afgelopen uur · ${counts.day} in 24 uur`;
-      searchLine.classList.toggle("pt-neg", counts.hour >= searchLimit() * 0.8);
+      searchLine.classList.toggle("pt-neg", counts.hour >= searchLimit());
 
       const rise = clubRiseView();
       const relay = getRelay();
@@ -6882,7 +7103,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       wrap = el("div", "pt-lowest-wrap");
       const button = el("button", "btn-standard pt-lowest-panel", "🏷️ Laagste prijs");
       button.type = "button";
-      button.title = "Zoekt deze kaart op de markt (max 6 zoekopdrachten, alleen als je hier klikt) en telt de goedkoopste listings";
+      button.title = "Handmatige live BIN-scan: maximaal 3 EA-zoekopdrachten met 12–18s pauze. Bij de apparaatlimiet: klik binnen 30s nogmaals voor een eenmalige bevestigde uitzondering.";
       const out = el("div", "pt-lowest-out");
       wrap.append(button, out);
       wrap.__ptShow = () => {
@@ -6899,11 +7120,10 @@ function priceWatchMain(SCRIPT_VERSION) {
         const current = wrap.__ptItem;
         if (!current || Date.now() - lastClick < 600) return;
         lastClick = Date.now();
-        if (marketBusy && Date.now() - marketBusySince < 60000) {
+        if (marketBusy) {
           showToast("Er loopt nog een zoekopdracht – even wachten", false);
           return;
         }
-        marketBusy = false; // stuck for over a minute: release it
         button.disabled = true;
         out.textContent = "Zoeken…";
         try {
@@ -7183,7 +7403,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           priceButton.title = `Buy Now = ${source.toLowerCase()} (${formatDayTime(Number(entry._fetchedAt) || Date.now())})`;
         } else {
           priceButton.textContent = "🏷️ Laagste BIN zoeken";
-          priceButton.title = "Zoekt deze kaart op de markt (max 6 zoekopdrachten) en zet de Buy Now één stap onder de goedkoopste";
+          button.title = "Gebruikt beschikbare referentieprijs; zonder prijs kun je handmatig een live BIN-scan starten (max 3 EA-zoekopdrachten).";
         }
       };
       refreshPrice();
@@ -7348,6 +7568,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-table td.pt-col-rarity { color: #aab5c5; }
 .pt-watch-table td.pt-col-price  { font-weight: 700; font-variant-numeric: tabular-nums; color: #fff; overflow: visible; white-space: nowrap; }
 .pt-watch-table .pt-price-value { white-space: nowrap; }
+.pt-watch-table .pt-price-live-bin { display: block; margin-top: 2px; color: #7dd3fc; font-size: 10px; font-weight: 700; line-height: 1.2; white-space: nowrap; }
+.pt-watch-table .pt-price-live-bin.pt-live-uncertain { color: #f3c969; }
 .pt-watch-table .pt-price-source { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 20px; box-sizing: border-box; margin-left: 5px; min-width: 20px; height: 15px; padding: 0 3px; border: 1px solid #526174; border-radius: 4px; color: #aebdd0; font-size: 9px; font-weight: 800; line-height: 1; vertical-align: 2px; }
 .pt-watch-table .pt-price-source[title^="FUT.GG"] { color: #78d6ff; border-color: #287ca4; }
 .pt-watch-table td.pt-missing    { color: #6b7789; font-weight: 400; }

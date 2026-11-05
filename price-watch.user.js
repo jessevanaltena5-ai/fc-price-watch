@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.35.0
+// @version      2.36.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -66,6 +66,18 @@ function priceWatchMain(SCRIPT_VERSION) {
   // "ok" | "unsure" (EA logged in again without a reload) | "blocked" (a bid got 461).
   let sessionState = "ok";
   let sessionAuths = 0;
+  let sessionAuthAt = 0; // last successful POST /ut/auth (page load or EA's silent re-login)
+
+  // Reload, and open Transfer Targets again once the web app is back.
+  const RETURN_KEY = "pt_return_targets";
+  function reloadToTargets() {
+    try {
+      sessionStorage.setItem(RETURN_KEY, String(Date.now()));
+    } catch (_) {
+      // Then you open it yourself.
+    }
+    window.location.reload();
+  }
   let session401At = 0;
   let sessionBar = null;
 
@@ -85,7 +97,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const reload = document.createElement("button");
         reload.type = "button";
         reload.textContent = "⟳ Nu herladen";
-        reload.addEventListener("click", () => window.location.reload());
+        reload.addEventListener("click", reloadToTargets);
         const close = document.createElement("button");
         close.type = "button";
         close.textContent = "✕";
@@ -109,6 +121,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     if (/\/ut\/auth/.test(path) && status >= 200 && status < 300) {
       sessionAuths++;
+      sessionAuthAt = Date.now();
       if (sessionAuths > 1 || Date.now() - session401At < 60 * 1000) {
         eaLog({ kind: "sessie", text: `EA logde opnieuw in zonder herladen (${sessionAuths - 1}× deze keer)` });
         setSessionState("unsure", "⚠ EA heeft je sessie stil vernieuwd. Bieden kan nu geweigerd worden (461). Herlaad nu, vóór je laatste-seconden-bod.");
@@ -661,7 +674,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
       const eaLines = eaLogLines(60);
       lines.push("", "EA-log (biedingen, mislukte EA-verzoeken, EA-meldingen, herladen; nieuwste onderaan):", ...(eaLines.length ? eaLines : ["(nog leeg)"]));
-      const report = `FUT.GG PC-feed diagnose (v2.35.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const report = `FUT.GG PC-feed diagnose (v2.36.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -2780,6 +2793,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!Array.isArray(items)) return;
       const active = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "active"; }).length;
       watchListCount = { n: items.length, active, at: Date.now() };
+      noteWatchedItems(items);
       if (runBar) renderRunBar();
     });
     wrap("requestTransferItems", response => {
@@ -3658,6 +3672,128 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (seconds == null) return "";
     if (seconds >= 3600) return `${Math.floor(seconds / 3600)}u${String(Math.floor(seconds % 3600 / 60)).padStart(2, "0")}`;
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  // --- Session clock + reload advice ----------------------------------------------------------------
+  // EA's server currently drops web-app sessions ~65-75 s after login (401, then bids 461 until a reload).
+  // A reload gives a fresh session; done 35-100 s before your next watched auction ends, you are back in
+  // time and the fresh session usually lasts past the end. Only advice: nothing is sent to EA.
+  const watchedEnds = new Map(); // tradeId -> end time, active auctions in Transfer Targets
+  let watchedSeenAt = 0; // last time Transfer Targets was loaded
+  const RELOAD_LEAD_MIN = 35;
+  const RELOAD_LEAD_MAX = 100;
+  const SESSION_TYPICAL_S = 60;
+  let sessionPill = null;
+
+  function noteWatchedItems(items) {
+    watchedSeenAt = Date.now();
+    watchedEnds.clear();
+    items.forEach(item => {
+      const auction = auctionOf(item);
+      if (!auction || auction.tradeState !== "active") return;
+      const end = auctionEndAt(auction);
+      if (end) watchedEnds.set(auction.tradeId, end);
+    });
+  }
+
+  function nextWatchedEnd() {
+    const now = Date.now();
+    let next = 0;
+    watchedEnds.forEach((end, tradeId) => {
+      const best = Math.min(end, auctionEnds.get(tradeId) || end);
+      if (best > now && (!next || best < next)) next = best;
+    });
+    return next;
+  }
+
+  function drawSessionPill() {
+    if (!sessionAuthAt || !document.body) return;
+    if (!sessionPill) {
+      sessionPill = el("button", "pt-session-pill", "");
+      sessionPill.type = "button";
+      sessionPill.addEventListener("click", reloadToTargets);
+      document.body.appendChild(sessionPill);
+    }
+    const age = Math.round((Date.now() - sessionAuthAt) / 1000);
+    const next = nextWatchedEnd();
+    const left = next ? Math.round((next - Date.now()) / 1000) : null;
+    let text = `🔌 sessie ${formatLeft(age)}`;
+    let level = age >= SESSION_TYPICAL_S - 10 ? "old" : "fresh";
+    let tip = "Leeftijd van je EA-sessie. EA laat sessies nu vaak na ~1 minuut vervallen. Klik = herladen en terug naar Transfer Targets.";
+    if (left != null && left <= 3600) {
+      text += ` · volgende veiling ${formatLeft(left)}`;
+      if (left >= RELOAD_LEAD_MIN && left <= RELOAD_LEAD_MAX && age + left > SESSION_TYPICAL_S) {
+        level = "reload";
+        text = `⟳ Herlaad nú (klik) · volgende veiling over ${formatLeft(left)} · sessie ${formatLeft(age)}`;
+        tip = "Nu herladen geeft een verse sessie die het einde van je volgende veiling waarschijnlijk haalt. Na het laden opent Transfer Targets vanzelf.";
+      } else if (left < RELOAD_LEAD_MIN) {
+        level = sessionState === "ok" ? level : "late";
+        text += " · niet meer herladen";
+        tip = "Te laat om te herladen: bied nu. Faalt het (461), dan haal je deze veiling niet.";
+      }
+    }
+    if (sessionPill.textContent !== text) sessionPill.textContent = text;
+    sessionPill.title = tip;
+    sessionPill.className = `pt-session-pill pt-session-${level}`;
+  }
+
+  window.setInterval(drawSessionPill, 1000);
+
+  // F5 while on Transfer Targets (it was loaded in the last 2 minutes): also go back there.
+  window.addEventListener("beforeunload", () => {
+    try {
+      if (watchedSeenAt && Date.now() - watchedSeenAt < 120 * 1000) sessionStorage.setItem(RETURN_KEY, String(Date.now()));
+    } catch (_) {
+      // Only a convenience.
+    }
+  });
+
+  // After a reload: open Transfers → Transfer Targets as soon as the web app is ready (just navigation).
+  function returnToTargets() {
+    let asked = 0;
+    try {
+      asked = Number(sessionStorage.getItem(RETURN_KEY)) || 0;
+      sessionStorage.removeItem(RETURN_KEY);
+    } catch (_) {
+      return;
+    }
+    if (!asked || Date.now() - asked > 3 * 60 * 1000) return;
+    const started = Date.now();
+    const waitReady = window.setInterval(() => {
+      if (Date.now() - started > 60 * 1000) return void window.clearInterval(waitReady);
+      try {
+        if (!document.querySelector(".ut-tab-bar-item") || !findTabBarController()) return;
+      } catch (_) {
+        return;
+      }
+      window.clearInterval(waitReady);
+      window.setTimeout(() => {
+        try {
+          getAppMain().getRootViewController().setGameViewTab(UTGameTabBarController.TabTag.TRANSFERS);
+        } catch (_) {
+          return;
+        }
+        const press = (node, types) => types.forEach(type => node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window })));
+        let tries = 0;
+        const findTile = window.setInterval(() => {
+          const tile = document.querySelector(".ut-tile-transfer-targets");
+          if (!tile) {
+            if (++tries > 24) {
+              window.clearInterval(findTile);
+              showToast("Open Transfer Targets zelf (tegel niet gevonden).", false);
+            }
+            return;
+          }
+          window.clearInterval(findTile);
+          press(tile, ["mousedown", "mouseup"]);
+          // Still on the hub after a moment: EA wanted a click event instead.
+          window.setTimeout(() => {
+            const still = document.querySelector(".ut-tile-transfer-targets");
+            if (still && still.isConnected) press(still, ["click"]);
+          }, 900);
+        }, 250);
+      }, 800);
+    }, 500);
   }
 
   // What to do with one auction: { kind: won|lost|highest|ok|over, text, bid, left, hot }.
@@ -8419,6 +8555,10 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-session-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 100000; display: flex; gap: 10px; align-items: center; padding: 10px 14px; background: #b86b00; color: #fff; font: 600 14px/1.3 sans-serif; border-radius: 0 0 10px 10px; box-shadow: 0 4px 16px rgba(0,0,0,.5); max-width: 92vw; }
 .pt-session-bar.pt-session-blocked { background: #b3261e; }
 .pt-session-bar button { border: 0; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; background: #fff; color: #222; }
+.pt-session-pill { position: fixed; left: 8px; bottom: 8px; z-index: 99999; border: 0; border-radius: 14px; padding: 5px 11px; font: 600 12px/1.3 sans-serif; cursor: pointer; color: #fff; background: #2f6b3a; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+.pt-session-pill.pt-session-old { background: #8a6d1a; }
+.pt-session-pill.pt-session-reload { background: #b86b00; font-size: 14px; padding: 8px 14px; animation: pt-mb-pulse 1s ease-in-out infinite; }
+.pt-session-pill.pt-session-late { background: #b3261e; }
 .pt-mb-hot { box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-pulse 1s ease-in-out infinite; }
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
 .pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }
@@ -9044,6 +9184,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       installMinBidWrap();
       installListingWatch();
       installNotificationLog();
+      returnToTargets();
       installOneClickBuyNow();
       startClubRise();
       importPendingTransfer();

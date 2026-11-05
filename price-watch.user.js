@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.34.0
+// @version      2.35.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -34,7 +34,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // pop-up messages and each (re)load of the web app, so a "bid failed, restart the app" can be traced.
   // Stays in this browser (localStorage), last 80 entries; shown with Ctrl+Shift+D.
   const EA_LOG_KEY = "pt_ea_log_v1";
-  const EA_LOG_MAX = 80;
+  const EA_LOG_MAX = 200;
 
   function eaLog(entry) {
     try {
@@ -63,6 +63,73 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   eaLog({ kind: "load", text: `web app (her)geladen · Price Watch ${SCRIPT_VERSION || ""}` });
 
+  // "ok" | "unsure" (EA logged in again without a reload) | "blocked" (a bid got 461).
+  let sessionState = "ok";
+  let sessionAuths = 0;
+  let session401At = 0;
+  let sessionBar = null;
+
+  function setSessionState(state, text) {
+    sessionState = state;
+    try {
+      if (state === "ok") {
+        if (sessionBar) sessionBar.remove();
+        sessionBar = null;
+        return;
+      }
+      if (!document.body) return;
+      if (!sessionBar) {
+        sessionBar = document.createElement("div");
+        sessionBar.className = "pt-session-bar";
+        const label = document.createElement("span");
+        const reload = document.createElement("button");
+        reload.type = "button";
+        reload.textContent = "⟳ Nu herladen";
+        reload.addEventListener("click", () => window.location.reload());
+        const close = document.createElement("button");
+        close.type = "button";
+        close.textContent = "✕";
+        close.title = "Verbergen";
+        close.addEventListener("click", () => { if (sessionBar) sessionBar.remove(); sessionBar = null; });
+        sessionBar.append(label, reload, close);
+        document.body.appendChild(sessionBar);
+      }
+      sessionBar.classList.toggle("pt-session-blocked", state === "blocked");
+      sessionBar.firstChild.textContent = text;
+    } catch (_) {
+      // Only a warning.
+    }
+  }
+
+  function noteEaResponse(path, method, status) {
+    const bid = /\/bid$/.test(path);
+    if (status === 401) {
+      session401At = Date.now();
+      eaLog({ kind: "sessie", text: "⚠ EA: sessie verlopen/overgenomen (401) — ergens anders ingelogd? (telefoon-app, game, ander tabblad)" });
+    }
+    if (/\/ut\/auth/.test(path) && status >= 200 && status < 300) {
+      sessionAuths++;
+      if (sessionAuths > 1 || Date.now() - session401At < 60 * 1000) {
+        eaLog({ kind: "sessie", text: `EA logde opnieuw in zonder herladen (${sessionAuths - 1}× deze keer)` });
+        setSessionState("unsure", "⚠ EA heeft je sessie stil vernieuwd. Bieden kan nu geweigerd worden (461). Herlaad nu, vóór je laatste-seconden-bod.");
+      }
+    }
+    if (bid && status === 461) {
+      setSessionState("blocked", "⛔ EA weigert biedingen in deze sessie (461). Opnieuw bieden heeft geen zin: herlaad nu.");
+    } else if (bid && status >= 200 && status < 300 && sessionState !== "ok") {
+      setSessionState("ok");
+      showToastSafe("✅ Bod gelukt: bieden werkt weer in deze sessie.");
+    }
+  }
+
+  function showToastSafe(text) {
+    try {
+      showToast(text, true);
+    } catch (_) {
+      // Toast not ready yet.
+    }
+  }
+
   (function installEaRequestLog() {
     const proto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
     if (!proto || proto.open.__ptLog) return;
@@ -82,8 +149,10 @@ function priceWatchMain(SCRIPT_VERSION) {
           try {
             const path = req.url.replace(/^https?:\/\/[^/]+/, "").split("?")[0].replace(/\d{5,}/g, "#");
             const bid = /\/bid$/.test(path);
+            const watch = /\/watchlist/.test(path) && req.method !== "GET";
             const bad = !(this.status >= 200 && this.status < 300);
-            if (!bid && !bad && !/\/auth/.test(path)) return;
+            noteEaResponse(path, req.method, this.status);
+            if (!bid && !watch && !bad && !/\/auth/.test(path)) return;
             let text = "";
             if (bad) {
               try {
@@ -590,9 +659,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       const relevant = rows.filter(row => /de jong|barcola|mora|smenyo|gy[oö]keres/i.test(row.player));
       const displayRows = relevant.length ? relevant : rows.slice(0, 8);
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
-      const eaLines = eaLogLines(40);
+      const eaLines = eaLogLines(60);
       lines.push("", "EA-log (biedingen, mislukte EA-verzoeken, EA-meldingen, herladen; nieuwste onderaan):", ...(eaLines.length ? eaLines : ["(nog leeg)"]));
-      const report = `FUT.GG PC-feed diagnose (v2.34.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const report = `FUT.GG PC-feed diagnose (v2.35.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -8347,6 +8416,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-mb-badge.pt-mb-lost { color: #9aa6b8; }
 .pt-mb-left { color: #ffd76a; }
 .listFUTItem.pt-mb-over, li.pt-mb-over { opacity: .55; }
+.pt-session-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 100000; display: flex; gap: 10px; align-items: center; padding: 10px 14px; background: #b86b00; color: #fff; font: 600 14px/1.3 sans-serif; border-radius: 0 0 10px 10px; box-shadow: 0 4px 16px rgba(0,0,0,.5); max-width: 92vw; }
+.pt-session-bar.pt-session-blocked { background: #b3261e; }
+.pt-session-bar button { border: 0; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; background: #fff; color: #222; }
 .pt-mb-hot { box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-pulse 1s ease-in-out infinite; }
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
 .pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }

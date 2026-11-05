@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.33.0
+// @version      2.34.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -28,6 +28,98 @@ function priceWatchMain(SCRIPT_VERSION) {
   window[APP_GUARD] = true;
   document.documentElement.setAttribute("data-pt-price-watch", SCRIPT_VERSION || "1");
   const IS_PHONE = window.innerWidth <= 700;
+
+  // --- EA log: passive record of what goes wrong (no requests of our own) ---------------------------
+  // Every bid request with its answer, every failed EA request (status + start of the answer), EA's own
+  // pop-up messages and each (re)load of the web app, so a "bid failed, restart the app" can be traced.
+  // Stays in this browser (localStorage), last 80 entries; shown with Ctrl+Shift+D.
+  const EA_LOG_KEY = "pt_ea_log_v1";
+  const EA_LOG_MAX = 80;
+
+  function eaLog(entry) {
+    try {
+      const list = JSON.parse(localStorage.getItem(EA_LOG_KEY) || "[]");
+      list.push({ t: Date.now(), ...entry });
+      localStorage.setItem(EA_LOG_KEY, JSON.stringify(list.slice(-EA_LOG_MAX)));
+    } catch (_) {
+      // Logging must never get in the way.
+    }
+  }
+
+  function eaLogLines(count) {
+    let list = [];
+    try {
+      list = JSON.parse(localStorage.getItem(EA_LOG_KEY) || "[]");
+    } catch (_) {
+      list = [];
+    }
+    return list.slice(-count).map(entry => {
+      const time = new Date(entry.t).toLocaleString("nl-NL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      if (entry.kind === "http") return `${time}  ${entry.method} ${entry.path} → ${entry.status || "geen antwoord"} (${entry.ms} ms)${entry.text ? `  ${entry.text}` : ""}`;
+      if (entry.kind === "melding") return `${time}  EA-melding: ${entry.text}`;
+      return `${time}  ${entry.text || entry.kind}`;
+    });
+  }
+
+  eaLog({ kind: "load", text: `web app (her)geladen · Price Watch ${SCRIPT_VERSION || ""}` });
+
+  (function installEaRequestLog() {
+    const proto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+    if (!proto || proto.open.__ptLog) return;
+    const open = proto.open;
+    const send = proto.send;
+    const openLogged = function (method, url) {
+      this.__ptReq = { method: String(method || "").toUpperCase(), url: String(url || "") };
+      return open.apply(this, arguments);
+    };
+    openLogged.__ptLog = true;
+    proto.open = openLogged;
+    proto.send = function () {
+      const req = this.__ptReq;
+      if (req && /\/ut\/(game|auth)/.test(req.url)) {
+        const started = Date.now();
+        this.addEventListener("loadend", () => {
+          try {
+            const path = req.url.replace(/^https?:\/\/[^/]+/, "").split("?")[0].replace(/\d{5,}/g, "#");
+            const bid = /\/bid$/.test(path);
+            const bad = !(this.status >= 200 && this.status < 300);
+            if (!bid && !bad && !/\/auth/.test(path)) return;
+            let text = "";
+            if (bad) {
+              try {
+                text = typeof this.responseText === "string" ? this.responseText : "";
+              } catch (_) {
+                try { text = JSON.stringify(this.response); } catch (__) { text = ""; }
+              }
+            }
+            eaLog({ kind: "http", method: req.method, path, status: this.status, ms: Date.now() - started, text: String(text || "").replace(/\s+/g, " ").slice(0, 200) });
+          } catch (_) {
+            // Never interfere with EA's request.
+          }
+        });
+      }
+      return send.apply(this, arguments);
+    };
+  })();
+
+  // EA's own messages at the top of the screen.
+  function installNotificationLog() {
+    const notification = typeof services !== "undefined" && services.Notification;
+    if (!notification || typeof notification.queue !== "function" || notification.queue.__ptLog) return;
+    const original = notification.queue;
+    const wrapped = function (args) {
+      try {
+        const first = Array.isArray(args) ? args[0] : args;
+        const text = typeof first === "string" ? first : first && (first.message || first.text) || JSON.stringify(first);
+        eaLog({ kind: "melding", text: String(text || "").slice(0, 200) });
+      } catch (_) {
+        // Only a log.
+      }
+      return original.apply(this, arguments);
+    };
+    wrapped.__ptLog = true;
+    notification.queue = wrapped;
+  }
 
   // A transfer code opened from the QR code (…/web-app/#pw=PW1.…). Read it before the app touches the URL.
   const TRANSFER_PARAM = /[#&?]pw=(PW1\.[\w-]+)/;
@@ -498,7 +590,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       const relevant = rows.filter(row => /de jong|barcola|mora|smenyo|gy[oö]keres/i.test(row.player));
       const displayRows = relevant.length ? relevant : rows.slice(0, 8);
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
-      const report = `FUT.GG PC-feed diagnose (v2.33.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const eaLines = eaLogLines(40);
+      lines.push("", "EA-log (biedingen, mislukte EA-verzoeken, EA-meldingen, herladen; nieuwste onderaan):", ...(eaLines.length ? eaLines : ["(nog leeg)"]));
+      const report = `FUT.GG PC-feed diagnose (v2.34.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -2612,6 +2706,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       wrapped.__ptListing = true;
       services.Item[method] = wrapped;
     };
+    wrap("requestWatchedItems", response => {
+      const items = (response.response && response.response.items) || (response.data && response.data.items);
+      if (!Array.isArray(items)) return;
+      const active = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "active"; }).length;
+      watchListCount = { n: items.length, active, at: Date.now() };
+      if (runBar) renderRunBar();
+    });
     wrap("requestTransferItems", response => {
       const items = (response.response && response.response.items) || (response.data && response.data.items);
       if (!Array.isArray(items)) return;
@@ -3413,7 +3514,204 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Max BIN so that selling at the Genie price leaves the desired profit after tax:
   // price × 0.95 − max ≥ max × profit%  →  max = price × 0.95 / (1 + profit%).
+  // --- Mass bidding ("Biedlijst"): a players list in bid mode, max bid = BIN x (1 - pct%) --------------
+  // List: players list + { mode: "bid", massBid: { pct } }; player.sell = the BIN you saw yourself
+  // (else the FUT.GG PC price). The script never searches, watches, bids or lists; it prepares the
+  // filter, shows per auction whether your bid still fits, and fills the sell price when you list.
+  const MASS_BID_DEFAULT_PCT = 20;
+  const MASS_BID_WATCH_MAX = 50;
+  const MASS_BID_HOT_SECONDS = 30;
+
+  function massBidPct(list) {
+    const pct = Number(list && list.massBid && list.massBid.pct);
+    return pct > 0 && pct < 90 ? pct : MASS_BID_DEFAULT_PCT;
+  }
+
+  function massBidSell(player) {
+    if (player.sell > 0) return player.sell;
+    const entry = geniePrice(player.definitionId);
+    return entry && entry.price > 0 ? entry.price : 0;
+  }
+
+  // Tip: "fodder: if you get it 10% lower, just hold". Only on fodder bid lists.
+  const MASS_BID_HOLD_PCT = 10;
+
+  function massBidHold(info, paid) {
+    return !!(info && info.list.massBid && info.list.massBid.fodder && info.sell && paid > 0 &&
+      paid <= info.sell * (1 - MASS_BID_HOLD_PCT / 100));
+  }
+
+  function massBidMax(list, player) {
+    const sell = massBidSell(player);
+    return sell ? Math.max(150, roundDownToStep(sell * (1 - massBidPct(list) / 100))) : null;
+  }
+
+  // EA's price ladder: the next allowed price above `price`.
+  function priceStepAbove(price) {
+    return price + (price < 1000 ? 50 : price < 10000 ? 100 : price < 50000 ? 250 : price < 100000 ? 500 : 1000);
+  }
+
+  // The mass-bid entry for a card: the running list first, then any other mass-bid list.
+  function massBidInfo(item) {
+    if (!item || !item.definitionId) return null;
+    const id = item.definitionId;
+    const lists = getStock().filter(list => list.massBid && list.type === "players");
+    if (!lists.length) return null;
+    const running = run && lists.find(list => list.id === run.listId);
+    const ordered = running ? [running, ...lists.filter(list => list !== running)] : lists;
+    for (const list of ordered) {
+      const player = list.players.find(entry => entry.definitionId === id);
+      if (player) return { list, player, max: playerMax(list, player), sell: massBidSell(player) };
+    }
+    return null;
+  }
+
+  // Auction end times per tradeId. EA's auction.expires is the seconds left when the data came in; a
+  // re-render can reuse old data, so only an earlier estimate replaces the one we have (no extensions).
+  const auctionEnds = new Map();
+
+  function auctionEndAt(auction) {
+    if (!auction || !auction.tradeId) return 0;
+    const seconds = Number(auction.expires);
+    const known = auctionEnds.get(auction.tradeId) || 0;
+    if (seconds > 0) {
+      const estimate = Date.now() + seconds * 1000;
+      if (!known || estimate < known) auctionEnds.set(auction.tradeId, estimate);
+    }
+    return auctionEnds.get(auction.tradeId) || 0;
+  }
+
+  function secondsLeft(endAt) {
+    return endAt ? Math.max(0, Math.round((endAt - Date.now()) / 1000)) : null;
+  }
+
+  function formatLeft(seconds) {
+    if (seconds == null) return "";
+    if (seconds >= 3600) return `${Math.floor(seconds / 3600)}u${String(Math.floor(seconds % 3600 / 60)).padStart(2, "0")}`;
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  // What to do with one auction: { kind: won|lost|highest|ok|over, text, bid, left, hot }.
+  function massBidAdvice(item, info) {
+    const auction = auctionOf(item);
+    if (!auction || !info) return null;
+    const state = auction.tradeState;
+    const current = Number(auction.currentBid) || 0;
+    const left = secondsLeft(auctionEndAt(auction));
+    const highest = auction.bidState === "highest";
+    if (state === "closed" || state === "expired" || state === "inactive") {
+      return highest && current
+        ? { kind: "won", text: massBidHold(info, current)
+          ? `🏆 gewonnen voor ${priceFormat.format(current)} · 📦 houden (fodder ≥${MASS_BID_HOLD_PCT}% onder ${priceFormat.format(info.sell)})`
+          : `🏆 gewonnen voor ${priceFormat.format(current)} · verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.sell ? ` = ${formatSigned(flipNet(info.sell, current))}` : ""}` }
+        : { kind: "lost", text: "✖ voorbij" };
+    }
+    if (state !== "active") return null;
+    const max = info.max;
+    if (highest) return { kind: "highest", text: `🟢 jij hoogste ${priceFormat.format(current)}${max ? ` · max ${priceFormat.format(max)}` : ""}`, left };
+    const bid = current > 0 ? priceStepAbove(current) : Number(auction.startingBid) || 150;
+    if (!max) return { kind: "over", text: `bod ${priceFormat.format(bid)} · geen max (geen prijs)`, bid, left };
+    const outbid = auction.bidState === "outbid";
+    if (bid > max) return { kind: "over", text: `${outbid ? "⚠ overboden · " : ""}❌ ${priceFormat.format(bid)} > max ${priceFormat.format(max)}`, bid, left };
+    return {
+      kind: "ok",
+      text: `${outbid ? "⚠ overboden · " : ""}✅ bied ${priceFormat.format(bid)} (max ${priceFormat.format(max)})`,
+      bid,
+      left,
+      hot: left != null && left <= MASS_BID_HOT_SECONDS
+    };
+  }
+
+  // Badges on auction rows (search results and Transfer Targets), kept current every second.
+  const massBidCells = new Set();
+  const massBidPanels = new Set();
+
+  function addMassBidBadge(cell, item) {
+    const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
+    if (!root) return;
+    root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
+    root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest");
+    const info = massBidInfo(item);
+    if (!info || !auctionOf(item)) return;
+    const badge = el("div", "pt-mb-badge");
+    badge.__ptItem = item;
+    badge.__ptInfo = info;
+    badge.__ptRow = root;
+    (root.querySelector(".entityContainer") || root).appendChild(badge);
+    massBidCells.add(badge);
+    drawMassBidBadge(badge);
+  }
+
+  function drawMassBidBadge(badge) {
+    const advice = massBidAdvice(badge.__ptItem, badge.__ptInfo);
+    const row = badge.__ptRow;
+    row.classList.toggle("pt-mb-hot", !!(advice && advice.hot));
+    row.classList.toggle("pt-mb-over", !!(advice && advice.kind === "over"));
+    row.classList.toggle("pt-mb-ok", !!(advice && advice.kind === "ok"));
+    row.classList.toggle("pt-mb-highest", !!(advice && advice.kind === "highest"));
+    badge.textContent = "";
+    if (!advice) return;
+    badge.className = `pt-mb-badge pt-mb-${advice.kind}`;
+    badge.append(el("span", "", `🎯 ${advice.text}`));
+    if (advice.left != null) {
+      const endAt = auctionEnds.get((auctionOf(badge.__ptItem) || {}).tradeId);
+      badge.append(el("span", "pt-mb-left", ` · ${advice.left <= 0 ? "loopt af" : formatLeft(advice.left)}${endAt && advice.left > 0 ? ` (eindigt ${formatTime(endAt)})` : ""}`));
+    }
+  }
+
+  window.setInterval(() => {
+    massBidCells.forEach(badge => {
+      if (!badge.isConnected) return void massBidCells.delete(badge);
+      drawMassBidBadge(badge);
+    });
+    massBidPanels.forEach(line => {
+      if (!line.isConnected) return void massBidPanels.delete(line);
+      line.__ptDraw();
+    });
+  }, 1000);
+
+  // In the card's bid panel: does EA's minimum bid still fit your max, and how long is left.
+  function addMassBidPanel(panel, item) {
+    let root;
+    try {
+      root = panel.getRootElement();
+    } catch {
+      return;
+    }
+    if (!root) return;
+    let line = root.querySelector(".pt-mb-panel");
+    const info = massBidInfo(item);
+    if (!info || !auctionOf(item)) {
+      if (line) line.remove();
+      return;
+    }
+    if (!line) {
+      line = el("div", "pt-mb-panel");
+      root.insertBefore(line, root.firstChild);
+    }
+    line.__ptDraw = () => {
+      const advice = massBidAdvice(item, info);
+      line.textContent = "";
+      if (!advice) return;
+      line.className = `pt-mb-panel pt-mb-${advice.kind}${advice.hot ? " pt-mb-hot" : ""}`;
+      const wait = advice.kind === "ok" && advice.left != null && advice.left > MASS_BID_HOT_SECONDS;
+      line.append(
+        el("div", "pt-mb-panel-main", `🎯 ${advice.text}${advice.left != null ? ` · nog ${formatLeft(advice.left)}` : ""}`),
+        el("div", "pt-mb-panel-sub", (advice.kind === "over" ? "Niet bieden: boven je max bod. " : wait ? "Wacht tot de laatste 30 seconden. " : advice.hot ? "Laatste 30 seconden: nu bieden. " : "") +
+          `Verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.player.sell ? " (jouw BIN)" : " (FUT.GG)"} · max = BIN − ${massBidPct(info.list)}%` +
+          (advice.bid && info.sell ? ` · bij ${priceFormat.format(advice.bid)}: ${formatSigned(flipNet(info.sell, advice.bid))} na 5%` : ""))
+      );
+    };
+    massBidPanels.add(line);
+    line.__ptDraw();
+  }
+
+  // Your watch list size, from the last time EA loaded Transfer Targets.
+  let watchListCount = null; // { n, active, at }
+
   function playerMax(list, player) {
+    // Mass bid list: your fixed max, else BIN (yours or FUT.GG) minus the list's percentage.
+    if (list.massBid) return player.fixedMax || massBidMax(list, player);
     // Holo snipe: a holographic card for the price of the normal one (its FUT Genie price).
     if (list.holo && !(player.special && player.definitionId <= 0xFFFFFF)) {
       const normal = geniePrice(player.normalId || player.definitionId);
@@ -5033,6 +5331,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       const setSell = price => {
         const list = run && getStock().find(item => item.id === run.listId);
         const rule = list && stockRules(list)[run.index];
+        if (rule && rule.player && list.massBid) {
+          rule.player.sell = price || null;
+          sellInput.value = "";
+          sellInput.blur();
+          saveStock();
+          return true;
+        }
         if (!rule || !rule.filter) return false;
         list.sell = list.sell || {};
         if (price) list.sell[rule.key] = { price, at: Date.now() };
@@ -5047,13 +5352,25 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (!price || !setSell(price)) return;
         const list = getStock().find(item => item.id === run.listId);
         const rule = list && stockRules(list)[run.index];
+        if (rule && list.massBid) {
+          // Mass bid: same card again with the new max bid (search it yourself).
+          showToast(`Onthouden: BIN ${priceFormat.format(price)} → max bod ${rule.max ? priceFormat.format(rule.max) : "—"}${rule.max ? ` (${formatSigned(flipNet(price, rule.max))} na 5%)` : ""}`, true);
+          goToRule(run.listId, run.index);
+          return;
+        }
         if (rule) showToast(`Onthouden: verkoop ${priceFormat.format(price)} → koop ≤ ${priceFormat.format(rule.max)} (${formatSigned(flipNet(price, rule.max))})`, true);
         next.click();
       });
       sellInput.addEventListener("keydown", event => { if (event.key === "Enter") sellSave.click(); });
       sellClear.addEventListener("click", () => { if (setSell(null)) goToRule(run.listId, run.index); });
       sellBox.append(sellInput, sellSave, sellClear);
-      runBar.append(info, market, sellBox, prev, next, flip, stop, el("span", "pt-search-count"));
+      // Mass bid: EA often shows only cards with 10-20 min left on the first search. Watch ~5, go back,
+      // and run the SAME filter again; this button puts that filter back without retyping.
+      const again = el("button", "pt-run-btn pt-run-again", "🔁 Zelfde filter");
+      again.type = "button";
+      again.title = "Zelfde zoekfilter opnieuw klaarzetten (na 5 op je watch list zetten en terug): dan zie je de veilingen die het eerst aflopen";
+      again.addEventListener("click", () => run && goToRule(run.listId, run.index));
+      runBar.append(info, market, sellBox, again, prev, next, flip, stop, el("span", "pt-search-count"));
       updateSearchBadges();
       document.body.appendChild(runBar);
     }
@@ -5073,6 +5390,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         el("div", "pt-run-sub", (rule.ideal ? `ideaal ≤ ${priceFormat.format(rule.ideal)} · ` : "") +
           (rule.max ? `winst vanaf verkoop ≥ ${priceFormat.format(roundUpToStep(rule.max / (1 - EA_TAX)))} · ` : "") +
           `${list.name} · ${run.index + 1}/${rules.length}`)
+      );
+    } else if (rule.player && list.massBid) {
+      const sell = massBidSell(rule.player);
+      const watch = watchListCount
+        ? `watch list ${watchListCount.n}/${MASS_BID_WATCH_MAX}${watchListCount.n >= MASS_BID_WATCH_MAX ? " (vol)" : ""} om ${formatTime(watchListCount.at)}`
+        : "watch list: open Transfer Targets om te tellen";
+      info.append(
+        el("div", "pt-run-title", `🎯 ${rule.player.name} · max bod ${rule.max ? priceFormat.format(rule.max) : "—"}`),
+        el("div", "pt-run-sub", `BIN ${sell ? priceFormat.format(sell) : "—"} ${rule.player.sell ? "(jouw)" : "(FUT.GG, check de markt)"} − ${massBidPct(list)}%` +
+          (sell && rule.max ? ` = ${formatSigned(flipNet(sell, rule.max))} na 5%` : "") + ` · ${list.name} · ${run.index + 1}/${rules.length}`),
+        el("div", "pt-run-sub pt-mb-steps", `Zoek → zet 5 op je watch list → terug → 🔁 Zelfde filter → zoek: kaarten die het eerst aflopen · ${watch}`)
       );
     } else if (rule.player) {
       const outlook = snipeOutlook(rule);
@@ -5124,8 +5452,15 @@ function priceWatchMain(SCRIPT_VERSION) {
     marketBox.lastChild.style.display = rule.market ? "" : "none";
     marketBox.querySelector(".pt-run-buy").style.display = rule.market ? "" : "none";
     const sellBox = runBar.querySelector(".pt-run-sell");
-    sellBox.style.display = rule.filter && !runLoading ? "" : "none";
-    sellBox.lastChild.style.display = rule.sell ? "" : "none";
+    const massBidRule = !!(rule.player && list.massBid);
+    sellBox.style.display = (rule.filter || massBidRule) && !runLoading ? "" : "none";
+    sellBox.lastChild.style.display = rule.sell || (massBidRule && rule.player.sell) ? "" : "none";
+    sellBox.querySelector("input").placeholder = massBidRule ? "BIN markt" : "verkoop";
+    sellBox.querySelector("input").title = massBidRule
+      ? "Laagste BIN die je nu op de markt ziet: dat wordt je verkoopprijs, max bod = BIN − je %"
+      : "Prijs waarvoor de kaart direct verkoopt: max BIN = na 5% belasting min je winst-%";
+    sellBox.querySelector("button").textContent = massBidRule ? "OK" : "OK ▶";
+    runBar.querySelector(".pt-run-again").style.display = massBidRule && !runLoading ? "" : "none";
     if (state) info.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
 
     const nextButton = runBar.querySelector(".pt-run-next");
@@ -5789,6 +6124,114 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // --- Stock UI inside the Price Watch page -------------------------------------
 
+  // "🎯 Biedlijst maken": cards with demand that hold value (tip: up to ~1000c), most expensive first,
+  // like the FUTBIN link in the tip (price 300-1000, sorted high to low). Rarity (rare / non-rare) isn't
+  // in EA's static data, so check the cards in the list and remove what you don't want.
+  function buildMassBidMaker(onCreated) {
+    const panel = el("div", "pt-stock-import pt-mb-maker");
+    const field = (label, value, title) => {
+      const box = el("label", "pt-goal");
+      const input = el("input", "pt-target-input");
+      input.inputMode = "numeric";
+      input.value = value;
+      input.title = title;
+      box.append(el("span", "pt-muted", label), input);
+      return { box, input };
+    };
+    const ratingFrom = field("Rating van", "75", "Laagste rating (75+ = goud)");
+    const ratingTo = field("tot", "83", "Hoogste rating");
+    const priceFrom = field("Prijs van", "300", "Laagste FUT.GG PC-prijs");
+    const priceTo = field("tot", "1000", "Hoogste FUT.GG PC-prijs");
+    const count = field("Aantal", "15", "Hoeveel kaarten in de lijst (tip: 10–12+)");
+    const pct = field("% onder BIN", String(MASS_BID_DEFAULT_PCT), "Max bod = BIN − dit percentage (tip: 20–25%)");
+    const make = el("button", "pt-watch-refresh", "Maken");
+    make.type = "button";
+    make.title = "Kaarten binnen de rating én de prijsrange (FUT.GG PC), duurste eerst";
+    // Fodder bid list: per rating the same players as the fodder cycle (your target × 1.1 on the Fodder
+    // screen, else the cheapest). Won ≥10% under the price → "hold" instead of "sell".
+    const makeFodder = el("button", "pt-watch-refresh", "Fodder");
+    makeFodder.type = "button";
+    makeFodder.title = "Per rating (van–tot) de fodderspelers van het Fodder-scherm (doel × 1,1, anders de goedkoopste); Aantal = max per rating. Prijsrange telt hier niet.";
+    const note = el("div", "pt-watch-status",
+      "Kaarten uit packs met vraag (SBC/meta), duurste eerst. Check zelf de BIN op de markt (vul hem in de run-balk in) en haal kaarten weg die niet lopen. Zoeken, bieden en listen doe je zelf.");
+    make.addEventListener("click", () => {
+      const num = input => Number(String(input.value).replace(/\D/g, "")) || 0;
+      const rLow = Math.max(45, Math.min(num(ratingFrom.input), num(ratingTo.input)));
+      const rHigh = Math.min(99, Math.max(num(ratingFrom.input), num(ratingTo.input)));
+      const pLow = Math.min(num(priceFrom.input), num(priceTo.input));
+      const pHigh = Math.max(num(priceFrom.input), num(priceTo.input));
+      const size = Math.max(1, Math.min(60, num(count.input) || 15));
+      const picks = getPlayerIndex()
+        .filter(entry => entry.rating >= rLow && entry.rating <= rHigh)
+        .map(entry => ({ entry, price: (geniePrice(entry.id) || {}).price || 0 }))
+        .filter(item => item.price >= pLow && item.price <= pHigh)
+        .sort((a, b) => b.price - a.price || b.entry.rating - a.entry.rating)
+        .slice(0, size);
+      if (!picks.length) {
+        showToast("Geen kaarten gevonden in die rating/prijs (zijn de FUT.GG-prijzen al geladen?).", false);
+        return;
+      }
+      const percentage = Number(String(pct.input.value).replace(",", "."));
+      getStock().unshift({
+        id: `mb${Date.now()}`,
+        type: "players",
+        mode: "bid",
+        massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT },
+        name: `🎯 Biedlijst ${rLow}–${rHigh} · ${priceFormat.format(pLow)}–${priceFormat.format(pHigh)}`,
+        createdAt: Date.now(),
+        profit: null,
+        windows: [],
+        players: picks.map(item => ({ definitionId: item.entry.id, name: item.entry.display, rating: item.entry.rating })),
+        done: {}
+      });
+      saveStock();
+      panel.style.display = "none";
+      showToast(`🎯 Biedlijst gemaakt met ${picks.length} kaarten. Start hem met ▶ Start.`, true);
+      onCreated();
+    });
+    makeFodder.addEventListener("click", async () => {
+      const num = input => Number(String(input.value).replace(/\D/g, "")) || 0;
+      const rLow = Math.max(45, Math.min(num(ratingFrom.input), num(ratingTo.input)));
+      const rHigh = Math.min(99, Math.max(num(ratingFrom.input), num(ratingTo.input)));
+      const size = Math.max(1, Math.min(60, num(count.input) || 15));
+      makeFodder.disabled = true;
+      try {
+        await Promise.race([loadFutggCheapest(true), new Promise(resolve => window.setTimeout(resolve, 8000))]);
+      } finally {
+        makeFodder.disabled = false;
+      }
+      const players = [];
+      for (let rating = rLow; rating <= rHigh; rating++) {
+        cyclePicks(rating).slice(0, size).forEach(item => players.push({ ...fodderCyclePlayer(item, rating, null), fixedMax: null }));
+      }
+      if (!players.length) {
+        showToast("Geen fodderspelers gevonden voor die ratings (zijn de FUT.GG-prijzen al geladen?).", false);
+        return;
+      }
+      const percentage = Number(String(pct.input.value).replace(",", "."));
+      getStock().unshift({
+        id: `mb${Date.now()}`,
+        type: "players",
+        mode: "bid",
+        massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT, fodder: true },
+        name: `🎯 Fodder-biedlijst ${rLow === rHigh ? rLow : `${rLow}–${rHigh}`}`,
+        createdAt: Date.now(),
+        profit: null,
+        windows: [],
+        players,
+        done: {}
+      });
+      saveStock();
+      panel.style.display = "none";
+      showToast(`🎯 Fodder-biedlijst gemaakt met ${players.length} kaarten (≥${MASS_BID_HOLD_PCT}% onder de prijs gewonnen = houden).`, true);
+      onCreated();
+    });
+    const row = el("div", "pt-stock-list-buttons");
+    row.append(ratingFrom.box, ratingTo.box, priceFrom.box, priceTo.box, count.box, pct.box, make, makeFodder);
+    panel.append(row, note);
+    return panel;
+  }
+
   function buildStockSection(root) {
     const card = el("div", "pt-watch-card pt-stock-card");
     root.appendChild(card);
@@ -5801,12 +6244,18 @@ function priceWatchMain(SCRIPT_VERSION) {
     );
     const importButton = el("button", "pt-watch-refresh", "+ Tip plakken");
     importButton.type = "button";
-    toolbar.append(heading, importButton);
+    const massBidButton = el("button", "pt-watch-refresh", "🎯 Biedlijst maken");
+    massBidButton.type = "button";
+    massBidButton.title = "Mass bidding: kies kaarten op rating en FUT.GG PC-prijs";
+    toolbar.append(heading, massBidButton, importButton);
 
     const importPanel = el("div", "pt-stock-import");
     importPanel.style.display = "none";
+    const massBidPanel = buildMassBidMaker(() => renderLists());
+    massBidPanel.style.display = "none";
+    massBidButton.addEventListener("click", () => { massBidPanel.style.display = massBidPanel.style.display === "none" ? "" : "none"; });
     const lists = el("div", "pt-stock-lists");
-    card.append(toolbar, importPanel, lists);
+    card.append(toolbar, massBidPanel, importPanel, lists);
 
     let lastTipText = "";
 
@@ -6779,7 +7228,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     function buildPlayerGrid(list, rules, active) {
       const grid = el("table", "pt-watch-table pt-stock-grid pt-snipe-grid");
       const head = el("tr");
-      [["Speler", "pt-col-name"], ["Rating", "pt-col-rating"], ["Genie (PC)", "pt-col-price"], ["Max BIN", "pt-col-target"], ["", "pt-col-level"], ["Voorraad", "pt-col-stock"]]
+      [["Speler", "pt-col-name"], ["Rating", "pt-col-rating"], ["Prijs (PC)", "pt-col-price"], [list.massBid ? "BIN → max bod" : "Max BIN", "pt-col-target"], ["", "pt-col-level"], ["Voorraad", "pt-col-stock"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
       thead.appendChild(head);
@@ -6794,6 +7243,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         const maxCell = el("td", "pt-col-target");
         const maxInput = el("input", "pt-target-input");
         maxInput.inputMode = "numeric";
+        if (list.massBid) {
+          // Mass bid: the BIN you saw is the sell price; max bid follows from it.
+          const fallback = (geniePrice(player.definitionId) || {}).price || 0;
+          maxInput.value = player.sell || "";
+          maxInput.placeholder = fallback ? `BIN ${priceFormat.format(fallback)}` : "BIN";
+          maxInput.title = "Laagste BIN die je op de markt ziet (leeg = FUT.GG PC-prijs). Max bod = BIN − je %.";
+          maxInput.addEventListener("change", () => { player.sell = parsePrice(maxInput.value); saveStock(); });
+          maxCell.append(maxInput, el("div", "pt-level-detail pt-outlook", rule.max
+            ? `max bod ${priceFormat.format(rule.max)} · ${formatSigned(flipNet(massBidSell(player), rule.max))} na 5%`
+            : "geen prijs"));
+        } else {
         maxInput.value = player.fixedMax || "";
         maxInput.placeholder = rule.max && !player.fixedMax ? `auto ${priceFormat.format(rule.max)}` : "auto";
         maxInput.title = `Leeg = automatisch (zodat verkoop op de FUT Genie-prijs ${profitFor(list)}% winst geeft na belasting). Vul een bedrag in om het vast te zetten.`;
@@ -6814,13 +7274,14 @@ function priceWatchMain(SCRIPT_VERSION) {
           ].filter(Boolean).join("\n");
           maxCell.appendChild(line);
         }
+        }
 
         const done = list.done && list.done[rule.key];
         const current = active && run.index === index;
         const buttonCell = el("td", "pt-col-level");
         const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""), done ? "✓ klaargezet" : "🔍 klaarzetten");
         button.type = "button";
-        button.title = `${player.name} · max BIN ${rule.max ? priceFormat.format(rule.max) : "—"} klaarzetten` + (done ? ` (eerder om ${formatTime(done)})` : "");
+        button.title = `${player.name} · ${list.mode === "bid" ? "max bod" : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"} klaarzetten` + (done ? ` (eerder om ${formatTime(done)})` : "");
         button.addEventListener("click", () => goToRule(list.id, index));
         buttonCell.appendChild(button);
 
@@ -6911,6 +7372,16 @@ function priceWatchMain(SCRIPT_VERSION) {
           mode.title = "Bieden zet het max bod-filter, direct kopen het max BIN-filter";
           mode.addEventListener("change", () => { list.mode = mode.value; saveStock(); });
           goalLabel.append(el("span", "pt-muted", "Zoeken op"), mode);
+        } else if (isPlayers && list.massBid) {
+          goal.placeholder = String(MASS_BID_DEFAULT_PCT);
+          goal.value = list.massBid.pct || "";
+          goal.title = "Hoeveel procent je onder de laagste BIN biedt (tip: 20–25%, liever nog lager)";
+          goal.addEventListener("change", () => {
+            const value = Number(goal.value.replace(",", "."));
+            list.massBid.pct = value > 0 && value < 90 ? value : MASS_BID_DEFAULT_PCT;
+            saveStock();
+          });
+          goalLabel.append(el("span", "pt-muted", "% onder BIN"), goal);
         } else if (isPlayers) {
           goal.placeholder = "auto";
           goal.value = Number.isFinite(list.profit) ? list.profit : "";
@@ -6957,7 +7428,21 @@ function priceWatchMain(SCRIPT_VERSION) {
           if (list.holo) showToast("✨ Alleen holo staat aan. Let op: dit filter zit niet in EA's eigen app (FUT Genie waarschuwt er ook voor); gebruik het met mate.", true);
           saveStock();
         });
-        [inventory, start, reset, remove, toWatch, holo].forEach(button => { button.type = "button"; });
+        // Mass bid on/off: bid mode, max bid = BIN - %.
+        const massBid = el("button", "pt-link-btn" + (list.massBid ? " pt-holo-on" : ""), list.massBid ? "🎯 Mass bid: aan" : "🎯 Mass bid");
+        massBid.title = "Biedlijst: zoekt op max bod = laagste BIN − je %, en laat bij elke veiling zien of je bod nog past. Bieden doe je zelf.";
+        massBid.addEventListener("click", () => {
+          if (list.massBid) {
+            delete list.massBid;
+            delete list.mode;
+          } else {
+            list.massBid = { pct: MASS_BID_DEFAULT_PCT };
+            list.mode = "bid";
+            list.holo = false;
+          }
+          saveStock();
+        });
+        [inventory, start, reset, remove, toWatch, holo, massBid].forEach(button => { button.type = "button"; });
         start.addEventListener("click", () => startRun(list.id));
         reset.addEventListener("click", () => { list.done = {}; saveStock(); });
         // Two-step delete instead of a blocking confirm() dialog.
@@ -6976,7 +7461,8 @@ function priceWatchMain(SCRIPT_VERSION) {
             remove.textContent = "Verwijderen";
           }, 3000);
         });
-        buttons.append(goalLabel, inventory, start, ...(isPlayers ? [toWatch] : []), ...(isPlayers && !list.fodderRating ? [holo] : []), reset, remove);
+        buttons.append(goalLabel, inventory, start, ...(isPlayers ? [toWatch] : []), ...(isPlayers && !list.fodderRating ? [massBid] : []),
+          ...(isPlayers && !list.fodderRating && !list.massBid ? [holo] : []), reset, remove);
         header.append(title, buttons);
 
         if (isFodder) {
@@ -7291,6 +7777,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         } catch (error) {
           console.warn("Price Watch: knop toevoegen mislukt.", error);
         }
+        try {
+          if (className === "UTAuctionActionPanelView") addMassBidPanel(this, item);
+        } catch (error) {
+          console.warn("Price Watch: biedlijst-regel bij bieden mislukt.", error);
+        }
         return result;
       };
       hooked.__ptWatchHooked = true;
@@ -7320,6 +7811,11 @@ function priceWatchMain(SCRIPT_VERSION) {
           addTransferRowInfo(this, (typeof this.getData === "function" && this.getData()) || data);
         } catch (error) {
           console.warn("Price Watch: winst bij kaart op transferlijst mislukt.", error);
+        }
+        try {
+          addMassBidBadge(this, (typeof this.getData === "function" && this.getData()) || data);
+        } catch (error) {
+          console.warn("Price Watch: biedlijst-badge mislukt.", error);
         }
         return result;
       };
@@ -7454,6 +7950,40 @@ function priceWatchMain(SCRIPT_VERSION) {
   // break even, and the profit after tax at that BIN. Start price is always one step below. You press List.
   const QUICK_LIST_PCTS = [10, 15, 20];
 
+  // Mass bid: "sell instantly" - BIN = the sell price of the list (your BIN or FUT.GG), start one step
+  // below. You check the market and press List yourself, one card at a time.
+  function addMassBidSell(actions, view, item, bought) {
+    let row = actions.querySelector(".pt-ql-mb");
+    const info = massBidInfo(item);
+    if (row && (row.__ptItem !== item || !info)) {
+      row.remove();
+      row = null;
+    }
+    if (!info || !info.sell || row) return;
+    row = el("div", "panelActionRow pt-ql pt-ql-mb");
+    row.__ptItem = item;
+    const hold = massBidHold(info, bought);
+    const button = el("button", "pt-ql-btn pt-ql-gold", `${hold ? "📦 Liever houden · " : "🎯 "}Verkoop ${priceFormat.format(info.sell)}${bought ? ` (${formatSigned(flipNet(info.sell, bought))})` : ""}`);
+    button.type = "button";
+    button.title = (hold ? `Fodder ≥${MASS_BID_HOLD_PCT}% onder de prijs gekocht: de tip zegt houden. ` : "") +
+      `Buy Now = verkoopprijs van "${info.list.name}" (${info.player.sell ? "jouw BIN" : "FUT.GG PC"}). Check eerst de markt; list één kaart tegelijk.`;
+    button.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const bin = Math.max(200, roundUpToStep(info.sell));
+      view.setBuyNowValue(bin);
+      let start = 0;
+      try {
+        start = window.UTCurrencyInputControl.getIncrementBelowVal(bin);
+      } catch (_) {
+        // Own ladder below.
+      }
+      view.setBidValue(start > 0 ? start : Math.max(150, priceStepBelow(bin)));
+    });
+    row.appendChild(button);
+    actions.insertBefore(row, actions.firstChild);
+  }
+
   function addQuickListMarkup(controller) {
     const view = controller && typeof controller.getView === "function" ? controller.getView() : null;
     const actions = view && view.__panelActions;
@@ -7461,7 +7991,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!actions || !item || typeof view.setBuyNowValue !== "function") return;
     const bought = item.lastSalePrice > 0 ? item.lastSalePrice : 0;
     const full = !genie();
-    let row = actions.querySelector(".pt-ql");
+    addMassBidSell(actions, view, item, bought);
+    let row = actions.querySelector(".pt-ql:not(.pt-ql-mb)");
     if (row && (row.__ptItem !== item || row.__ptFull !== full)) {
       row.remove();
       row = null;
@@ -7586,14 +8117,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       const input = view._buyNowNumericStepper.getInput();
       if (input && typeof input.addTarget === "function" && window.EventType && !input.__ptProfit) {
         input.__ptProfit = true;
-        input.addTarget(view, () => { const current = actions.querySelector(".pt-ql"); if (current) current.__ptRefresh(); }, window.EventType.CHANGE);
+        input.addTarget(view, () => { const current = actions.querySelector(".pt-ql:not(.pt-ql-mb)"); if (current) current.__ptRefresh(); }, window.EventType.CHANGE);
       }
     } catch (_) {
       // Profit then follows our buttons only.
     }
     if (!actions.__ptProfitBound) {
       actions.__ptProfitBound = true;
-      const refresh = () => { const current = actions.querySelector(".pt-ql"); if (current) current.__ptRefresh(); };
+      const refresh = () => { const current = actions.querySelector(".pt-ql:not(.pt-ql-mb)"); if (current) current.__ptRefresh(); };
       actions.addEventListener("input", event => { if (!event.target.closest(".pt-ql")) refresh(); });
       actions.addEventListener("click", () => window.setTimeout(refresh, 50));
     }
@@ -7808,6 +8339,22 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-tl-tile-value { font-size: 22px; }
 .pt-tl-badge { position: absolute; top: 8px; right: 14px; z-index: 2; text-align: right; font-size: 15px; font-weight: 700; line-height: 1.25; pointer-events: none; }
 .pt-tl-badge-sub { font-size: 11px; font-weight: 600; color: #9aa6b8; }
+.pt-mb-badge { font-size: 12px; font-weight: 700; margin-top: 4px; line-height: 1.3; white-space: normal; color: #cfd8e6; }
+.pt-mb-badge.pt-mb-ok { color: #6be38f; }
+.pt-mb-badge.pt-mb-over { color: #ff7b7b; opacity: 1; }
+.pt-mb-badge.pt-mb-highest { color: #7fc8ff; }
+.pt-mb-badge.pt-mb-won { color: #ffd76a; }
+.pt-mb-badge.pt-mb-lost { color: #9aa6b8; }
+.pt-mb-left { color: #ffd76a; }
+.listFUTItem.pt-mb-over, li.pt-mb-over { opacity: .55; }
+.pt-mb-hot { box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-pulse 1s ease-in-out infinite; }
+@keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
+.pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }
+.pt-mb-panel.pt-mb-ok { border-left: 4px solid #6be38f; }
+.pt-mb-panel.pt-mb-over { border-left: 4px solid #ff7b7b; }
+.pt-mb-panel.pt-mb-highest { border-left: 4px solid #7fc8ff; }
+.pt-mb-panel-sub { font-size: 12px; font-weight: 500; color: #9aa6b8; margin-top: 3px; }
+.pt-mb-steps { color: #ffd76a; }
 .pt-tl-badge-sub.pt-neg { color: #ff7b7b; }
 .pt-coin { display: inline-block; width: .85em; height: .85em; margin-left: 3px; vertical-align: -1px; border-radius: 50%;
   background: radial-gradient(circle at 35% 35%, #ffe9a0, #d6a92c 60%, #9c7414); box-shadow: inset 0 0 0 1px rgba(0,0,0,.35); }
@@ -8424,6 +8971,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       installMarketWatch();
       installMinBidWrap();
       installListingWatch();
+      installNotificationLog();
       installOneClickBuyNow();
       startClubRise();
       importPendingTransfer();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.32.0
+// @version      2.33.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -498,7 +498,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const relevant = rows.filter(row => /de jong|barcola|mora|smenyo|gy[oö]keres/i.test(row.player));
       const displayRows = relevant.length ? relevant : rows.slice(0, 8);
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
-      const report = `FUT.GG PC-feed diagnose (v2.32.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const report = `FUT.GG PC-feed diagnose (v2.33.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -4951,7 +4951,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           cycleRefreshing = true;
           next.disabled = true;
           const listId = run.listId;
-          Promise.race([loadFodderCheapest(true) || loadFutggCheapest(true), new Promise(resolve => window.setTimeout(resolve, 8000))])
+          loadFodderCheapest(true); // FUT Genie (pc) in the background
+          Promise.race([Promise.all([loadFutggCheapest(true), refreshFutggPrices(true)]), new Promise(resolve => window.setTimeout(resolve, 8000))])
             .catch(() => null)
             .then(() => {
               cycleRefreshing = false;
@@ -4970,7 +4971,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (!list) return;
         const freshText = !fresh ? "" : fresh.added
           ? ` · 🔄 ${fresh.added} nieuwe speler${fresh.added === 1 ? "" : "s"} (${fresh.total})`
-          : ` · 🔄 zelfde ${fresh.total} goedkoopste`;
+          : ` · 🔄 zelfde ${fresh.total} spelers`;
         if (list.mode !== "bid") {
           // First completed BIN round -> 150, then 200, 250, etc. Above every max BIN it starts over at 0.
           // (Also with refreshed picks: players that stay in the list would otherwise show EA's cached result.)
@@ -5314,7 +5315,27 @@ function priceWatchMain(SCRIPT_VERSION) {
       .sort((a, b) => a.price - b.price);
   }
 
+  // With a target for this rating: EVERY player whose FUT.GG PC price is at most target × 1.1 (7k → up to
+  // 7.7k), cheapest first. The few names at the very top of FUT.GG's list are usually already picked over;
+  // a card listed under its price is more likely among the many just above your target.
+  const FODDER_TARGET_RANGE = 1.1;
+
   function cyclePicks(rating) {
+    const target = Number((getFodder().targets[rating] || {}).max) || 0;
+    if (target > 0) {
+      const limit = target * FODDER_TARGET_RANGE;
+      const picks = new Map();
+      // FUT.GG's cheapest-by-rating list first (freshest price, also specials), then the per-card PC feed.
+      (futggCheapestFor(rating) || []).forEach(item => {
+        if (item.price <= limit) picks.set(item.entry.id, item);
+      });
+      fodderCandidates(rating).forEach(entry => {
+        if (picks.has(entry.id)) return;
+        const price = (geniePrice(entry.id) || {}).price || 0;
+        if (price > 0 && price <= limit) picks.set(entry.id, { entry, price });
+      });
+      return [...picks.values()].sort((a, b) => a.price - b.price);
+    }
     const cheapest = cheapestForRating(rating);
     if (!cheapest.length) return [];
     const limit = cheapest[0].price * FODDER_CYCLE_SPREAD;
@@ -5359,7 +5380,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       fodderRating: ratings[0],
       fodderRatings: ratings,
       mode: state.mode,
-      name: ratings.length > 1 ? `${ratings.join("+")}-rated goedkoopste` : `${ratings[0]}-rated goedkoopste`,
+      name: `${ratings.join("+")}-rated ${ratings.some(rating => (state.targets[rating] || {}).max) ? "rond je doel" : "goedkoopste"}`,
       createdAt: Date.now(),
       profit: null,
       windows: [],

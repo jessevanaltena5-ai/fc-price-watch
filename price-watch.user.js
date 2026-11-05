@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.31.2
+// @version      2.32.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14,6 +14,7 @@
 // @connect      gist.githubusercontent.com
 // @connect      ntfy.sh
 // @connect      r2.fut.gg
+// @connect      www.fut.gg
 // @require      https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
 // @updateURL    https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
@@ -497,7 +498,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const relevant = rows.filter(row => /de jong|barcola|mora|smenyo|gy[oö]keres/i.test(row.player));
       const displayRows = relevant.length ? relevant : rows.slice(0, 8);
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
-      const report = `FUT.GG PC-feed diagnose (v2.31.2)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const report = `FUT.GG PC-feed diagnose (v2.32.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -4938,19 +4939,52 @@ function priceWatchMain(SCRIPT_VERSION) {
       stop.title = "Stock-ronde stoppen";
       prev.addEventListener("click", () => runStep(() => goToRule(run.listId, run.index - 1)));
       // At the last rule "Volgende" starts over at the first one.
+      let cycleRefreshing = false;
       next.addEventListener("click", () => runStep(() => {
+        if (cycleRefreshing) return;
         const list = getStock().find(item => item.id === run.listId);
         const rules = list ? stockRules(list) : [];
         const atEnd = run.index + 1 >= rules.length;
-        if (atEnd && list && list.mode !== "bid") {
-          // First completed BIN round -> 150, then 200, 250, etc. Above every max BIN it starts over at 0.
-          const raised = roundUpToStep((Number(list.fodderBidMin) || 100) + 50);
-          list.fodderBidMin = raised >= Math.max(...rules.map(rule => rule.max || Infinity)) ? 0 : raised;
-          saveStock();
-          showToast(list.fodderBidMin ? `🔼 Nieuwe ronde: min bid ${priceFormat.format(list.fodderBidMin)}` : "Nieuwe ronde: min bid weer op 0", true);
+        if (atEnd && list && list.fodderRatings && !list.watchRun) {
+          // Fodder cycle: fetch FUT.GG's cheapest-by-rating list first (a few hundred ms), then the next
+          // round uses the cheapest players by the current prices. Falls back to the cached prices.
+          cycleRefreshing = true;
+          next.disabled = true;
+          const listId = run.listId;
+          Promise.race([loadFodderCheapest(true) || loadFutggCheapest(true), new Promise(resolve => window.setTimeout(resolve, 8000))])
+            .catch(() => null)
+            .then(() => {
+              cycleRefreshing = false;
+              next.disabled = false;
+              runStepAt = Date.now();
+              if (!run || run.listId !== listId) return;
+              const current = getStock().find(item => item.id === listId);
+              newRound(current, refreshFodderCyclePicks(current));
+            });
+          return;
         }
-        goToRule(run.listId, atEnd ? 0 : run.index + 1);
+        if (atEnd) newRound(list, null);
+        else goToRule(run.listId, run.index + 1);
       }));
+      const newRound = (list, fresh) => {
+        if (!list) return;
+        const freshText = !fresh ? "" : fresh.added
+          ? ` · 🔄 ${fresh.added} nieuwe speler${fresh.added === 1 ? "" : "s"} (${fresh.total})`
+          : ` · 🔄 zelfde ${fresh.total} goedkoopste`;
+        if (list.mode !== "bid") {
+          // First completed BIN round -> 150, then 200, 250, etc. Above every max BIN it starts over at 0.
+          // (Also with refreshed picks: players that stay in the list would otherwise show EA's cached result.)
+          const raised = roundUpToStep((Number(list.fodderBidMin) || 100) + 50);
+          const maxes = stockRules(list).map(rule => rule.max || Infinity);
+          list.fodderBidMin = raised >= Math.max(...maxes) ? 0 : raised;
+          saveStock();
+          showToast((list.fodderBidMin ? `🔼 Nieuwe ronde: min bid ${priceFormat.format(list.fodderBidMin)}` : "Nieuwe ronde: min bid weer op 0") + freshText, true);
+        } else if (fresh) {
+          saveStock();
+          showToast(`Nieuwe ronde${freshText}`, true);
+        }
+        goToRule(run.listId, 0);
+      };
       stop.addEventListener("click", stopRun);
 
       // Lazy flip: the cheapest BIN you saw → the filter becomes "market − under".
@@ -5213,7 +5247,67 @@ function priceWatchMain(SCRIPT_VERSION) {
     return getPlayerIndex().filter(entry => entry.rating === rating);
   }
 
+  // FUT.GG's own "cheapest by rating" list (the page www.fut.gg/cheapest-by-rating, PC). Covers ratings
+  // 81–93, 11 players each, incl. specials; FUT.GG caches it only a few seconds, so it is fresher than
+  // the per-card feed. Fetched when the Fodder screen opens (max every 30 s) and on "Opnieuw".
+  const FUTGG_CHEAPEST_URL = "https://www.fut.gg/api/fut/market/27/cheapest-by-rating/v2/overview/?platform=pc";
+  const FUTGG_CHEAPEST_FRESH_MS = 5 * 60 * 1000;
+  let futggCheapest = null; // { at, byRating: { 87: [{ entry, price, special, rarity }] } }
+  let futggCheapestLoading = null;
+  let futggCheapestTriedAt = 0;
+
+  function loadFutggCheapest(force) {
+    if (futggCheapestLoading) return futggCheapestLoading;
+    if (!force && Date.now() - futggCheapestTriedAt < 30 * 1000) return Promise.resolve(false);
+    futggCheapestTriedAt = Date.now();
+    futggCheapestLoading = futggRequestJson(`${FUTGG_CHEAPEST_URL}&_=${Date.now()}`).then(json => {
+      const data = json && json.data;
+      if (!data || typeof data !== "object") throw new Error("FUT.GG cheapest-by-rating: geen data");
+      const byRating = {};
+      Object.entries(data).forEach(([rating, players]) => {
+        if (!Array.isArray(players)) return;
+        byRating[rating] = players
+          .filter(player => player && player.eaId > 0 && player.price > 0)
+          .map(player => {
+            const special = player.eaId > 0xFFFFFF;
+            const rarity = Number(String(player.rarityImagePath || "").split("/").pop().split(".")[0]);
+            const display = special ? `${player.name} ${player.overall} ${rarityName(rarity)}` : player.name;
+            return { entry: { id: player.eaId, display }, price: player.price, special, rarity: Number.isFinite(rarity) ? rarity : null, futgg: true };
+          })
+          .sort((a, b) => a.price - b.price);
+      });
+      futggCheapest = { at: Date.now(), byRating };
+      return true;
+    }).catch(error => {
+      console.warn("Price Watch: FUT.GG cheapest-by-rating ophalen mislukt; eigen berekening blijft actief.", error);
+      return false;
+    }).finally(() => {
+      futggCheapestLoading = null;
+      listeners.forEach(listener => listener());
+    });
+    return futggCheapestLoading;
+  }
+
+  function futggCheapestFor(rating) {
+    if (!futggCheapest || Date.now() - futggCheapest.at > FUTGG_CHEAPEST_FRESH_MS) return null;
+    const list = futggCheapest.byRating[rating];
+    return list && list.length ? list : null;
+  }
+
+  // Cycle entry for a pick; FUT.GG specials search quality Special with their rarity.
+  function fodderCyclePlayer(item, rating, target) {
+    return {
+      definitionId: item.entry.id,
+      name: item.entry.display,
+      rating,
+      fixedMax: target,
+      ...(item.special ? { special: true, rarity: item.rarity } : {})
+    };
+  }
+
   function cheapestForRating(rating) {
+    const fromFutgg = futggCheapestFor(rating);
+    if (fromFutgg) return fromFutgg;
     return fodderCandidates(rating)
       .map(entry => ({ entry, price: (geniePrice(entry.id) || {}).price || 0 }))
       .filter(item => item.price > 0)
@@ -5229,6 +5323,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // One bulk FUT Genie request for every regular player in the rating range; refreshed every 5 minutes.
   function loadFodderCheapest(force) {
+    loadFutggCheapest(force);
     if (!genie() || fodderCheapestLoading) return;
     if (!force && Date.now() - fodderCheapestAt < GENIE_REFRESH_MS) return;
     const ids = fodderRatings().flatMap(rating => fodderCandidates(rating).map(entry => entry.id));
@@ -5250,7 +5345,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!ratings.length) return false;
     const players = ratings.flatMap(rating => {
       const target = (state.targets[rating] || {}).max || null;
-      return cyclePicks(rating).map(item => ({ definitionId: item.entry.id, name: item.entry.display, rating, fixedMax: target }));
+      return cyclePicks(rating).map(item => fodderCyclePlayer(item, rating, target));
     });
     const id = `fodder-r${ratings.join("-")}`;
     const stock = getStock();
@@ -5274,6 +5369,26 @@ function priceWatchMain(SCRIPT_VERSION) {
     saveStock();
     startRun(id);
     return true;
+  }
+
+  // "Opnieuw" at the end of a fodder cycle: pick the cheapest players per rating again from the current
+  // prices (FUT.GG PC feed, refreshed every minute; FUT Genie on the pc). Only external price data, no
+  // EA market search. Returns { added, removed, total } or null when nothing could be priced.
+  function refreshFodderCyclePicks(list) {
+    if (!list || !list.fodderRatings || list.watchRun) return null;
+    const state = getFodder();
+    const players = list.fodderRatings.flatMap(rating => {
+      const target = (state.targets[rating] || {}).max || null;
+      return cyclePicks(rating).map(item => fodderCyclePlayer(item, rating, target));
+    });
+    if (!players.length) return null;
+    const before = new Set((list.players || []).map(player => player.definitionId));
+    const after = new Set(players.map(player => player.definitionId));
+    const added = players.filter(player => !before.has(player.definitionId)).length;
+    const removed = [...before].filter(id => !after.has(id)).length;
+    list.players = players;
+    list.done = {};
+    return { added, removed, total: players.length };
   }
 
   // The Spelers tab as a run: every watched card (special versions with their rarity), your PC target
@@ -8517,8 +8632,9 @@ try {
     if (!request || typeof request.id !== "string" || typeof request.url !== "string") return;
     let parsed;
     try { parsed = new URL(request.url); } catch (_) { reply({ ok: false, error: "Ongeldige FUT.GG URL" }); return; }
-    if (parsed.protocol !== "https:" || parsed.hostname !== "r2.fut.gg") {
-      reply({ ok: false, error: "Geblokkeerde URL: alleen https://r2.fut.gg toegestaan" });
+    const cheapestApi = parsed.hostname === "www.fut.gg" && parsed.pathname.startsWith("/api/fut/market/27/cheapest-by-rating/");
+    if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi)) {
+      reply({ ok: false, error: "Geblokkeerde URL: alleen https://r2.fut.gg en FUT.GG cheapest-by-rating toegestaan" });
       return;
     }
     if (typeof GM_xmlhttpRequest !== "function") {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.36.0
+// @version      2.38.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -674,7 +674,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
       const eaLines = eaLogLines(60);
       lines.push("", "EA-log (biedingen, mislukte EA-verzoeken, EA-meldingen, herladen; nieuwste onderaan):", ...(eaLines.length ? eaLines : ["(nog leeg)"]));
-      const report = `FUT.GG PC-feed diagnose (v2.36.0)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      const report = `FUT.GG PC-feed diagnose (v2.36.1)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -2468,8 +2468,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // --- One click Buy Now: no confirmation pop-up after your own click on Buy Now --------------------
-  // Same route as FUT Genie's setting. Anything unusual (auction over, too few coins, purchased pile
-  // full) goes through EA's own flow, so you still get its message. Never buys without your click.
+  // A full Unassigned/PURCHASED pile must not force the normal EA confirmation flow.
+  // EA's own eBidConfirmed() route handles the purchase; never buys without your explicit click.
   const ONE_CLICK_KEY = "pt_one_click_v1"; // "off" = keep EA's pop-up
   const ONE_CLICK_REPEAT_MS = 1500; // a double click must not send a second buy
   let oneClickInstalled = false;
@@ -2487,7 +2487,6 @@ function priceWatchMain(SCRIPT_VERSION) {
     const item = controller.viewmodel.current();
     const auction = item.getAuctionData();
     if (auction.getSecondsRemaining() <= 0 || !(auction.buyNowPrice > 0)) return null;
-    if (repositories.Item.numItemsInCache(window.ItemPile.PURCHASED) >= window.MAX_NEW_ITEMS) return null;
     const coins = services.User.getUser().getCurrency(window.GameCurrency.COINS).amount;
     return auction.canBuy(coins) ? { id: item.id, price: auction.buyNowPrice } : null;
   }
@@ -4462,6 +4461,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     // A tip means the normal card; a holo of it only if that's all there is.
     const pool = rated.some(version => !isHolo(version)) ? rated.filter(version => !isHolo(version)) : rated;
     if (!pool.length) return null;
+    // Without a tip price ("Svitková 76"): the regular card (id below 2^24) when it has that rating.
+    if (!tipCoins) return pool.find(version => version.definitionId < 0x1000000) || [...pool].sort((a, b) => versionCost(a, tipCoins) - versionCost(b, tipCoins))[0];
     return [...pool].sort((a, b) => versionCost(a, tipCoins) - versionCost(b, tipCoins))[0];
   }
 
@@ -4510,6 +4511,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
       rawLine.split(/[,;/]/).forEach(part => {
         const line = part.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–\d.)]+\s*/, "").trim();
+        // "Svitková 76" / "Svitková-76": a name with the card's rating, no price.
+        const withRating = line.match(/^([^\d]+?)\s*[-–]?\s*(\d{2})$/);
+        if (withRating && +withRating[2] >= 45 && withRating[1].trim().split(/\s+/).length <= 4) {
+          const rating = +withRating[2];
+          const match = matchRatedPlayer(withRating[1].trim(), rating);
+          if (!match.player) {
+            skipped++;
+            return;
+          }
+          if (seen.has(match.player.id)) return;
+          seen.add(match.player.id);
+          players.push(Object.assign(match, { raw: line, tipRating: rating }));
+          return;
+        }
         if (!line || /\d/.test(line) || /^skip$/i.test(line)) return; // "skip" is a price column, not Oliver Skipp
         const words = line.split(/\s+/);
         if (words.length > 4 || line.length > 32 || /[.!?:]$/.test(line)) return; // prose
@@ -4921,7 +4936,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     return Math.round(thousands ? number * 1000 : number);
   }
 
-  const PRICE_LINE = /\b(golds?|silvers?|bronzes?)\b[^\d]*(\d[\d.,]*\s*k?)(?:\s*[-–]\s*(\d[\d.,]*\s*k?))?/i;
+  // "Golds <650-700", "golds <700/750", "Golds <650 / <700": the second number is the max BIN.
+  const PRICE_LINE = /\b(golds?|silvers?|bronzes?)\b[^\d]*(\d[\d.,]*\s*k?)(?:\s*[-–/]\s*[<≤]?\s*(\d[\d.,]*\s*k?))?/i;
   // "SILVER OPTIONS", "Bronzes:", "Gold clubs": the clubs below it are for that quality only.
   const LEVEL_HEADING = /^(golds?|silvers?|bronzes?)(?:\s+(?:options?|clubs?|teams?|list))?$/i;
 
@@ -4966,8 +4982,10 @@ function priceWatchMain(SCRIPT_VERSION) {
           const low = parseCoins(price[2]);
           const high = parseCoins(price[3]);
           // "<650-700": max BIN = upper bound, ideal = lower bound.
-          levels[levelFromWord(price[1])] = { enabled: true, max: high || low, ideal: high ? low : null };
+          levels[levelFromWord(price[1])] = { enabled: true, max: high && high > low ? high : low, ideal: high && high > low ? low : null };
         });
+        // The club can be on the price line itself: "can try rash - women and men RB Leipzig golds <700/750".
+        clubs.push(...clubsBeforePrice(line.slice(0, line.search(/\b(golds?|silvers?|bronzes?)\b/i)), leagueId, section));
         return;
       }
 
@@ -4993,6 +5011,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     });
 
     return { levels, clubs, sections, flip };
+  }
+
+  // Club name in front of the quality word on a price line. "women and men RB Leipzig" -> both RB Leipzig teams
+  // (the men's and the women's club have the same name in different leagues).
+  function clubsBeforePrice(text, leagueId, section) {
+    const tail = String(text || "").split(/\s[-–:|]\s|[.!?;,]\s/).pop() || "";
+    const both = /\b(wom[ae]n'?s?|ladies|men'?s?|both)\b/i.test(tail);
+    const name = tail.replace(/\b(wom[ae]n'?s?|ladies|men'?s?|both|and|&|the)\b/gi, " ").replace(/\s+/g, " ").trim();
+    if (!name || name.split(" ").length > 4) return [];
+    const match = matchClub(name, leagueId);
+    if (!match.club || (match.status !== "sure" && name.split(" ").length < 2)) return [];
+    if (!both) return [{ ...match, leagueContext: leagueId, level: section }];
+    const twins = getClubIndex().clubs.filter(club => club.norm === match.club.norm);
+    if (twins.length < 2) return [{ ...match, leagueContext: leagueId, level: section }];
+    return twins.map(club => ({ raw: `${name} (${shortLeague(club.leagueName)})`, status: "sure", club, candidates: match.candidates, leagueContext: leagueId, level: section }));
   }
 
   // --- Filter tips: nation + league + quality + positions -------------------------
@@ -5096,7 +5129,119 @@ function priceWatchMain(SCRIPT_VERSION) {
     });
   }
 
+  // --- Group tips: nations/leagues without a price per line --------------------------
+  // "Discard only. Gold/Silvers / Italy vs France / England vs Croatia / Can grab a few bronzes with Greece and Denmark"
+  // "Discard only here. Top 5 leagues and nations only. ... try fullback, wingers, strikers."
+  const TOP5_LEAGUES = [13, 53, 31, 19, 16];
+  const TOP5_NATIONS = ["england", "spain", "italy", "germany", "france"];
+  const NATION_NAME_ALIASES = { "czech republic": "czechia", netherlands: "holland", holland: "netherlands", usa: "united states", turkey: "turkiye", "south korea": "korea republic", "ivory coast": "cote d ivoire", czechia: "czech republic", ireland: "republic of ireland" };
+  const POSITION_GROUPS = [
+    [/\bfull ?backs?\b/i, ["LB", "RB"]],
+    [/\bwing ?backs?\b/i, ["LWB", "RWB"]],
+    [/\b(centre|center) ?backs?\b|\bcbs\b/i, ["CB"]],
+    [/\bwingers?\b|\bwide (men|players)\b/i, ["LW", "RW", "LM", "RM"]],
+    [/\bstrikers?\b|\bforwards?\b|\bsts\b/i, ["ST"]],
+    [/\bkeepers?\b|\bgoal ?keepers?\b|\bgks\b/i, ["GK"]],
+    [/\b(defensive|holding) mids?\b|\bcdms\b/i, ["CDM"]],
+    [/\battacking mids?\b|\bcams\b/i, ["CAM"]],
+    [/\b(central )?mid(fielder)?s\b|\bcms\b/i, ["CM"]]
+  ];
+
+  function nationByAnyName(name) {
+    const plain = plainName(name);
+    if (!plain) return null;
+    const exact = getNations().find(nation => nation.plain === plain);
+    if (exact) return { id: exact.id, label: exact.label };
+    if (NATION_NAME_ALIASES[plain]) {
+      const alias = getNations().find(nation => nation.plain === NATION_NAME_ALIASES[plain]);
+      if (alias) return { id: alias.id, label: alias.label };
+    }
+    if (DEMONYMS[plain]) return nationByName(DEMONYMS[plain]);
+    return null;
+  }
+
+  // All nations named in a line, in order of appearance.
+  function nationsInLine(line) {
+    const words = plainName(line).split(" ");
+    const found = [];
+    for (let i = 0; i < words.length; i++) {
+      for (let size = 3; size >= 1; size--) {
+        const nation = i + size <= words.length && nationByAnyName(words.slice(i, i + size).join(" "));
+        if (nation && plainName(words.slice(i, i + size).join(" ")).length >= 4) {
+          if (!found.some(item => item.id === nation.id)) found.push(nation);
+          i += size - 1;
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  function levelsInText(text) {
+    const levels = [];
+    (String(text).match(/\b(golds?|silvers?|bronzes?)\b/gi) || []).forEach(word => {
+      const level = levelFromWord(word);
+      if (!levels.includes(level)) levels.push(level);
+    });
+    return levels;
+  }
+
+  function parseGroupFilterTip(text) {
+    const lines = String(text || "").split(/\r?\n/).map(line => line.replace(/@\w+/g, " ").replace(/[•*_~`]+/g, " ").replace(/\s+/g, " ").trim()).filter(Boolean);
+    const matchups = lines.filter(line => /\s(?:vs?\.?|versus)\s/i.test(line) && nationsInLine(line).length >= 2);
+    const top5 = /\btop\s*5\b/i.test(text);
+    if (!matchups.length && !top5) return null;
+
+    const discard = /\b(discard|quick ?sell|qs)\b/i.test(text);
+    const positions = [];
+    POSITION_GROUPS.forEach(([pattern, group]) => {
+      if (pattern.test(text)) group.forEach(position => { if (!positions.includes(position)) positions.push(position); });
+    });
+    // Quality named on a line without nations ("Discard only. Gold/Silvers"); gold when the tip names none.
+    const general = levelsInText(lines.filter(line => !nationsInLine(line).length).join(" "));
+    const levels = general.length ? general : ["gold"];
+
+    const rules = [];
+    const add = (level, nation, leagues, extra = {}) => rules.push({
+      id: `${Date.now().toString(36)}${rules.length}`,
+      raw: `${LEVEL_LABEL[level]}${nation ? ` · ${nation.label}` : ""}${leagues.length ? ` · ${leagues.map(league => league.label).join("/")}` : ""}${positions.length ? ` · ${positions.join("/")}` : ""}${discard ? " · discard" : ""}`,
+      level, nation, leagues, leaguesOptional: false, positions: [...positions], max: null, ideal: null, enabled: true, unknown: [],
+      ...(discard ? { priceNote: "discard" } : {}), ...extra
+    });
+
+    if (matchups.length) {
+      const seen = new Set();
+      matchups.forEach(line => nationsInLine(line).forEach(nation => {
+        if (seen.has(nation.id)) return;
+        seen.add(nation.id);
+        levels.forEach(level => add(level, nation, []));
+      }));
+      // "Can grab a few bronzes with Greece and Denmark": extra quality for the nations on that line.
+      lines.filter(line => !matchups.includes(line) && levelsInText(line).length && nationsInLine(line).length).forEach(line => {
+        levelsInText(line).forEach(level => nationsInLine(line).forEach(nation => {
+          if (!rules.some(rule => rule.level === level && rule.nation && rule.nation.id === nation.id)) add(level, nation, []);
+        }));
+      });
+    } else {
+      // Top 5 leagues (and nations): one rule per league; the nation rules start unticked (mostly the same players).
+      const withLeagues = /\btop\s*5\s+(leagues?|leagues? and nations?)\b|\bleagues?\b/i.test(text);
+      const withNations = /\bnations?\b|\bcountr(y|ies)\b/i.test(text);
+      levels.forEach(level => {
+        if (withLeagues || !withNations) TOP5_LEAGUES.forEach(id => add(level, null, [{ id, label: leagueLabel(id) }]));
+        if (withNations) TOP5_NATIONS.forEach(name => {
+          const nation = nationByAnyName(name);
+          if (nation) add(level, nation, [], { enabled: !withLeagues });
+        });
+      });
+    }
+    const platformMatch = String(text || "").match(/(?:^|[\s@])(console|ps[45]?|xbox|pc)\b/i);
+    const platform = platformMatch ? (platformMatch[1].toLowerCase() === "pc" ? "pc" : "console") : null;
+    return rules.length ? { platform, rules, grouped: true } : null;
+  }
+
   function parseFilterTip(text) {
+    const grouped = parseGroupFilterTip(text);
+    if (grouped) return grouped;
     const rules = [];
     let current = null;
     const platformMatch = String(text || "").match(/(?:^|[\s@])(console|ps[45]?|xbox|pc)\b/i);
@@ -7019,6 +7164,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (asPlayers.players.filter(item => item.priced).length >= 2) {
           // Names with rating and prices ("Hemp-88 <110 / <100pc"): a new snipe list with fixed max BINs.
           showPlayerReviewStep(asPlayers);
+        } else if (asFilters.grouped) {
+          // Nations per match ("Italy vs France") or "Top 5 leagues and nations": filter rules without a price.
+          showFilterReviewStep(asFilters);
         } else if (asFodder.ratings.length >= 2) {
           showFodderReviewStep(asFodder);
         } else if (asFilters.rules.some(rule => rule.nation) && !asClubs.sections) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.39.0
+// @version      2.40.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3928,6 +3928,13 @@ function priceWatchMain(SCRIPT_VERSION) {
   function playerMax(list, player) {
     // Mass bid list: your fixed max, else BIN (yours or FUT.GG) minus the list's percentage.
     if (list.massBid) return player.fixedMax || massBidMax(list, player);
+    // Discard tip: bid the quick-sell value; pricier cards (> quick-sell + 200) at their price − 150.
+    if (list.discard && !player.fixedMax && !(player.special && player.definitionId <= 0xFFFFFF)) {
+      const quick = discardForRating(player.rating);
+      const entry = geniePrice(player.definitionId);
+      if (entry && entry.price && (!quick || entry.price > quick + DISCARD_PRICEY_GAP)) return roundDownToStep(entry.price - DISCARD_UNDER_PRICE);
+      return quick || null;
+    }
     // Holo snipe: a holographic card for the price of the normal one (its FUT Genie price).
     if (list.holo && !(player.special && player.definitionId <= 0xFFFFFF)) {
       const normal = geniePrice(player.normalId || player.definitionId);
@@ -4521,6 +4528,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         return;
       }
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
+      if (DISCARD_WORD.test(rawLine)) return; // "Discard on bids" is an instruction, not a player
       rawLine.split(/[,;/]/).forEach(part => {
         const line = part.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–\d.)]+\s*/, "").trim();
         // "Svitková 76" / "Svitková-76": a name with the card's rating, no price.
@@ -4551,7 +4559,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         players.push(match);
       });
     });
-    return { players, skipped, platform, windows: parseWindows(text) };
+    // "Discard on bids" / "at discard": bid list at the quick-sell value (see playerMax).
+    return { players, skipped, platform, windows: parseWindows(text), discard: DISCARD_WORD.test(String(text || "")) };
   }
 
   // --- Inventory: what you own per rule, what it cost, what it's worth ----------
@@ -5195,6 +5204,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     const ratings = Object.keys(discardValues).map(Number).filter(rating => rating >= min && rating <= max).sort((a, b) => a - b);
     // Only when a card at (or just above) the lowest rating was seen: an 82 quick-sells for more than a 75.
     return ratings.length && (level === "bronze" || ratings[0] <= min + 1) ? discardValues[ratings[0]] : null;
+  }
+
+  const DISCARD_WORD = /\b(discard|quick ?sell)\b/i;
+  const DISCARD_PRICEY_GAP = 200;
+  const DISCARD_UNDER_PRICE = 150;
+
+  // Quick-sell value of one rating: exact, else the nearest lower rating of the same quality (never too high).
+  function discardForRating(rating) {
+    if (!rating) return null;
+    if (discardValues[rating]) return discardValues[rating];
+    const floor = rating >= 75 ? 75 : rating >= 65 ? 65 : 1;
+    const lower = Object.keys(discardValues).map(Number).filter(known => known < rating && known >= floor).sort((a, b) => b - a)[0];
+    return lower ? discardValues[lower] : null;
   }
 
   // Max BIN of a filter rule: its own, or for "at discard" the learned quick-sell value.
@@ -7175,6 +7197,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           windows: windows.read(),
           players,
           holo: holoMode || players.some(player => player.holo),
+          ...(parsed.discard ? { discard: true, mode: "bid" } : {}),
           done: {}
         });
         saveStock();
@@ -7187,7 +7210,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const recognised = parsed.players.filter(item => item.status === "sure").length;
       const doubtful = parsed.players.filter(item => item.status === "maybe").length;
       const summary = el("div", "pt-stock-summary", `${parsed.players.length} spelers gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje)` +
-        (parsed.skipped ? ` · ${parsed.skipped} regel(s) zonder speler overgeslagen` : "") + " · gewone kaart, duurste eerst. ");
+        (parsed.skipped ? ` · ${parsed.skipped} regel(s) zonder speler overgeslagen` : "") + " · gewone kaart, duurste eerst. " +
+        (parsed.discard ? "🗑️ Discard-tip: bied-lijst, max bod = quick-sell-waarde van de rating; duurdere kaarten (> quick-sell + 200) prijs − 150. " : ""));
       summary.appendChild(switchLink(false));
       importPanel.append(summary, settings, table, actions);
     }

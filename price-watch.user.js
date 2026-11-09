@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.40.0
+// @version      2.41.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5186,6 +5186,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     (items || []).forEach(item => {
       const value = item && Number(item.discardValue);
       const rating = item && Number(item.rating);
+      try { learnPriceFloor(item); } catch (_) { /* optional */ }
       if (!value || !rating || (item.isPlayer && !item.isPlayer()) || (item.isSpecial && item.isSpecial())) return;
       if (discardValues[rating] !== value) {
         discardValues[rating] = value;
@@ -5197,13 +5198,48 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
+  // Lowest price EA allows for a card (bottom of its price range): you can't buy below it, not even on bids.
+  // Gold 75–81s showed "Price range 600 – 10,000" on FUT.GG (FC27); learned per rating when EA sends the limits.
+  const PRICE_FLOOR_KEY = "pt_price_floor_v1";
+  const DEFAULT_PRICE_FLOOR = { gold: 600 };
+  let priceFloors = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(PRICE_FLOOR_KEY) || "{}") || {};
+    } catch {
+      return {};
+    }
+  })();
+
+  function learnPriceFloor(item) {
+    const limits = item && (item._itemPriceLimits || item.itemPriceLimits);
+    const minimum = limits && Number(limits.minimum);
+    const rating = item && Number(item.rating);
+    if (!minimum || !rating || (item.isSpecial && item.isSpecial()) || priceFloors[rating] === minimum) return false;
+    priceFloors[rating] = minimum;
+    try { localStorage.setItem(PRICE_FLOOR_KEY, JSON.stringify(priceFloors)); } catch (_) { /* memory only */ }
+    return true;
+  }
+
+  function priceFloorFor(rating, level) {
+    const quality = level || (rating >= 75 ? "gold" : rating >= 65 ? "silver" : "bronze");
+    return (rating && priceFloors[rating]) || DEFAULT_PRICE_FLOOR[quality] || 0;
+  }
+
+  // "At discard" in practice: the quick-sell value, but never below the lowest price the market allows.
+  function withFloor(value, rating, level) {
+    const floor = priceFloorFor(rating, level);
+    if (!value) return floor || null;
+    return Math.max(value, floor);
+  }
+
   // Quick-sell value of the lowest rating of that quality (75 for gold): the cheapest card in the filter.
   function discardFor(level) {
     const min = LEVEL_MIN_RATING[level] || 1;
     const max = level === "silver" ? 74 : level === "bronze" ? 64 : 99;
     const ratings = Object.keys(discardValues).map(Number).filter(rating => rating >= min && rating <= max).sort((a, b) => a - b);
     // Only when a card at (or just above) the lowest rating was seen: an 82 quick-sells for more than a 75.
-    return ratings.length && (level === "bronze" || ratings[0] <= min + 1) ? discardValues[ratings[0]] : null;
+    const value = ratings.length && (level === "bronze" || ratings[0] <= min + 1) ? discardValues[ratings[0]] : null;
+    return withFloor(value, level === "bronze" ? null : min, level);
   }
 
   const DISCARD_WORD = /\b(discard|quick ?sell)\b/i;
@@ -5213,10 +5249,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Quick-sell value of one rating: exact, else the nearest lower rating of the same quality (never too high).
   function discardForRating(rating) {
     if (!rating) return null;
-    if (discardValues[rating]) return discardValues[rating];
+    if (discardValues[rating]) return withFloor(discardValues[rating], rating);
     const floor = rating >= 75 ? 75 : rating >= 65 ? 65 : 1;
     const lower = Object.keys(discardValues).map(Number).filter(known => known < rating && known >= floor).sort((a, b) => b - a)[0];
-    return lower ? discardValues[lower] : null;
+    return withFloor(lower ? discardValues[lower] : null, rating);
   }
 
   // Max BIN of a filter rule: its own, or for "at discard" the learned quick-sell value.
@@ -7211,7 +7247,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const doubtful = parsed.players.filter(item => item.status === "maybe").length;
       const summary = el("div", "pt-stock-summary", `${parsed.players.length} spelers gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje)` +
         (parsed.skipped ? ` · ${parsed.skipped} regel(s) zonder speler overgeslagen` : "") + " · gewone kaart, duurste eerst. " +
-        (parsed.discard ? "🗑️ Discard-tip: bied-lijst, max bod = quick-sell-waarde van de rating; duurdere kaarten (> quick-sell + 200) prijs − 150. " : ""));
+        (parsed.discard ? "🗑️ Discard-tip: bied-lijst, max bod = quick-sell-waarde van de rating (goud nooit onder 600, de laagste marktprijs); duurdere kaarten (> quick-sell + 200) prijs − 150. " : ""));
       summary.appendChild(switchLink(false));
       importPanel.append(summary, settings, table, actions);
     }
@@ -7497,7 +7533,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       discardHint = () => {
         if (rule.priceNote !== "discard") return;
         const learned = rule.kind !== "manager" && rule.level ? discardFor(rule.level) : null;
-        max.placeholder = learned ? `quick-sell ${priceFormat.format(learned)}` : "quick-sell";
+        max.placeholder = learned ? `discard ${priceFormat.format(learned)}` : "quick-sell";
         max.title = learned
           ? `"At discard": leeg = quick-sell-waarde van de laagste ${LEVEL_LABEL[rule.level].toLowerCase()}e rating (${priceFormat.format(learned)}, geleerd uit kaarten die je zag). Vul zelf iets in om dat te overschrijven.`
           : "\"At discard\": quick-sell-waarde nog onbekend. Zoek één keer op de markt naar deze kwaliteit (laagste rating, bv. 75 goud) of vul hem zelf in.";
@@ -7532,7 +7568,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             const count = filterSteps(rule).length;
             steps.textContent = `${count} zoekopdracht${count === 1 ? "" : "en"}: ` + filterSteps(rule).map(filterStepLabel).join(" · ") +
               (rule.unknown && rule.unknown.length ? ` · niet herkend: "${rule.unknown.join("\", \"")}"` : "") +
-              (rule.max ? "" : ruleMax(rule) ? ` · max BIN = quick-sell ${priceFormat.format(ruleMax(rule))} (geleerd)` : " · geen max BIN: je ziet de hele markt") +
+              (rule.max ? "" : ruleMax(rule) ? ` · max = discard ${priceFormat.format(ruleMax(rule))} (quick-sell, nooit onder de laagste marktprijs)` : " · geen max BIN: je ziet de hele markt") +
               (rule.priceNote === "discard" && !ruleMax(rule) ? " · ⚠ \"at discard\": quick-sell-waarde nog onbekend — zoek één keer naar deze kwaliteit op de markt, of vul hem zelf in" : "") +
               (rule.note ? ` · ${rule.note}` : "");
           };

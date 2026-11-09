@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.38.0
+// @version      2.39.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3516,6 +3516,18 @@ function priceWatchMain(SCRIPT_VERSION) {
             }
           });
         }
+        // Every search: learn quick-sell values per rating from the results (for "at discard" tips).
+        if (observable && typeof observable.observe === "function") {
+          const discardContext = {};
+          observable.observe(discardContext, (sender, response) => {
+            try {
+              sender.unobserve(discardContext);
+              learnDiscardValues((response && response.data && response.data.items) || []);
+            } catch (_) {
+              // Learning is optional.
+            }
+          });
+        }
       } catch (_) {
         // Never get in the way of the search itself.
       }
@@ -3542,7 +3554,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           position: step.position,
           league: step.league,
           sell,
-          max: sell ? filterBuyMax(list, sell.price) : rule.max,
+          max: sell ? filterBuyMax(list, sell.price) : ruleMax(rule),
           ideal: sell ? null : rule.ideal,
           key
         };
@@ -4570,6 +4582,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         observable.unobserve(owner);
         window.clearTimeout(timer);
         const items = response.success && response.response ? response.response.items || [] : [];
+        try { learnDiscardValues(items); } catch (_) { /* optional */ }
         resolve({ items, done: !response.success || !response.response || response.response.retrievedAll || items.length < CLUB_PAGE_SIZE, failed: !response.success });
       });
     });
@@ -5146,6 +5159,49 @@ function priceWatchMain(SCRIPT_VERSION) {
     [/\battacking mids?\b|\bcams\b/i, ["CAM"]],
     [/\b(central )?mid(fielder)?s\b|\bcms\b/i, ["CM"]]
   ];
+
+  // --- Quick-sell ("discard") values, learned from cards you see ---------------------
+  // EA sends item.discardValue with every card (market results, club). Stored per rating of regular players.
+  const DISCARD_KEY = "pt_discard_v1";
+  const LEVEL_MIN_RATING = { gold: 75, silver: 65, bronze: 1 };
+  let discardValues = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(DISCARD_KEY) || "{}") || {};
+    } catch {
+      return {};
+    }
+  })();
+
+  function learnDiscardValues(items) {
+    let changed = false;
+    (items || []).forEach(item => {
+      const value = item && Number(item.discardValue);
+      const rating = item && Number(item.rating);
+      if (!value || !rating || (item.isPlayer && !item.isPlayer()) || (item.isSpecial && item.isSpecial())) return;
+      if (discardValues[rating] !== value) {
+        discardValues[rating] = value;
+        changed = true;
+      }
+    });
+    if (changed) {
+      try { localStorage.setItem(DISCARD_KEY, JSON.stringify(discardValues)); } catch (_) { /* memory only */ }
+    }
+  }
+
+  // Quick-sell value of the lowest rating of that quality (75 for gold): the cheapest card in the filter.
+  function discardFor(level) {
+    const min = LEVEL_MIN_RATING[level] || 1;
+    const max = level === "silver" ? 74 : level === "bronze" ? 64 : 99;
+    const ratings = Object.keys(discardValues).map(Number).filter(rating => rating >= min && rating <= max).sort((a, b) => a - b);
+    // Only when a card at (or just above) the lowest rating was seen: an 82 quick-sells for more than a 75.
+    return ratings.length && (level === "bronze" || ratings[0] <= min + 1) ? discardValues[ratings[0]] : null;
+  }
+
+  // Max BIN of a filter rule: its own, or for "at discard" the learned quick-sell value.
+  function ruleMax(rule) {
+    if (rule.max) return rule.max;
+    return rule.priceNote === "discard" && rule.level && rule.kind !== "manager" ? discardFor(rule.level) : null;
+  }
 
   function nationByAnyName(name) {
     const plain = plainName(name);
@@ -7346,7 +7402,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rule.kind === "manager") level.appendChild(new Option("Alle kwaliteiten", ""));
       LEVELS.forEach(value => level.appendChild(new Option(LEVEL_LABEL[value], value)));
       level.value = rule.level || "";
-      level.addEventListener("change", () => { rule.level = level.value || null; onChange(); });
+      let discardHint = () => {};
+      level.addEventListener("change", () => { rule.level = level.value || null; discardHint(); onChange(); });
 
       const positions = el("input", "pt-target-input pt-filter-positions");
       positions.value = rule.positions.join("/");
@@ -7412,8 +7469,16 @@ function priceWatchMain(SCRIPT_VERSION) {
       const ideal = el("input", "pt-target-input");
       [max, ideal].forEach(input => { input.inputMode = "numeric"; });
       max.value = rule.max || "";
-      max.placeholder = rule.priceNote === "discard" ? "quick-sell" : "max BIN";
-      if (rule.priceNote === "discard") max.title = "\"At discard\": vul de quick-sell-waarde in (zie Snel verkopen bij zo'n manager in je club)";
+      max.placeholder = "max BIN";
+      discardHint = () => {
+        if (rule.priceNote !== "discard") return;
+        const learned = rule.kind !== "manager" && rule.level ? discardFor(rule.level) : null;
+        max.placeholder = learned ? `quick-sell ${priceFormat.format(learned)}` : "quick-sell";
+        max.title = learned
+          ? `"At discard": leeg = quick-sell-waarde van de laagste ${LEVEL_LABEL[rule.level].toLowerCase()}e rating (${priceFormat.format(learned)}, geleerd uit kaarten die je zag). Vul zelf iets in om dat te overschrijven.`
+          : "\"At discard\": quick-sell-waarde nog onbekend. Zoek één keer op de markt naar deze kwaliteit (laagste rating, bv. 75 goud) of vul hem zelf in.";
+      };
+      discardHint();
       ideal.value = rule.ideal || "";
       ideal.placeholder = "ideaal";
       max.addEventListener("change", () => { rule.max = parsePrice(max.value); onChange(); });
@@ -7431,7 +7496,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const draw = () => {
         container.textContent = "";
         rules.forEach(rule => {
-          const row = el("div", `pt-filter-rule pt-match-${rule.nation && rule.max ? "sure" : "maybe"}`);
+          const row = el("div", `pt-filter-rule pt-match-${(rule.nation || rule.leagues.length) && ruleMax(rule) ? "sure" : "maybe"}`);
           const head = el("label", "pt-filter-raw");
           const check = el("input");
           check.type = "checkbox";
@@ -7443,8 +7508,8 @@ function priceWatchMain(SCRIPT_VERSION) {
             const count = filterSteps(rule).length;
             steps.textContent = `${count} zoekopdracht${count === 1 ? "" : "en"}: ` + filterSteps(rule).map(filterStepLabel).join(" · ") +
               (rule.unknown && rule.unknown.length ? ` · niet herkend: "${rule.unknown.join("\", \"")}"` : "") +
-              (rule.max ? "" : " · geen max BIN: je ziet de hele markt") +
-              (rule.priceNote === "discard" && !rule.max ? " · ⚠ \"at discard\": vul de quick-sell-waarde in als max BIN" : "") +
+              (rule.max ? "" : ruleMax(rule) ? ` · max BIN = quick-sell ${priceFormat.format(ruleMax(rule))} (geleerd)` : " · geen max BIN: je ziet de hele markt") +
+              (rule.priceNote === "discard" && !ruleMax(rule) ? " · ⚠ \"at discard\": quick-sell-waarde nog onbekend — zoek één keer naar deze kwaliteit op de markt, of vul hem zelf in" : "") +
               (rule.note ? ` · ${rule.note}` : "");
           };
           updateSteps();
@@ -7514,7 +7579,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""),
             `${done ? "✓ " : "🔍 "}${filterStepLabel(step)}`);
           button.type = "button";
-          button.title = `${filterRuleTitle(rule)} · ${filterStepLabel(step)} · max BIN ${rule.max ? priceFormat.format(rule.max) : "—"} klaarzetten` +
+          button.title = `${filterRuleTitle(rule)} · ${filterStepLabel(step)} · max BIN ${ruleMax(rule) ? priceFormat.format(ruleMax(rule)) : "—"}${!rule.max && ruleMax(rule) ? " (quick-sell)" : ""} klaarzetten` +
             (done ? ` (eerder om ${formatTime(done)})` : "");
           button.addEventListener("click", () => goToRule(list.id, index));
           steps.appendChild(button);
@@ -8216,6 +8281,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const market = (geniePrice(item.definitionId, item.resourceId) || {}).price || 0;
     const price = sold ? auction.currentBid || auction.buyNowPrice || 0 : listed ? auction.buyNowPrice || 0 : market;
     const bought = boughtPrice(item);
+    try { learnDiscardValues([item]); } catch (_) { /* optional */ }
     return { sold, listed, market, price, bought, net: bought && price ? netProfit(price, bought) : null, quickSell: Number(item.discardValue) || 0 };
   }
 

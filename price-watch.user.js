@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.41.0
+// @version      2.42.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -15,6 +15,7 @@
 // @connect      ntfy.sh
 // @connect      r2.fut.gg
 // @connect      www.fut.gg
+// @connect      fodder.gg
 // @require      https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
 // @updateURL    https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
@@ -480,7 +481,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   let futggStage = "nog niet gestart";
 
   let futggRequestCounter = 0;
-  function futggRequestJson(url) {
+  function futggRequestJson(url, raw = false) {
     return new Promise((resolve, reject) => {
       // This part runs in EA's page context, where Tampermonkey's GM_* APIs are not exposed.
       // Send the request through the userscript sandbox bridge installed at the bottom of this file.
@@ -498,6 +499,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         cleanup();
         if (!data.ok) return reject(new Error(data.error || "Onbekende fout bij FUT.GG-aanvraag"));
         if (data.status < 200 || data.status >= 300) return reject(new Error(`HTTP ${data.status} bij FUT.GG`));
+        if (raw) return resolve(String(data.responseText || ""));
         try { resolve(JSON.parse(data.responseText)); }
         catch (error) { reject(new Error(`Ongeldige FUT.GG JSON: ${error.message}`)); }
       };
@@ -2276,17 +2278,20 @@ function priceWatchMain(SCRIPT_VERSION) {
     const renderStock = buildStockSection(root);
     const renderFodder = buildFodderSection(root);
     const renderTransfers = buildTransferSection(root);
+    const renderFlip = buildFlipSection(root);
     buildTabs(root, {
       watch: card,
       fodder: root.querySelector(".pt-fodder-card"),
       lists: root.querySelector(".pt-stock-card"),
-      transfers: root.querySelector(".pt-transfer-card")
+      transfers: root.querySelector(".pt-transfer-card"),
+      flip: root.querySelector(".pt-flip-card")
     });
     return () => {
       renderRows();
       renderStock();
       renderFodder();
       renderTransfers();
+      renderFlip();
     };
   }
 
@@ -6548,6 +6553,394 @@ function priceWatchMain(SCRIPT_VERSION) {
     return render;
   }
 
+  // --- Flip sheet (fodder.gg Price Watch) -------------------------------------------------------
+  // A shared fodder.gg watchlist link (fodder.gg/price-watch/<token>) has the last 24 h of low / avg /
+  // high / now prices + an hourly trend per card, for console and PC, inside the page (Next.js data).
+  // Sheet method: buy at the low (or lower), list a little under the high (avg–high as guide), 5% tax.
+  // Only an external page is read; the run prepares market filters, you search and buy yourself.
+  const FLIP_KEY = "pt_flip_v1"; // { token, platform, maxPrice, minPct, onlyDeals }
+  const FLIP_DATA_KEY = "pt_flip_data_v1"; // last fetched report { at, fetchedAt, console, pc }
+  const FLIP_REFRESH_MS = 10 * 60 * 1000;
+  const FLIP_RUN_ID = "flip-sheet";
+
+  function getFlip() {
+    let state = null;
+    try { state = JSON.parse(localStorage.getItem(FLIP_KEY) || "null"); } catch (_) { /* default */ }
+    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 2, onlyDeals: false }, state || {});
+  }
+  function saveFlip(state) {
+    try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
+  }
+  function flipTokenFrom(text) {
+    const value = String(text || "").trim();
+    const match = value.match(/price-watch\/([A-Za-z0-9_-]{8,64})/) || value.match(/^([A-Za-z0-9_-]{8,64})$/);
+    return match ? match[1] : "";
+  }
+
+  // The page streams its data as self.__next_f.push([1,"<JSON string>"]) chunks; the "report" object
+  // is inside one of them. Join the chunks, find "report":{ and cut out the balanced object.
+  function parseFodderWatch(html) {
+    const chunks = [];
+    const re = /self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g;
+    let match;
+    while ((match = re.exec(html))) {
+      try { chunks.push(JSON.parse(match[1])); } catch (_) { /* skip a broken chunk */ }
+    }
+    const text = chunks.join("");
+    const start = text.indexOf("\"report\":{");
+    if (start < 0) throw new Error("fodder.gg: geen prijsdata in de pagina (verlopen of verkeerde link?)");
+    let i = start + 9;
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (ch === "\\") i++;
+        else if (ch === "\"") inString = false;
+        continue;
+      }
+      if (ch === "\"") inString = true;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) { end = i; break; }
+    }
+    if (end < 0) throw new Error("fodder.gg: prijsdata onvolledig");
+    const report = JSON.parse(text.slice(start + 9, end + 1));
+    const num = value => {
+      const n = Number(typeof value === "string" ? value.replace(/^\$/, "") : value); // RSC writes -0 as "$-0"
+      return Number.isFinite(n) ? n : 0;
+    };
+    const cards = list => (Array.isArray(list) ? list : []).map(card => ({
+      id: num(card.resourceId),
+      rating: num(card.rating),
+      name: String(card.name || ""),
+      rarity: String(card.rarity || ""),
+      holo: !!card.holo,
+      low: num(card.low), avg: num(card.avg), high: num(card.high), now: num(card.now),
+      change: num(card.change), vsAvg: num(card.vsAvg),
+      trend: (Array.isArray(card.trend) ? card.trend : []).map(num).filter(n => n > 0)
+    })).filter(card => card.id > 0 && card.now > 0);
+    return { from: report.from, at: Date.parse(report.at || report.to) || Date.now(), console: cards(report.console), pc: cards(report.pc) };
+  }
+
+  let flipData = null;
+  try { flipData = JSON.parse(localStorage.getItem(FLIP_DATA_KEY) || "null"); } catch (_) { flipData = null; }
+  let flipLoading = null;
+  let flipError = "";
+
+  function loadFlipSheet(force) {
+    const state = getFlip();
+    if (!state.token) return Promise.resolve(false);
+    if (flipLoading) return flipLoading;
+    if (!force && flipData && flipData.token === state.token && Date.now() - flipData.fetchedAt < FLIP_REFRESH_MS) return Promise.resolve(false);
+    flipError = "";
+    flipLoading = futggRequestJson(`https://fodder.gg/price-watch/${state.token}`, true)
+      .then(html => {
+        flipData = { ...parseFodderWatch(html), token: state.token, fetchedAt: Date.now() };
+        try { localStorage.setItem(FLIP_DATA_KEY, JSON.stringify(flipData)); } catch (_) { /* memory only */ }
+        return true;
+      })
+      .catch(error => {
+        flipError = error && error.message ? error.message : String(error);
+        return false;
+      })
+      .finally(() => {
+        flipLoading = null;
+        listeners.forEach(listener => listener());
+      });
+    listeners.forEach(listener => listener());
+    return flipLoading;
+  }
+
+  function median(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+
+  // Buy / sell per card. A low, avg or high far from the hourly trend (one odd sale, a 990K listing,
+  // thin PC data) is replaced by the trend's own values and flagged, as the sheet says: skip crazy highs.
+  function flipCalc(card) {
+    // The sheet looks at the last 12 hours: a card that fell all day is judged on where it is now.
+    const last12 = card.trend.slice(-12);
+    const mid = median(last12) || card.avg || card.now;
+    const core = last12.filter(value => value >= mid * 0.8 && value <= mid * 1.25);
+    const lowOdd = card.low < mid * 0.8;
+    const coreMax = core.length ? Math.max(...core) : mid;
+    // A high above every hourly point (+10%) or far above the middle is one sale/listing, not a sell price.
+    const highOdd = card.high > mid * 1.3 || (core.length >= 6 && card.high > coreMax * 1.1);
+    const avgOdd = card.avg > 0 && Math.abs(card.avg / mid - 1) > 0.15;
+    const low = lowOdd ? (core.length ? Math.min(...core) : mid) : card.low;
+    const high = highOdd ? coreMax : card.high;
+    const falling = card.trend.length >= 8 && median(card.trend.slice(-4)) < median(card.trend.slice(0, 4)) * 0.92;
+    const avg = avgOdd || falling || !card.avg ? Math.min(mid, card.avg || mid) : card.avg;
+    const buy = roundDownToStep(low);
+    const sell = roundDownToStep(Math.max(avg, (avg + high) / 2)); // "use average–high as guide"
+    const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
+    const pct = buy > 0 ? profit / buy * 100 : 0;
+    const gap = buy > 0 ? card.now / buy - 1 : 1;
+    const warnings = [];
+    if (lowOdd) warnings.push(`low ${priceFormat.format(card.low)} los van de trend`);
+    if (highOdd) warnings.push(`high ${priceFormat.format(card.high)} los van de trend (te weinig data?)`);
+    if (avgOdd) warnings.push(`gemiddelde ${priceFormat.format(card.avg)} scheef`);
+    const sparse = card.trend.length < 12;
+    if (sparse) warnings.push(`maar ${card.trend.length} uurpunten`);
+    if (falling) warnings.push("dalende trend");
+    const status = profit <= 0 ? "skip" : gap <= 0.02 ? "buy" : gap <= 0.06 ? "near" : "wait";
+    // Not ticked by default: thin data or a crazy high (sheet: skip it), or a falling price.
+    const risky = sparse || highOdd || falling;
+    return { buy, sell, profit, pct, gap, warnings, status, risky };
+  }
+
+  const FLIP_STATUS = {
+    buy: ["🟢", "Nu op/onder de low"],
+    near: ["🟡", "Binnen 6% van je koopprijs"],
+    wait: ["⚪", "Nu te duur, wachten"],
+    skip: ["⛔", "Geen winst na belasting"]
+  };
+  const FLIP_ORDER = { buy: 0, near: 1, wait: 2, skip: 3 };
+
+  function flipSparkline(values, up) {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("width", "84");
+    svg.setAttribute("height", "24");
+    svg.setAttribute("class", "pt-flip-spark");
+    if (values.length < 2) return svg;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const points = values.map((value, i) => `${(i / (values.length - 1) * 84).toFixed(1)},${(22 - (max > min ? (value - min) / (max - min) : 0.5) * 20).toFixed(1)}`);
+    const line = document.createElementNS(ns, "polyline");
+    line.setAttribute("points", points.join(" "));
+    line.setAttribute("fill", "none");
+    line.setAttribute("stroke", up ? "#27d98b" : "#ff8080");
+    line.setAttribute("stroke-width", "1.5");
+    svg.appendChild(line);
+    return svg;
+  }
+
+  // Player entries for a run/watch list; specials get their rarity from EA's concept data (versions).
+  async function flipPlayers(rows) {
+    const special = rows.filter(row => row.card.id > 0xFFFFFF).map(row => row.card.id & 0xFFFFFF);
+    const versions = special.length ? await cardVersionsMany(special) : new Map();
+    return rows.map(({ card, calc }) => {
+      const player = {
+        definitionId: card.id,
+        name: `${card.name} ${card.rating} ${card.rarity}${card.holo ? " ✨" : ""}`,
+        rating: card.rating,
+        fixedMax: calc.buy,
+        flipSell: calc.sell
+      };
+      if (card.id > 0xFFFFFF) {
+        const version = (versions.get(card.id & 0xFFFFFF) || []).find(item => item.definitionId === card.id);
+        player.special = true;
+        player.rarity = version ? version.rarity : null;
+      }
+      if (card.holo) player.holo = true;
+      return player;
+    }).sort((a, b) => b.fixedMax - a.fixedMax);
+  }
+
+  let flipOnShow = () => {};
+  let flipTimer = 0;
+
+  function buildFlipSection(root) {
+    const card = el("div", "pt-watch-card pt-flip-card");
+    root.appendChild(card);
+    const toolbar = el("div", "pt-watch-toolbar");
+    const heading = el("div", "pt-watch-heading");
+    const status = el("div", "pt-watch-status");
+    heading.append(el("h2", "pt-watch-title", "Flip sheet"), status);
+
+    const controls = el("div", "pt-stock-list-buttons");
+    const link = el("input", "pt-target-input pt-flip-link");
+    link.placeholder = "Plak je fodder.gg/price-watch/… link";
+    link.title = "De link van de Price Watch-lijst op fodder.gg. Wordt alleen in deze browser bewaard.";
+    const platform = el("select", "pt-stock-select pt-mode-select");
+    platform.append(new Option("PC", "pc"), new Option("Console", "console"));
+    const field = (label, title) => {
+      const box = el("label", "pt-goal");
+      const input = el("input", "pt-target-input");
+      input.inputMode = "numeric";
+      input.title = title;
+      box.append(el("span", "pt-muted", label), input);
+      return { box, input };
+    };
+    const maxPrice = field("Max prijs", "Kaarten boven deze prijs verbergen (sheet: belastingschijf < 500K)");
+    const minPct = field("Min winst %", "Minimale winst na 5% belasting, ten opzichte van je koopprijs");
+    const dealsBox = el("label", "pt-goal");
+    const onlyDeals = el("input");
+    onlyDeals.type = "checkbox";
+    dealsBox.append(onlyDeals, el("span", "pt-muted", "Alleen 🟢/🟡"));
+    const refresh = el("button", "pt-watch-refresh", "↻ Ophalen");
+    const runButton = el("button", "pt-watch-refresh pt-cycle-btn", "🔄 Run maken");
+    const watchButton = el("button", "pt-watch-refresh", "+ Spelers");
+    [refresh, runButton, watchButton].forEach(button => { button.type = "button"; });
+    runButton.title = "Run-lijst van de aangevinkte kaarten: per kaart het marktfilter met max BIN = koopprijs. Zoeken en kopen doe je zelf.";
+    watchButton.title = "Aangevinkte kaarten op de Spelers-tab, doel = koopprijs";
+    controls.append(link, platform, maxPrice.box, minPct.box, dealsBox, refresh, runButton, watchButton);
+    toolbar.append(heading, controls);
+    card.appendChild(toolbar);
+
+    const note = el("div", "pt-watch-status pt-small",
+      "Koop ≤ = de low van 24 u (of lager); verkoop = tussen gemiddelde en high, iets onder de high. Check altijd zelf de laatste verkopen (FUTBIN) en let op content/leaks. ⚠ = uitschieter in de data: overslaan of zelf checken.");
+    card.appendChild(note);
+
+    const wrap = el("div", "pt-flip-wrap");
+    const table = el("table", "pt-watch-table pt-flip-table");
+    const head = el("tr");
+    [["", "pt-col-tick"], ["", "pt-col-sig"], ["OVR", "pt-col-ovr"], ["Speler", "pt-col-name"], ["Low", "pt-col-num"], ["Gem", "pt-col-num"],
+      ["High", "pt-col-num"], ["Nu", "pt-col-num"], ["Koop ≤", "pt-col-num"], ["Verkoop", "pt-col-num"], ["Winst", "pt-col-num"], ["24u", "pt-col-spark"]]
+      .forEach(([label, cls]) => head.appendChild(el("th", cls, label)));
+    const thead = el("thead");
+    thead.appendChild(head);
+    const tbody = el("tbody");
+    table.append(thead, tbody);
+    wrap.appendChild(table);
+    card.appendChild(wrap);
+
+    const ticked = new Map(); // id -> bool (user's own choice; default = 🟢/🟡)
+    let shown = [];
+
+    const update = mutate => {
+      const state = getFlip();
+      mutate(state);
+      saveFlip(state);
+      render();
+    };
+    link.addEventListener("change", () => {
+      const token = flipTokenFrom(link.value);
+      if (!token && link.value.trim()) {
+        showToast("Geen geldige fodder.gg price-watch link", false);
+        return;
+      }
+      update(state => { state.token = token; });
+      ticked.clear();
+      loadFlipSheet(true);
+    });
+    platform.addEventListener("change", () => { update(state => { state.platform = platform.value; }); ticked.clear(); });
+    maxPrice.input.addEventListener("change", () => update(state => { state.maxPrice = parsePrice(maxPrice.input.value) || 0; }));
+    minPct.input.addEventListener("change", () => update(state => {
+      const value = Number(String(minPct.input.value).replace(",", "."));
+      state.minPct = Number.isFinite(value) ? value : 2;
+    }));
+    onlyDeals.addEventListener("change", () => update(state => { state.onlyDeals = onlyDeals.checked; }));
+    refresh.addEventListener("click", () => loadFlipSheet(true));
+
+    const selectedRows = () => shown.filter(row => ticked.get(row.card.id));
+    runButton.addEventListener("click", async () => {
+      const rows = selectedRows();
+      if (!rows.length) return showToast("Vink eerst kaarten aan.", false);
+      runButton.disabled = true;
+      try {
+        const players = await flipPlayers(rows);
+        const state = getFlip();
+        const stock = getStock();
+        const index = stock.findIndex(item => item.id === FLIP_RUN_ID);
+        if (index >= 0) stock.splice(index, 1);
+        stock.unshift({
+          id: FLIP_RUN_ID,
+          type: "players",
+          name: `Flip sheet ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
+          createdAt: Date.now(),
+          profit: null,
+          windows: [],
+          players,
+          done: {}
+        });
+        saveStock();
+        startRun(FLIP_RUN_ID);
+        showToast(`Run met ${players.length} kaart(en) gestart · max BIN = koopprijs`, true);
+      } finally {
+        runButton.disabled = false;
+      }
+    });
+    watchButton.addEventListener("click", async () => {
+      const rows = selectedRows();
+      if (!rows.length) return showToast("Vink eerst kaarten aan.", false);
+      const added = addPlayersToWatch(await flipPlayers(rows));
+      showToast(`${added} kaart(en) op de Spelers-tab gezet`, true);
+    });
+
+    function render() {
+      const state = getFlip();
+      if (document.activeElement !== link) link.value = state.token ? `https://fodder.gg/price-watch/${state.token}` : "";
+      platform.value = state.platform;
+      if (document.activeElement !== maxPrice.input) maxPrice.input.value = state.maxPrice ? priceFormat.format(state.maxPrice) : "";
+      if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
+      onlyDeals.checked = !!state.onlyDeals;
+
+      const data = flipData && flipData.token === state.token ? flipData : null;
+      const cards = data ? data[state.platform] || [] : [];
+      shown = cards
+        .map(item => ({ card: item, calc: flipCalc(item) }))
+        .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
+        .map(row => (row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row))
+        .filter(row => !state.onlyDeals || row.calc.status === "buy" || row.calc.status === "near")
+        .sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
+
+      const deals = shown.filter(row => row.calc.status === "buy").length;
+      const near = shown.filter(row => row.calc.status === "near").length;
+      status.textContent = !state.token
+        ? "Plak hierboven je fodder.gg Price Watch-link."
+        : flipLoading
+          ? "fodder.gg ophalen…"
+          : data
+            ? `${state.platform === "pc" ? "PC" : "Console"} · ${shown.length} kaarten · 🟢 ${deals} · 🟡 ${near} · data van ${formatTime(data.at)} (opgehaald ${formatTime(data.fetchedAt)}, elke 10 min)` + (flipError ? ` · fout: ${flipError}` : "")
+            : flipError ? `Ophalen mislukt: ${flipError}` : "Nog geen data · klik ↻ Ophalen";
+
+      tbody.textContent = "";
+      shown.forEach(({ card: item, calc }) => {
+        if (!ticked.has(item.id)) ticked.set(item.id, (calc.status === "buy" || calc.status === "near") && !calc.risky);
+        const tr = el("tr", `pt-flip-row-${calc.status}`);
+        const tickCell = el("td", "pt-col-tick");
+        const tick = el("input");
+        tick.type = "checkbox";
+        tick.checked = ticked.get(item.id);
+        tick.addEventListener("change", () => { ticked.set(item.id, tick.checked); updateCount(); });
+        tickCell.appendChild(tick);
+        const [icon, label] = FLIP_STATUS[calc.status];
+        const sig = el("td", "pt-col-sig", icon);
+        sig.title = label + (calc.status !== "skip" ? ` · nu ${calc.gap >= 0 ? "+" : ""}${(calc.gap * 100).toFixed(1)}% t.o.v. koopprijs` : "");
+        const nameCell = el("td", "pt-col-name");
+        nameCell.append(el("div", "pt-cheapest-main", item.name), el("div", "pt-muted pt-small", `${item.rarity}${item.holo ? " · ✨ Holo" : ""}`));
+        if (calc.warnings.length) {
+          const warn = el("span", "pt-flip-warn", " ⚠");
+          warn.title = calc.warnings.join(" · ");
+          nameCell.firstChild.appendChild(warn);
+        }
+        const k = value => el("td", "pt-col-num", priceFormat.format(value));
+        const nowCell = k(item.now);
+        nowCell.classList.add("pt-flip-now");
+        const profitCell = el("td", "pt-col-num " + (calc.profit > 0 ? "pt-flip-plus" : "pt-flip-minus"),
+          `${calc.profit > 0 ? "+" : ""}${priceFormat.format(calc.profit)} (${calc.pct.toFixed(1)}%)`);
+        profitCell.title = `Koop ${priceFormat.format(calc.buy)} → verkoop ${priceFormat.format(calc.sell)} − 5% belasting`;
+        const spark = el("td", "pt-col-spark");
+        spark.appendChild(flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
+        tr.append(tickCell, sig, el("td", "pt-col-ovr", String(item.rating)), nameCell, k(item.low), k(item.avg), k(item.high), nowCell,
+          el("td", "pt-col-num pt-flip-buy", priceFormat.format(calc.buy)), el("td", "pt-col-num", priceFormat.format(calc.sell)), profitCell, spark);
+        tbody.appendChild(tr);
+      });
+      updateCount();
+    }
+    function updateCount() {
+      const count = selectedRows().length;
+      runButton.textContent = `🔄 Run maken (${count})`;
+      watchButton.textContent = `+ Spelers (${count})`;
+    }
+
+    // Refresh when the tab opens and every 10 minutes while it is visible.
+    flipOnShow = () => loadFlipSheet(false);
+    if (!flipTimer) {
+      flipTimer = window.setInterval(() => {
+        const visible = document.querySelector(".pt-flip-card");
+        if (visible && visible.offsetParent) loadFlipSheet(false);
+      }, 60 * 1000);
+    }
+    return render;
+  }
+
   // --- Tabs on the Price Watch page ----------------------------------------------
 
   const TAB_KEY = "pt_watch_tab_v1";
@@ -6563,12 +6956,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       } catch (_) {
         // Remembering the tab is a convenience only.
       }
+      if (name === "flip") flipOnShow();
       if (name === "fodder") {
         loadFodderMarket(false);
         loadFodderCheapest(false);
       }
     };
-    [["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["transfers", "Transfers"]].forEach(([key, label]) => {
+    [["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["flip", "Flip"], ["transfers", "Transfers"]].forEach(([key, label]) => {
       const button = el("button", "pt-tab", label);
       button.type = "button";
       button.addEventListener("click", () => show(key));
@@ -9102,6 +9496,27 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-view .pt-stock-card,
 .pt-watch-view .pt-fodder-card { margin-top: 0; }
 
+/* Flip sheet (fodder.gg) */
+.pt-watch-view .pt-flip-card { margin-top: 0; }
+.pt-watch-view .pt-flip-link { width: 300px; }
+.pt-flip-wrap { overflow-x: auto; }
+.pt-flip-table { min-width: 980px; font-size: 14px; }
+.pt-flip-table td { height: auto; padding-top: 6px; padding-bottom: 6px; }
+.pt-flip-table .pt-col-tick { width: 3%; }
+.pt-flip-table .pt-col-sig { width: 3%; text-align: center; }
+.pt-flip-table .pt-col-ovr { width: 5%; text-align: center; font-weight: 700; }
+.pt-flip-table .pt-col-name { width: 22%; }
+.pt-flip-table .pt-col-num { width: 8%; text-align: right; font-variant-numeric: tabular-nums; }
+.pt-flip-table .pt-col-spark { width: 10%; text-align: center; }
+.pt-flip-table td.pt-col-num:nth-child(11) { width: 12%; }
+.pt-flip-now { color: #f4c95d; font-weight: 700; }
+.pt-flip-buy { color: #fff; font-weight: 700; }
+.pt-flip-plus { color: #27d98b; font-weight: 700; }
+.pt-flip-minus { color: #ff8080; }
+.pt-flip-warn { color: #f4c95d; cursor: help; }
+.pt-flip-row-buy td { background: rgba(39, 217, 139, .07); }
+.pt-flip-row-skip td { opacity: .55; }
+
 /* Fodder table */
 .pt-fodder-table .pt-col-rating   { width: 7%; text-align: center; font-size: 16px; }
 .pt-fodder-table .pt-col-cheapest { width: 22%; }
@@ -9689,8 +10104,10 @@ try {
     let parsed;
     try { parsed = new URL(request.url); } catch (_) { reply({ ok: false, error: "Ongeldige FUT.GG URL" }); return; }
     const cheapestApi = parsed.hostname === "www.fut.gg" && parsed.pathname.startsWith("/api/fut/market/27/cheapest-by-rating/");
-    if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi)) {
-      reply({ ok: false, error: "Geblokkeerde URL: alleen https://r2.fut.gg en FUT.GG cheapest-by-rating toegestaan" });
+    // fodder.gg Price Watch page of a shared watchlist (the token is the user's own link).
+    const fodderWatch = parsed.hostname === "fodder.gg" && /^\/price-watch\/[A-Za-z0-9_-]{8,64}$/.test(parsed.pathname);
+    if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi && !fodderWatch)) {
+      reply({ ok: false, error: "Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating en fodder.gg price-watch toegestaan" });
       return;
     }
     if (typeof GM_xmlhttpRequest !== "function") {
@@ -9701,7 +10118,8 @@ try {
       GM_xmlhttpRequest({
         method: "GET",
         url: parsed.href,
-        headers: { "Accept": "application/json", "Cache-Control": "no-cache" },
+        headers: { "Accept": fodderWatch ? "text/html" : "application/json", "Cache-Control": "no-cache" },
+        anonymous: fodderWatch, // no fodder.gg cookies needed; the page is public by token
         onload: response => reply({ ok: true, status: response.status, responseText: response.responseText }),
         onerror: () => reply({ ok: false, error: "Netwerkfout bij FUT.GG (GM_xmlhttpRequest onerror)" }),
         ontimeout: () => reply({ ok: false, error: "Time-out bij FUT.GG (GM_xmlhttpRequest)" }),

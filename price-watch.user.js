@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.65.2
+// @version      2.65.3
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -11311,6 +11311,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       nodes.forEach(node => {
         const rect = node.getBoundingClientRect();
         if (rect.width < 2 || rect.height < 2 || rect.bottom < 0 || rect.top > window.innerHeight) return;
+        // Only a button that is really on top right now (not one of a screen that is sliding away / covered).
+        const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        if (!hit || !(hit === node || node.contains(hit))) return;
         want.set(node, { text: hotkeyShow(binding.combo), rect });
       });
     });
@@ -11319,13 +11322,29 @@ function priceWatchMain(SCRIPT_VERSION) {
       let tag = hotkeyTags.get(node);
       if (!tag) { tag = el("span", "pt-hk-tag"); hotkeyLayer.appendChild(tag); hotkeyTags.set(node, tag); }
       if (tag.textContent !== text) tag.textContent = text;
-      tag.style.left = `${Math.round(rect.right - 4)}px`;
-      tag.style.top = `${Math.round(rect.top + 3)}px`;
+      const left = `${Math.round(rect.right - 4)}px`;
+      const top = `${Math.round(rect.top + 3)}px`;
+      if (tag.style.left !== left) tag.style.left = left;
+      if (tag.style.top !== top) tag.style.top = top;
     });
   }
-  window.setInterval(drawHotkeyTags, 500);
-  window.addEventListener("resize", drawHotkeyTags);
-  window.addEventListener("scroll", drawHotkeyTags, true);
+  // Redraw as soon as the page changes (screen switch, animation) — at most once per frame — plus a slow
+  // safety tick. Tags are hidden at once on every click/key, so a leaving screen never keeps them.
+  let hotkeyDrawQueued = false;
+  const queueHotkeyTags = () => {
+    if (hotkeyDrawQueued) return;
+    hotkeyDrawQueued = true;
+    window.requestAnimationFrame(() => { hotkeyDrawQueued = false; drawHotkeyTags(); });
+  };
+  const hideHotkeyTags = () => { hotkeyTags.forEach(tag => tag.remove()); hotkeyTags.clear(); queueHotkeyTags(); };
+  new MutationObserver(records => {
+    if (records.every(record => hotkeyLayer.contains(record.target))) return; // our own tags moving
+    queueHotkeyTags();
+  }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style", "disabled"] });
+  ["transitionend", "animationend", "resize"].forEach(type => window.addEventListener(type, queueHotkeyTags, true));
+  window.addEventListener("scroll", queueHotkeyTags, true);
+  ["pointerdown", "keydown"].forEach(type => window.addEventListener(type, () => window.setTimeout(hideHotkeyTags, 0), true));
+  window.setInterval(drawHotkeyTags, 400);
 
   let hotkeyCapture = null; // { label, classes, name } while waiting for the key to assign
   let hotkeyMenu = null;

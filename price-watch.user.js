@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.65.3
+// @version      2.66.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6849,6 +6849,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     help_self: ["Zelf doen", "You decide"],
     help_selfText: ["Zoeken, kopen en verkopen doe je altijd zelf. Let op content en leaks (rond 19:00).", "You always search, buy and sell yourself. Watch out for content and leaks (around 19:00)."],
     // FUTBIN 72 h
+    w_young: ["Nieuwe kaart: pas {days} dag(en) op de markt, de prijs zakt vaak nog", "New card: only {days} day(s) on the market, the price often keeps falling"],
     w_fbDownLong: ["Echte verkoopprijzen dalen al langer (FUTBIN)", "Real sale prices have been falling for a while (FUTBIN)"],
     w_fbDemand: ["Minder verkopen dan de dagen ervoor ({pct})", "Fewer sales than the days before ({pct})"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
@@ -7109,6 +7110,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
       const fh = futbin.h72;
       if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
+      // New card (TOTW / new content, ≤ 2 days of sales): its price usually keeps settling → never plain 🟢.
+      const youngDays = futbinYoung(futbin);
+      if (youngDays) { warnings.unshift(ft("w_young", { days: youngDays })); fbRisky = true; }
       else if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(ft("w_saleFalling", { pct: flipPct(futbin.trend * 100) })); fbRisky = true; }
       if (fh && fh.demand === "falling") warnings.push(ft("w_fbDemand", { pct: flipPct(fh.volume * 100) }));
       if (futbin.listings24 >= 10 && futbin.sellThrough < 0.1) warnings.push(ft("w_lowSellThrough", { pct: `${Math.round(futbin.sellThrough * 100)}%` }));
@@ -7825,6 +7829,21 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Version of the stored analysis: a check made by an older version (e.g. without the 72 h data of v2) is
   // still shown and used until it expires, but counts as "to check again" for 📊 and for the 🔔 alert.
   const FUTBIN_STATS_VERSION = 2;
+  // Days a card has been on the market by FUTBIN (daily averages, or the first sale when FUTBIN has every
+  // sale). 0 = not new (3+ days, or unknown). New cards (TOTW, new content) still find their price.
+  const FUTBIN_YOUNG_DAYS = 2;
+  function futbinYoung(stats) {
+    const fh = stats && stats.h72;
+    if (!fh) return 0;
+    const DAY = 24 * 60 * 60 * 1000;
+    let days = fh.dailyDays > 0 ? fh.dailyDays : 0;
+    if (fh.liveSince && fh.liveCount < FUTBIN_LIVE_CAP) {
+      const sinceFirst = Math.max(1, Math.ceil((Date.now() - fh.liveSince) / DAY));
+      days = days ? Math.min(days, sinceFirst) : sinceFirst;
+    }
+    return days > 0 && days <= FUTBIN_YOUNG_DAYS ? days : 0;
+  }
+
   function futbinNeedsCheck(card, platform, refreshMs = FUTBIN_REFRESH_MS) {
     const entry = futbinSalesFor(card, platform);
     return !entry || entry.v !== FUTBIN_STATS_VERSION || Date.now() - entry.fetchedAt >= refreshMs;
@@ -8269,6 +8288,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
     const fh = futbin.h72;
     if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
+    const youngDays = futbinYoung(futbin);
+    if (youngDays) { warnings.unshift(ft("w_young", { days: youngDays })); fbRisky = true; }
     else if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(ft("w_saleFalling", { pct: flipPct(futbin.trend * 100) })); fbRisky = true; }
     if (fh && fh.demand === "falling") warnings.push(ft("w_fbDemand", { pct: flipPct(fh.volume * 100) }));
     if (futbin.listings24 >= 10 && futbin.sellThrough < 0.1) warnings.push(ft("w_lowSellThrough", { pct: `${Math.round(futbin.sellThrough * 100)}%` }));

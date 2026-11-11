@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.65.1
+// @version      2.65.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -11458,7 +11458,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     if (event.repeat || event.metaKey) return; // held key: never a second click
     const focus = document.activeElement;
-    if (focus && (focus.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focus.tagName))) return;
+    // In a price field (EA's numbers) only the keys you type a price with stay in the field; a letter or
+    // Enter is a hotkey (the field is left first, so EA keeps the price you typed). Other text fields:
+    // every key is typing.
+    const priceField = focus && focus.tagName === "INPUT" && (focus.closest(".price-filter, .ut-numeric-input-spinner-control")
+      || focus.inputMode === "numeric" || /^(number|tel)$/.test(focus.type) || /numeric|number|price/i.test(focus.className));
+    const typingKey = /^[0-9.,\-]$/.test(event.key) || ["Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Tab"].includes(event.key);
+    if (focus && (focus.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focus.tagName)) && !(priceField && !typingKey)) return;
     if (hotkeyMenu && event.key === "Escape") return void closeHotkeyMenu();
     const combo = hotkeyCombo(event);
     const binding = getHotkeys().find(item => item.combo === combo);
@@ -11466,6 +11472,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const button = hotkeyFind(binding);
     event.preventDefault();
     event.stopPropagation();
+    if (priceField && focus) focus.blur();
     if (!button) return void showToast(`${hotkeyShow(combo)}: "${binding.name || binding.label}" staat niet op dit scherm`, false);
     hotkeyPress(button);
   }, true);

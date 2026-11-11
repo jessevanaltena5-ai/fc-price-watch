@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.42.0
+// @version      2.42.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6676,7 +6676,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const falling = card.trend.length >= 8 && median(card.trend.slice(-4)) < median(card.trend.slice(0, 4)) * 0.92;
     const avg = avgOdd || falling || !card.avg ? Math.min(mid, card.avg || mid) : card.avg;
     const buy = roundDownToStep(low);
-    const sell = roundDownToStep(Math.max(avg, (avg + high) / 2)); // "use average–high as guide"
+    // "Use average–high as guide", but never above what it fetched in the last 12 hours (just under that high).
+    const sell = roundDownToStep(Math.min(Math.max(avg, (avg + high) / 2), coreMax * 0.98));
     const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
     const pct = buy > 0 ? profit / buy * 100 : 0;
     const gap = buy > 0 ? card.now / buy - 1 : 1;
@@ -6686,20 +6687,28 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (avgOdd) warnings.push(`gemiddelde ${priceFormat.format(card.avg)} scheef`);
     const sparse = card.trend.length < 12;
     if (sparse) warnings.push(`maar ${card.trend.length} uurpunten`);
+    // A card that crashed today: its low is the new price, not a deal (fodder.gg's own 24h change).
+    const crashed = card.change <= -15;
+    if (crashed) warnings.unshift(`${card.change.toFixed(0)}% in 24u`);
+    // Now at the day's low after a drop: you'd buy the bottom of a falling line (e.g. 345K → 300K).
+    const atBottom = !crashed && card.change <= -8 && card.now <= card.low * 1.01;
+    if (atBottom) warnings.unshift(`op de dagbodem na ${card.change.toFixed(0)}% daling`);
     if (falling) warnings.push("dalende trend");
-    const status = profit <= 0 ? "skip" : gap <= 0.02 ? "buy" : gap <= 0.06 ? "near" : "wait";
-    // Not ticked by default: thin data or a crazy high (sheet: skip it), or a falling price.
-    const risky = sparse || highOdd || falling;
+    // Thin data or a crazy high (sheet: skip it), a falling price or a crash: never a plain green signal.
+    const risky = sparse || highOdd || falling || crashed || atBottom;
+    const cheap = gap <= 0.06;
+    const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, sell, profit, pct, gap, warnings, status, risky };
   }
 
   const FLIP_STATUS = {
     buy: ["🟢", "Nu op/onder de low"],
     near: ["🟡", "Binnen 6% van je koopprijs"],
+    risk: ["🟠", "Goedkoop, maar let op: zie de waarschuwing onder de naam. Check eerst zelf de markt"],
     wait: ["⚪", "Nu te duur, wachten"],
     skip: ["⛔", "Geen winst na belasting"]
   };
-  const FLIP_ORDER = { buy: 0, near: 1, wait: 2, skip: 3 };
+  const FLIP_ORDER = { buy: 0, near: 1, risk: 2, wait: 3, skip: 4 };
 
   function flipSparkline(values, up) {
     const ns = "http://www.w3.org/2000/svg";
@@ -6791,7 +6800,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const table = el("table", "pt-watch-table pt-flip-table");
     const head = el("tr");
     [["", "pt-col-tick"], ["", "pt-col-sig"], ["OVR", "pt-col-ovr"], ["Speler", "pt-col-name"], ["Low", "pt-col-num"], ["Gem", "pt-col-num"],
-      ["High", "pt-col-num"], ["Nu", "pt-col-num"], ["Koop ≤", "pt-col-num"], ["Verkoop", "pt-col-num"], ["Winst", "pt-col-num"], ["24u", "pt-col-spark"]]
+      ["High", "pt-col-num"], ["Nu", "pt-col-num"], ["Koop ≤", "pt-col-num"], ["Verkoop", "pt-col-num"], ["Winst", "pt-col-num"], ["24u %", "pt-col-num"], ["24u", "pt-col-spark"]]
       .forEach(([label, cls]) => head.appendChild(el("th", cls, label)));
     const thead = el("thead");
     thead.appendChild(head);
@@ -6882,12 +6891,13 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       const deals = shown.filter(row => row.calc.status === "buy").length;
       const near = shown.filter(row => row.calc.status === "near").length;
+      const risk = shown.filter(row => row.calc.status === "risk").length;
       status.textContent = !state.token
         ? "Plak hierboven je fodder.gg Price Watch-link."
         : flipLoading
           ? "fodder.gg ophalen…"
           : data
-            ? `${state.platform === "pc" ? "PC" : "Console"} · ${shown.length} kaarten · 🟢 ${deals} · 🟡 ${near} · data van ${formatTime(data.at)} (opgehaald ${formatTime(data.fetchedAt)}, elke 10 min)` + (flipError ? ` · fout: ${flipError}` : "")
+            ? `${state.platform === "pc" ? "PC" : "Console"} · ${shown.length} kaarten · 🟢 ${deals} · 🟡 ${near} · 🟠 ${risk} · data van ${formatTime(data.at)} (opgehaald ${formatTime(data.fetchedAt)}, elke 10 min)` + (flipError ? ` · fout: ${flipError}` : "")
             : flipError ? `Ophalen mislukt: ${flipError}` : "Nog geen data · klik ↻ Ophalen";
 
       tbody.textContent = "";
@@ -6905,11 +6915,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         sig.title = label + (calc.status !== "skip" ? ` · nu ${calc.gap >= 0 ? "+" : ""}${(calc.gap * 100).toFixed(1)}% t.o.v. koopprijs` : "");
         const nameCell = el("td", "pt-col-name");
         nameCell.append(el("div", "pt-cheapest-main", item.name), el("div", "pt-muted pt-small", `${item.rarity}${item.holo ? " · ✨ Holo" : ""}`));
-        if (calc.warnings.length) {
-          const warn = el("span", "pt-flip-warn", " ⚠");
-          warn.title = calc.warnings.join(" · ");
-          nameCell.firstChild.appendChild(warn);
-        }
+        // Warnings as visible text (no hover on the phone).
+        if (calc.warnings.length) nameCell.appendChild(el("div", "pt-flip-warn", `⚠ ${calc.warnings.join(" · ")}`));
         const k = value => el("td", "pt-col-num", priceFormat.format(value));
         const nowCell = k(item.now);
         nowCell.classList.add("pt-flip-now");
@@ -6919,7 +6926,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         const spark = el("td", "pt-col-spark");
         spark.appendChild(flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
         tr.append(tickCell, sig, el("td", "pt-col-ovr", String(item.rating)), nameCell, k(item.low), k(item.avg), k(item.high), nowCell,
-          el("td", "pt-col-num pt-flip-buy", priceFormat.format(calc.buy)), el("td", "pt-col-num", priceFormat.format(calc.sell)), profitCell, spark);
+          el("td", "pt-col-num pt-flip-buy", priceFormat.format(calc.buy)), el("td", "pt-col-num", priceFormat.format(calc.sell)), profitCell,
+          el("td", "pt-col-num " + (item.change <= -15 ? "pt-flip-minus pt-flip-bold" : item.change < 0 ? "pt-flip-minus" : "pt-flip-plus"),
+            `${item.change > 0 ? "+" : ""}${item.change.toFixed(1)}%`), spark);
         tbody.appendChild(tr);
       });
       updateCount();
@@ -9508,12 +9517,14 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-table .pt-col-name { width: 22%; }
 .pt-flip-table .pt-col-num { width: 8%; text-align: right; font-variant-numeric: tabular-nums; }
 .pt-flip-table .pt-col-spark { width: 10%; text-align: center; }
-.pt-flip-table td.pt-col-num:nth-child(11) { width: 12%; }
+.pt-flip-table td.pt-col-num:nth-child(11) { width: 11%; }
 .pt-flip-now { color: #f4c95d; font-weight: 700; }
 .pt-flip-buy { color: #fff; font-weight: 700; }
 .pt-flip-plus { color: #27d98b; font-weight: 700; }
 .pt-flip-minus { color: #ff8080; }
-.pt-flip-warn { color: #f4c95d; cursor: help; }
+.pt-flip-warn { color: #f4a35d; font-size: 12px; font-weight: 600; white-space: normal; }
+.pt-flip-bold { font-weight: 700; }
+.pt-flip-row-risk td { background: rgba(244, 163, 93, .06); }
 .pt-flip-row-buy td { background: rgba(39, 217, 139, .07); }
 .pt-flip-row-skip td { opacity: .55; }
 

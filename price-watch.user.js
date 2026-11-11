@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.42.2
+// @version      2.43.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6566,7 +6566,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function getFlip() {
     let state = null;
     try { state = JSON.parse(localStorage.getItem(FLIP_KEY) || "null"); } catch (_) { /* default */ }
-    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 2, onlyDeals: false }, state || {});
+    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 2, onlyDeals: false, alert: false }, state || {});
   }
   function saveFlip(state) {
     try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
@@ -6638,6 +6638,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       .then(html => {
         flipData = { ...parseFodderWatch(html), token: state.token, fetchedAt: Date.now() };
         try { localStorage.setItem(FLIP_DATA_KEY, JSON.stringify(flipData)); } catch (_) { /* memory only */ }
+        checkFlipHits();
         return true;
       })
       .catch(error => {
@@ -6751,6 +6752,39 @@ function priceWatchMain(SCRIPT_VERSION) {
     }).sort((a, b) => b.fixedMax - a.fixedMax);
   }
 
+  // Rows for the current link/platform with your max price and min profit (shared by the table and the alert).
+  function flipRows(data, state) {
+    const cards = data ? data[state.platform] || [] : [];
+    return cards
+      .map(item => ({ card: item, calc: flipCalc(item) }))
+      .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
+      .map(row => (row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row));
+  }
+
+  // 🔔 Flip alert: a card that is newly 🟢 since the previous fetch → pling + toast + ntfy push.
+  // The first fetch (after loading the app, or a new link/platform) only takes stock, so it stays quiet.
+  let flipAlertSeen = null; // { key, ids: Set }
+  function checkFlipHits() {
+    const state = getFlip();
+    if (!flipData || flipData.token !== state.token) return;
+    const key = `${state.token}|${state.platform}`;
+    const greens = flipRows(flipData, state).filter(row => row.calc.status === "buy");
+    const ids = new Set(greens.map(row => row.card.id));
+    const previous = flipAlertSeen && flipAlertSeen.key === key ? flipAlertSeen.ids : null;
+    flipAlertSeen = { key, ids };
+    if (!previous || !state.alert) return;
+    const fresh = greens.filter(row => !previous.has(row.card.id));
+    if (!fresh.length) return;
+    const k = value => `${Math.round(value / 1000)}K`;
+    const lines = fresh.map(({ card, calc }) =>
+      `🟢 ${card.name} ${card.rating}${card.holo ? " holo" : ""}: nu ${k(card.now)} · koop ≤ ${k(calc.buy)} · verkoop ${k(calc.sell)} (+${k(calc.profit)})`);
+    if (chimeAudio) playChime();
+    showToast(lines.join(" · "), true);
+    // Push from the pc only (FUT Genie there), so a phone with the app open doesn't send it twice.
+    if (genie()) relayCall("notify", { title: fresh.length > 1 ? `Flip: ${fresh.length} kaarten op 🟢` : "Flip: kaart op 🟢", text: lines.join("\n") })
+      .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+  }
+
   let flipOnShow = () => {};
   let flipTimer = 0;
 
@@ -6783,13 +6817,23 @@ function priceWatchMain(SCRIPT_VERSION) {
     onlyDeals.type = "checkbox";
     dealsBox.append(onlyDeals, el("span", "pt-muted", "Alleen 🟢/🟡"));
     const refresh = el("button", "pt-watch-refresh", "↻ Ophalen");
+    const alertButton = el("button", "pt-watch-refresh pt-flip-alert");
+    alertButton.type = "button";
+    alertButton.title = "Pling + melding (en ntfy-push naar je telefoon) als een kaart nieuw op 🟢 komt. Blijft elke 10 min verversen zolang de web-app open is, ook op andere schermen. Telefoon-topic instellen: 📲 op de Spelers-tab.";
+    alertButton.addEventListener("click", () => {
+      unlockChime();
+      update(state => { state.alert = !state.alert; });
+      const on = getFlip().alert;
+      showToast(on ? "🔔 Flip-melding aan: pling + push als een kaart nieuw 🟢 wordt" : "🔕 Flip-melding uit", true);
+      if (on) loadFlipSheet(false);
+    });
     const runButton = el("button", "pt-watch-refresh pt-cycle-btn", "🔄 Run maken");
     const watchButton = el("button", "pt-watch-refresh", "+ Spelers");
     [refresh, runButton, watchButton].forEach(button => { button.type = "button"; });
     runButton.title = "Run-lijst van de aangevinkte kaarten: per kaart het marktfilter met max BIN = koopprijs. Zoeken en kopen doe je zelf.";
     watchButton.title = "Aangevinkte kaarten op de Spelers-tab, doel = koopprijs";
     maxPrice.input.classList.add("pt-flip-max");
-    controls.append(link, platform, maxPrice.box, minPct.box, dealsBox, refresh, runButton, watchButton);
+    controls.append(link, platform, maxPrice.box, minPct.box, dealsBox, refresh, alertButton, runButton, watchButton);
     toolbar.append(heading, controls);
     card.appendChild(toolbar);
 
@@ -6883,13 +6927,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (document.activeElement !== maxPrice.input) maxPrice.input.value = state.maxPrice ? priceFormat.format(state.maxPrice) : "";
       if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
       onlyDeals.checked = !!state.onlyDeals;
+      alertButton.textContent = state.alert ? "🔔 Melding aan" : "🔕 Melding uit";
+      alertButton.classList.toggle("pt-flip-alert-on", !!state.alert);
 
       const data = flipData && flipData.token === state.token ? flipData : null;
-      const cards = data ? data[state.platform] || [] : [];
-      shown = cards
-        .map(item => ({ card: item, calc: flipCalc(item) }))
-        .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
-        .map(row => (row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row))
+      shown = flipRows(data, state)
         .filter(row => !state.onlyDeals || row.calc.status === "buy" || row.calc.status === "near")
         .sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
 
@@ -6949,7 +6991,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!flipTimer) {
       flipTimer = window.setInterval(() => {
         const visible = document.querySelector(".pt-flip-card");
-        if (visible && visible.offsetParent) loadFlipSheet(false);
+        // With 🔔 on it keeps refreshing (every 10 min) while the web app is open, on any screen.
+        if ((visible && visible.offsetParent) || getFlip().alert) loadFlipSheet(false);
       }, 60 * 1000);
     }
     return render;
@@ -9514,6 +9557,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-view .pt-flip-card { margin-top: 0; }
 .pt-watch-view .pt-flip-link { width: 300px; }
 .pt-watch-view .pt-flip-max { width: 90px; }
+.pt-flip-alert-on { border-color: #27d98b; color: #fff; background: #1d4f3a; }
 .pt-flip-pct { font-size: 12px; font-weight: 600; opacity: .8; }
 .pt-flip-wrap { overflow-x: auto; }
 .pt-flip-table { min-width: 980px; font-size: 14px; }

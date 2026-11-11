@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.59.0
+// @version      2.60.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6859,6 +6859,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     d_nowDiff: ["index {pct}", "index {pct}"],
     d_nowFodderOnly: ["fodder.gg (niet in de FUT.GG-index)", "fodder.gg (not in the FUT.GG index)"],
     mPricesAt: [" · prijzen {time}", " · prices {time}"],
+    fbCoverage: [" · FUTBIN {n}/{total}", " · FUTBIN {n}/{total}"],
     d_mNotChecked: ["Nog niet gecheckt. Pas met echte verkopen is er een koop- en verkoopprijs.", "Not checked yet. Only real sales give a buy and sell price."],
     d_m24: ["24 uur", "24 hours"],
     d_m6: ["6 uur", "6 hours"],
@@ -6876,8 +6877,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     fbPausedMark: [" · ⏸ auto tot {time}", " · ⏸ auto until {time}"],
     fbPausedTitle: ["De auto-check staat op pauze tot {time} na een FUTBIN-fout. Klik om nu toch te checken (dat beëindigt de pauze).", "The auto check is paused until {time} after a FUTBIN error. Click to check now anyway (that ends the pause)."],
     fbAutoDone: ["FUTBIN auto: {n} kaart(en) bijgewerkt", "FUTBIN auto: {n} card(s) updated"],
-    autoFutbin: ["📊 Auto checken (fodder top {n} · FUT.GG {m})", "📊 Auto-check (fodder top {n} · FUT.GG {m})"],
-    autoFutbinTitle: ["Na elke verversing van de sheet zoekt hij voor de beste {n} kaarten met winst (op score) vanzelf de echte FUTBIN-verkopen op. Alleen kaarten zonder check of met een check ouder dan 45 min; één per paar seconden. Werkt alleen op de pc met de web-app open. FUT.GG momentum: {m} per ronde met rustige pauzes (5-8 s), eerst ↩ draait, dan andere dips, ⏬ zakt nog als laatste.", "After every sheet refresh it looks up the real FUTBIN sales for the best {n} cards with profit (by score) by itself. Only cards without a check or with one older than 45 min; one every few seconds. Works only on the pc with the web app open. FUT.GG momentum: {m} per round with calm pauses (5-8 s), ↩ turning first, then other dips, ⏬ still falling last."],
+    autoFutbin: ["📊 Auto checken (alle kaarten, {n} per ronde)", "📊 Auto-check (all cards, {n} per round)"],
+    autoFutbinTitle: ["Na elke verversing van de sheet zoekt hij voor de beste {n} kaarten met winst (op score) vanzelf de echte FUTBIN-verkopen op. Alleen kaarten zonder check of met een check ouder dan 45 min; één per paar seconden. Werkt alleen op de pc met de web-app open. FUT.GG momentum: {m} per ronde met rustige pauzes (5-8 s), eerst ↩ draait, dan andere dips, ⏬ zakt nog, stijgers. Beide lijsten worden op de achtergrond ververst, zodat na verloop van tijd elke kaart gecheckt is (een check telt 3 uur).", "After every sheet refresh it looks up the real FUTBIN sales for the best {n} cards with profit (by score) by itself. Only cards without a check or with one older than 45 min; one every few seconds. Works only on the pc with the web app open. FUT.GG momentum: {m} per round with calm pauses (5-8 s), ↩ turning first, then other dips, ⏬ still falling, risers. Both lists refresh in the background, so in time every card is checked (a check counts 3 hours)."],
     fbMissing: [" · niet gevonden: {list}", " · not found: {list}"],
     hitLine: ["🟢 {name}: nu {now} · koop ≤ {buy} · verkoop {sell} (+{profit})", "🟢 {name}: now {now} · buy ≤ {buy} · sell {sell} (+{profit})"],
     hitSales: [" · FUTBIN {n} verkopen/24u", " · FUTBIN {n} sales/24h"],
@@ -8009,46 +8010,52 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (futbinState.error) showToast(ft("fbStopped", { error: futbinState.error }), false);
     else showToast(ft(quiet ? "fbAutoDone" : "fbDone", { n: futbinState.done }) + (missing.length ? ft("fbMissing", { list: missing.join(", ") }) : ""), !missing.length);
     // An auto round that had to wait for this one (e.g. momentum fetched while the fodder round ran).
-    if (futbinAutoWaiting) {
-      const source = futbinAutoWaiting;
-      futbinAutoWaiting = "";
+    if (futbinAutoWaiting.size) {
+      const source = [...futbinAutoWaiting][0];
+      futbinAutoWaiting.delete(source);
       window.setTimeout(() => futbinAutoTop(source).catch(error => console.warn("Price Watch: FUTBIN auto-check mislukt.", error)), 3000);
     }
     return { done: futbinState.done, error: futbinState.error };
   }
 
-  // Auto: after every fetched sheet (pc with FUT Genie only) check the best FUTBIN_AUTO_TOP cards that pay
-  // (by score, the order you see) whose FUTBIN data is missing or older than 45 min. Same pace and limits
-  // as the 📊 button (one card per few seconds, cached 45 min), so a 15-min refresh mostly asks nothing.
-  const FUTBIN_AUTO_TOP = 20;
+  // Auto (pc with FUT Genie only): after every fetched list a round over the cards whose FUTBIN check is
+  // missing or older than 45 min, most important first. Both lists are fetched in the background (fodder.gg
+  // every 10 min, FUT.GG every 15 min) while the web app is open, so in time every card of both lists is
+  // checked (a check is used for 3 h): 40 per round for both lists, with calm pauses (5-8 s).
+  const FUTBIN_AUTO_TOP = 40;
   // FUT.GG momentum: 40 per round with calm pauses (about 6-10 min, well inside the 15-min refresh), in
   // order: turning first (what you can act on), then dips without a label, still-falling cards last.
   const MOMENTUM_AUTO_TOP = 40;
   const MOMENTUM_AUTO_ORDER = { turning: 0, none: 1, falling: 2 };
   let futbinAutoPause = 0;
-  let futbinAutoWaiting = ""; // source of an auto round that waits for the running round
+  const futbinAutoWaiting = new Set(); // sources of auto rounds that wait for the running round
   async function futbinAutoTop(source) {
     const state = getFlip();
     if (!state.autoFutbin || !genie()) return;
-    if (futbinState.busy) { futbinAutoWaiting = source; return; } // runs right after the current round
+    if (futbinState.busy) { futbinAutoWaiting.add(source); return; } // runs right after the current round
     let cards;
     if (source === "futgg") {
       // FUT.GG momentum: the biggest 24h dips (within your max price) - FUTBIN then says if it's a real deal.
-      cards = momentumRows(state).filter(row => row.card.m24 != null && row.card.m24 < 0 && row.calc.status !== "skip"
-          && futbinNeedsCheck(row.card, state.platform))
-        .sort((a, b) => MOMENTUM_AUTO_ORDER[a.calc.move || "none"] - MOMENTUM_AUTO_ORDER[b.calc.move || "none"]
+      // Every card of the list (within your max price) gets its turn: turning dips, other dips, still
+      // falling, risers, then cards FUTBIN already called no profit; within each, never checked first.
+      const group = row => (row.calc.status === "skip" ? 4 : row.card.m24 >= 0 ? 3 : MOMENTUM_AUTO_ORDER[row.calc.move || "none"]);
+      cards = momentumRows(state).filter(row => futbinNeedsCheck(row.card, state.platform))
+        .sort((a, b) => group(a) - group(b)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0) // never checked first, then the old checks
           || a.card.m24 - b.card.m24)
         .slice(0, MOMENTUM_AUTO_TOP).map(row => row.card);
     } else {
       if (!flipData || flipData.token !== state.token) return;
+      // Every card of the list: by score, cards without profit (by the sheet) last; never checked first.
       cards = rankFlipOpportunities(flipRows(flipData, state), state.platform)
-        .filter(row => row.calc.status !== "skip")
+        .filter(row => futbinNeedsCheck(row.card, state.platform))
+        .sort((a, b) => (a.calc.status === "skip" ? 1 : 0) - (b.calc.status === "skip" ? 1 : 0)
+          || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0)) // stable: keeps the score order inside
         .slice(0, FUTBIN_AUTO_TOP)
         .map(row => row.card);
     }
     if (!cards.length || Date.now() < futbinAutoPause) return;
-    const result = await futbinCheckCards(cards, state.platform, true, source === "futgg" ? { max: MOMENTUM_AUTO_TOP, calm: true } : {});
+    const result = await futbinCheckCards(cards, state.platform, true, { max: source === "futgg" ? MOMENTUM_AUTO_TOP : FUTBIN_AUTO_TOP, calm: true });
     // Only an error in THIS round pauses the auto check: blocked / rate limit (403, 429, Cloudflare) for an
     // hour, anything else (time-out, network) for 10 minutes. Clicking 📊 yourself ends the pause.
     if (result && result.error) {
@@ -8144,6 +8151,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     listeners.forEach(listener => listener());
     return momentumLoading;
   }
+
+  // Auto check on: both lists are fetched in the background on the pc (not only the one you look at), so
+  // the FUTBIN rounds cover both. Fetching itself only happens when a list is due (10 / 15 min).
+  window.setInterval(() => {
+    try {
+      const state = getFlip();
+      if (!state.autoFutbin || !genie()) return;
+      if (state.token) loadFlipSheet(false);
+      loadMomentum(false);
+    } catch (error) {
+      console.warn("Price Watch: achtergrond-verversing mislukt.", error);
+    }
+  }, 60 * 1000);
 
   // Buy/sell from FUTBIN only; the momentum decides the label: "still falling" (6 h <= -2%) counts as risky,
   // "turning" (24 h <= -3% and 6 h >= 0) is the moment to look for.
@@ -8687,6 +8707,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           : data
             ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) })
               + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
+              + ft("fbCoverage", { n: shown.filter(row => row.calc.futbin).length, total: shown.length })
               + (flipError ? ft("statusError", { error: flipError }) : "")
             : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
       status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
@@ -8697,6 +8718,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           : set
             ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) })
               + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
+              + ft("fbCoverage", { n: shown.filter(row => row.calc.futbin).length, total: shown.length })
               + (momentumError ? ft("statusError", { error: momentumError }) : "")
             : momentumError ? ft("statusFailed", { error: momentumError }) : ft("mEmpty");
         status.title = ft("mStatusTitle");

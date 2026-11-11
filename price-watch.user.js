@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.48.0
+// @version      2.50.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6561,7 +6561,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // high / now prices + an hourly trend per card, for console and PC, inside the page (Next.js data).
   // Sheet method: buy at the low (or lower), list a little under the high (avg–high as guide), 5% tax.
   // Only an external page is read; the run prepares market filters, you search and buy yourself.
-  const FLIP_KEY = "pt_flip_v1"; // { token, platform, maxPrice, minPct, onlyDeals, alert, sort }
+  const FLIP_KEY = "pt_flip_v1"; // { token, platform, maxPrice, minPct, onlyDeals, alert, sort, lang }
   const FLIP_DATA_KEY = "pt_flip_data_v1"; // last fetched report { at, fetchedAt, console, pc }
   const FLIP_REFRESH_MS = 10 * 60 * 1000;
   const FLIP_RUN_ID = "flip-sheet";
@@ -6574,11 +6574,201 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (state.minPct === 2) state.minPct = 5;
       state.minPct5 = true;
     }
-    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score" }, state || {});
+    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "nl" }, state || {});
   }
   function saveFlip(state) {
+    flipLangCache = null;
     try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
   }
+  // --- Flip tab texts, Dutch and English (switch with the NL/EN button) -------------------------------
+  // ft("key", { vars }) → text in the chosen language; {name} in a text is filled from vars.
+  const FLIP_TEXT = {
+    // signals: long (hover) and short (details)
+    st_buy: ["Nu op of onder je koopprijs: kopen kan", "At or below your buy price: you can buy"],
+    st_near: ["Bijna: hooguit 6% boven je koopprijs", "Almost: at most 6% above your buy price"],
+    st_risk: ["Goedkoop, maar riskant: lees eerst de waarschuwing", "Cheap, but risky: read the warning first"],
+    st_wait: ["Nog te duur: wachten", "Too expensive for now: wait"],
+    st_skip: ["Geen winst na 5% belasting", "No profit after 5% tax"],
+    sts_buy: ["Kopen kan", "Buy now"],
+    sts_near: ["Bijna", "Almost"],
+    sts_risk: ["Riskant", "Risky"],
+    sts_wait: ["Te duur", "Too expensive"],
+    sts_skip: ["Geen winst", "No profit"],
+    // warnings from the price check
+    w_fewSales: ["Weinig verkopen: {n} in 24 uur", "Few sales: {n} in 24 hours"],
+    w_saleFalling: ["Verkoopprijs daalt: {pct} t.o.v. gisteren", "Sale price falling: {pct} vs yesterday"],
+    w_lowSellThrough: ["Slechts {pct} van het aanbod verkoopt", "Only {pct} of listings sell"],
+    w_outlierSale: ["Uitschieter genegeerd: verkoop voor {list}", "Outlier ignored: sale at {list}"],
+    w_lowOdd: ["Lage prijs {price} was eenmalig (genegeerd)", "Low of {price} was a one-off (ignored)"],
+    w_highOdd: ["Hoge prijs {price} is een uitschieter", "High of {price} is an outlier"],
+    w_avgOdd: ["Gemiddelde {price} wijkt sterk af", "Average of {price} looks off"],
+    w_sparse: ["Weinig data: pas {n} uur", "Little data: only {n} hours"],
+    w_crashed: ["Gecrasht: {pct} in 24 uur", "Crashed: {pct} in 24 hours"],
+    w_atBottom: ["Op het laagste punt na {pct} daling", "At the day's low after a {pct} drop"],
+    w_falling: ["Prijs daalt", "Price is falling"],
+    w_restless: ["Prijs schommelt: {low}–{high} in 12 uur", "Price swings: {low}–{high} in 12 hours"],
+    // score
+    lvl_high: ["goede kans", "good chance"],
+    lvl_mid: ["twijfelgeval", "doubtful"],
+    lvl_low: ["laten liggen", "skip it"],
+    miss_price: ["prijs t.o.v. normaal (nog te weinig historie)", "price vs normal (not enough history yet)"],
+    miss_liquidity: ["verkoopsnelheid (klik 📊 Check verkopen)", "sales speed (click 📊 Check sales)"],
+    cap_noProfit: ["geen winst na belasting", "no profit after tax"],
+    cap_underMin: ["minder winst dan je minimum", "less profit than your minimum"],
+    cap_tooExpensive: ["nu te duur om winst te maken", "too expensive now to make a profit"],
+    cap_risky: ["riskant volgens de sheet-regels", "risky by the sheet rules"],
+    cap_lowData: ["te weinig data", "not enough data"],
+    cap_restless: ["prijs schommelt sterk", "price swings a lot"],
+    cap_noSales: ["echte verkopen nog niet gecheckt", "real sales not checked yet"],
+    ow_lowData: ["Te weinig data voor een betrouwbare score", "Not enough data for a reliable score"],
+    ow_restless: ["Prijs schommelt sterk ({pct} in 24 uur)", "Price swings a lot ({pct} in 24 hours)"],
+    ow_structural: ["Prijs daalt al dagen", "Price has been falling for days"],
+    ow_negTrend: ["Prijs gaat omlaag", "Price is going down"],
+    dip_structural: ["daalt al dagen", "falling for days"],
+    dip_recovering: ["tijdelijke dip, herstelt", "temporary dip, recovering"],
+    dip_below: ["onder het normale niveau", "below its normal level"],
+    // toolbar and table
+    sortScore: ["Beste kans eerst", "Best chance first"],
+    sortSignal: ["Groen eerst", "Green first"],
+    sortTitle: ["Beste kans eerst = hoogste score bovenaan (alleen PC). Groen eerst = 🟢 → ⛔, dan winst %.", "Best chance first = highest score on top (PC only). Green first = 🟢 → ⛔, then profit %."],
+    onlyDeals: ["Alleen 🟢/🟡", "Only 🟢/🟡"],
+    refreshTitle: ["Nu ophalen bij fodder.gg (gaat ook vanzelf elke 10 min)", "Fetch fodder.gg now (also happens every 10 min)"],
+    alertTitle: ["Pling + melding (en push naar je telefoon) als een kaart nieuw op 🟢 komt. Blijft elke 10 min verversen zolang de web-app open is. Telefoon instellen: 📲 op de Spelers-tab.", "Chime + message (and a push to your phone) when a card turns 🟢. Keeps refreshing every 10 min while the web app is open. Phone setup: 📲 on the Players tab."],
+    alertOn: ["Melding aan", "Alerts on"],
+    alertOff: ["Melding uit", "Alerts off"],
+    alertOnToast: ["🔔 Melding aan: pling + push als een kaart 🟢 wordt", "🔔 Alerts on: chime + push when a card turns 🟢"],
+    alertOffToast: ["🔕 Melding uit", "🔕 Alerts off"],
+    futbinButton: ["📊 Check echte verkopen", "📊 Check real sales"],
+    futbinBusy: ["📊 {done}/{total}… stop", "📊 {done}/{total}… stop"],
+    futbinTitle: ["Zoekt voor de 🟢/🟡/🟠-kaarten op FUTBIN op waarvoor ze echt verkocht zijn. Pas daarna kan een kaart 70+ scoren. Eén kaart per paar seconden, max 30 per klik, 45 min onthouden. Nog eens klikken = stoppen.", "Looks up on FUTBIN what the 🟢/🟡/🟠 cards really sold for. Only then can a card score 70+. One card every few seconds, max 30 per click, remembered for 45 min. Click again = stop."],
+    noCardsToCheck: ["Geen 🟢/🟡/🟠-kaarten om te checken.", "No 🟢/🟡/🟠 cards to check."],
+    run: ["🔄 Run maken ({n})", "🔄 Start run ({n})"],
+    runTitle: ["Maakt een run van de aangevinkte kaarten: per kaart het marktfilter met max. prijs = koopprijs. Zoeken en kopen doe je zelf.", "Makes a run of the ticked cards: a market filter per card with max price = buy price. You search and buy yourself."],
+    players: ["+ Spelers ({n})", "+ Players ({n})"],
+    playersTitle: ["Zet de aangevinkte kaarten op de Spelers-tab, met de koopprijs als doel", "Puts the ticked cards on the Players tab, with the buy price as target"],
+    settingsTitle: ["Instellingen: fodder.gg-link, max. prijs, min. winst", "Settings: fodder.gg link, max price, min profit"],
+    helpTitle: ["Uitleg", "Help"],
+    langTitle: ["Taal: Nederlands. Klik voor English.", "Language: English. Klik voor Nederlands."],
+    linkLabel: ["fodder.gg-link", "fodder.gg link"],
+    linkPlaceholder: ["Plak je fodder.gg/price-watch/… link", "Paste your fodder.gg/price-watch/… link"],
+    linkTitle: ["De link van je Price Watch-lijst op fodder.gg. Wordt alleen in deze browser bewaard.", "The link of your Price Watch list on fodder.gg. Only stored in this browser."],
+    maxPrice: ["Max. prijs", "Max price"],
+    maxPriceTitle: ["Kaarten boven deze prijs verbergen (sheet: onder 500K blijven)", "Hide cards above this price (sheet: stay under 500K)"],
+    minPct: ["Min. winst %", "Min profit %"],
+    minPctTitle: ["Minimale winst na 5% belasting, als % van je koopprijs", "Minimum profit after 5% tax, as % of your buy price"],
+    badLink: ["Dit is geen geldige fodder.gg price-watch-link", "This is not a valid fodder.gg price-watch link"],
+    tickFirst: ["Vink eerst kaarten aan.", "Tick some cards first."],
+    runStarted: ["Run met {n} kaart(en) gestart · max. prijs = koopprijs", "Run with {n} card(s) started · max price = buy price"],
+    playersAdded: ["{n} kaart(en) op de Spelers-tab gezet", "{n} card(s) added to the Players tab"],
+    h_score: ["Score", "Score"],
+    h_player: ["Speler", "Player"],
+    h_now: ["Nu", "Now"],
+    h_buy: ["Koop ≤", "Buy ≤"],
+    h_sell: ["Verkoop", "Sell"],
+    h_profit: ["Winst", "Profit"],
+    h_trend: ["Trend", "Trend"],
+    rowTitle: ["Klik voor details", "Click for details"],
+    checked: ["📊 gecheckt", "📊 checked"],
+    gapTitle: ["nu {pct} t.o.v. je koopprijs", "now {pct} vs your buy price"],
+    badgeTitle: ["Score {score}: {level}. Klik op de rij om te zien waarom.", "Score {score}: {level}. Click the row to see why."],
+    profitTitle: ["Koop {buy} → verkoop {sell}, min 5% belasting", "Buy {buy} → sell {sell}, minus 5% tax"],
+    trendHistTitle: ["{span} eigen historie · normaal {median} · laagste {low} · gele stip = nu", "{span} own history · normal {median} · lowest {low} · yellow dot = now"],
+    trendTodayTitle: ["Nog geen eigen historie: de lijn van vandaag (fodder.gg)", "No own history yet: today's line (fodder.gg)"],
+    h24: ["24u", "24h"],
+    // status line
+    statusNoLink: ["Plak je fodder.gg-link via ⚙.", "Paste your fodder.gg link via ⚙."],
+    statusLoading: ["fodder.gg ophalen…", "Loading fodder.gg…"],
+    statusData: ["{platform} · {n} kaarten · 🟢 {buy}  🟡 {near}  🟠 {risk} · bijgewerkt {time}", "{platform} · {n} cards · 🟢 {buy}  🟡 {near}  🟠 {risk} · updated {time}"],
+    statusError: [" · fout: {error}", " · error: {error}"],
+    statusFailed: ["Ophalen mislukt: {error}", "Loading failed: {error}"],
+    statusEmpty: ["Nog geen data · klik ↻", "No data yet · click ↻"],
+    statusTitle: ["Data van {at}, opgehaald {fetched} (elke 10 min). {history}", "Data from {at}, fetched {fetched} (every 10 min). {history}"],
+    histStatus: ["Historie: {n} metingen over {span}, laatste {time}{remote}", "History: {n} points over {span}, last {time}{remote}"],
+    histRemote: [" (van je pc)", " (from your pc)"],
+    histBuilding: ["Historie: wordt opgebouwd (elke 15 min)", "History: being built (every 15 min)"],
+    histNone: ["Historie: nog niets van je pc", "History: nothing from your pc yet"],
+    // details
+    d_score: ["Score {score} · {level}", "Score {score} · {level}"],
+    d_partPrice: ["Prijs t.o.v. normaal", "Price vs normal"],
+    d_partProfit: ["Winst", "Profit"],
+    d_partLiquidity: ["Verkoopt snel", "Sells quickly"],
+    d_partTrend: ["Trend en rust", "Trend & stability"],
+    d_partReliability: ["Betrouwbare data", "Reliable data"],
+    d_unknown: ["Onbekend: {list}", "Unknown: {list}"],
+    d_capped: ["Score begrensd: {list}", "Score capped: {list}"],
+    d_price: ["Prijs (PC, fodder.gg)", "Price (PC, fodder.gg)"],
+    d_now: ["Nu", "Now"],
+    d_status: ["Status", "Status"],
+    d_low24: ["Laagste 24u", "Lowest 24h"],
+    d_avg24: ["Gemiddeld 24u", "Average 24h"],
+    d_high24: ["Hoogste 24u", "Highest 24h"],
+    d_change24: ["Verschil 24u", "Change 24h"],
+    d_history: ["Historie", "History"],
+    d_historyValue: ["{span} · {n} metingen", "{span} · {n} points"],
+    d_historyNone: ["nog niet opgebouwd", "not built yet"],
+    d_normal: ["Normaal (mediaan)", "Normal (median)"],
+    d_histLow: ["Laagste (historie)", "Lowest (history)"],
+    d_histHigh: ["Hoogste (historie)", "Highest (history)"],
+    d_change72: ["Verschil 72u", "Change 72h"],
+    d_verdict: ["Beoordeling", "Verdict"],
+    d_sales: ["Echte verkopen (FUTBIN)", "Real sales (FUTBIN)"],
+    d_sold24: ["Verkocht 24u", "Sold 24h"],
+    d_soldValue: ["{n}× ({pct} van aanbod)", "{n}× ({pct} of listings)"],
+    d_p10: ["Koop tot (P10)", "Buy up to (P10)"],
+    d_median: ["Middenprijs", "Median price"],
+    d_p75: ["Verkoop voor (P75)", "Sell for (P75)"],
+    d_p90: ["Duurste 10% (P90)", "Top 10% (P90)"],
+    d_vsYesterday: ["T.o.v. gisteren", "Vs yesterday"],
+    d_checkedAt: ["Gecheckt om", "Checked at"],
+    d_notChecked: ["Nog niet gecheckt. Zonder echte verkopen blijft de score onder 70.", "Not checked yet. Without real sales the score stays below 70."],
+    d_checkButton: ["📊 Check verkopen", "📊 Check sales"],
+    d_checkTitle: ["Haal de echte verkopen van deze kaart op FUTBIN op", "Get this card's real sales from FUTBIN"],
+    d_salesLink: ["Verkopen op FUTBIN ↗", "Sales on FUTBIN ↗"],
+    d_searchLink: ["Zoek op FUTBIN ↗", "Search FUTBIN ↗"],
+    d_warn: ["Let op", "Watch out"],
+    // help
+    help_score: ["Score", "Score"],
+    help_scoreText: ["0–100: hoe goed de kans nú is. Telt mee: prijs t.o.v. normaal (25%), winst (25%), hoe snel hij verkoopt (20%), trend en rust (20%) en hoe betrouwbaar de data is (10%). Groen 70+ = goede kans · geel = twijfel · grijs = laten liggen. Groen kan pas na 📊 Check echte verkopen.", "0–100: how good the chance is right now. Counts: price vs normal (25%), profit (25%), how fast it sells (20%), trend and stability (20%) and how reliable the data is (10%). Green 70+ = good chance · yellow = doubtful · grey = skip it. Green only after 📊 Check real sales."],
+    help_dot: ["Bolletje", "Dot"],
+    help_dotText: ["🟢 kopen kan (op je koopprijs) · 🟡 bijna (≤ 6% erboven) · 🟠 goedkoop, maar riskant · ⚪ nog te duur · ⛔ geen winst.", "🟢 buy now (at your buy price) · 🟡 almost (≤ 6% above) · 🟠 cheap, but risky · ⚪ too expensive for now · ⛔ no profit."],
+    help_prices: ["Koop ≤ / Verkoop", "Buy ≤ / Sell"],
+    help_pricesText: ["Blauw = berekend uit echte FUTBIN-verkopen. Wit = berekend uit de vraagprijzen op fodder.gg (minder zeker).", "Blue = based on real FUTBIN sales. White = based on asking prices on fodder.gg (less certain)."],
+    help_trend: ["Trend", "Trend"],
+    help_trendText: ["De PC-prijs van de laatste 72 uur, elke 15 min opgeslagen door je pc. Gele stip = nu. Nog geen historie? Dan de lijn van vandaag van fodder.gg.", "The PC price of the last 72 hours, saved by your pc every 15 min. Yellow dot = now. No history yet? Then today's line from fodder.gg."],
+    help_details: ["Details", "Details"],
+    help_detailsText: ["Klik op een rij voor alles: waarom deze score, de prijzen, de echte verkopen en alle waarschuwingen.", "Click a row for everything: why this score, the prices, the real sales and all warnings."],
+    help_self: ["Zelf doen", "You decide"],
+    help_selfText: ["Zoeken, kopen en verkopen doe je altijd zelf. Let op content en leaks (rond 19:00).", "You always search, buy and sell yourself. Watch out for content and leaks (around 19:00)."],
+    // FUTBIN checks and alerts
+    fbAllFresh: ["FUTBIN: alles is al gecheckt (minder dan 45 min geleden)", "FUTBIN: everything was already checked (less than 45 min ago)"],
+    fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
+    fbDone: ["FUTBIN: {n} kaart(en) gecheckt", "FUTBIN: {n} card(s) checked"],
+    fbMissing: [" · niet gevonden: {list}", " · not found: {list}"],
+    hitLine: ["🟢 {name}: nu {now} · koop ≤ {buy} · verkoop {sell} (+{profit})", "🟢 {name}: now {now} · buy ≤ {buy} · sell {sell} (+{profit})"],
+    hitSales: [" · FUTBIN {n} verkopen/24u", " · FUTBIN {n} sales/24h"],
+    hitTitleOne: ["Flip: kaart op 🟢", "Flip: card turned 🟢"],
+    hitTitleMany: ["Flip: {n} kaarten op 🟢", "Flip: {n} cards turned 🟢"]
+  };
+  let flipLangCache = null;
+  function flipLang() {
+    if (flipLangCache == null) flipLangCache = getFlip().lang === "en" ? "en" : "nl";
+    return flipLangCache;
+  }
+  function ft(key, vars) {
+    const entry = FLIP_TEXT[key];
+    const text = entry ? entry[flipLang() === "en" ? 1 : 0] : key;
+    return vars ? text.replace(/\{(\w+)\}/g, (match, name) => (vars[name] != null ? String(vars[name]) : match)) : text;
+  }
+  // 296000 → "296K", 82500 → "82.5K", 1250000 → "1.25M" (short prices inside sentences).
+  function flipShort(value) {
+    const number = Math.round(Number(value) || 0);
+    if (number >= 1000000) return `${(number / 1000000).toFixed(2).replace(/\.?0+$/, "")}M`;
+    if (number >= 100000) return `${Math.round(number / 1000)}K`;
+    if (number >= 1000) return `${(number / 1000).toFixed(1).replace(/\.0$/, "")}K`;
+    return String(number);
+  }
+  const flipPct = (value, digits = 0) => `${value > 0 ? "+" : ""}${Number(value).toFixed(digits)}%`;
+
   function flipTokenFrom(text) {
     const value = String(text || "").trim();
     const match = value.match(/price-watch\/([A-Za-z0-9_-]{8,64})/) || value.match(/^([A-Za-z0-9_-]{8,64})$/);
@@ -6697,32 +6887,32 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (useFutbin) {
       buy = roundDownToStep(futbin.p10);
       sell = roundDownToStep(futbin.p75);
-      if (futbin.sales24 < 5) { warnings.push(`maar ${futbin.sales24} verkopen in 24u (FUTBIN)`); fbRisky = true; }
-      if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(`verkoopprijs ${Math.round(futbin.trend * 100)}% t.o.v. de dag ervoor`); fbRisky = true; }
-      if (futbin.listings24 >= 10 && futbin.sellThrough < 0.1) warnings.push(`maar ${Math.round(futbin.sellThrough * 100)}% van de listings verkoopt`);
-      if (futbin.outliers.length) warnings.push(`verkoop ${futbin.outliers.map(value => priceFormat.format(value)).join(", ")} genegeerd`);
+      if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
+      if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(ft("w_saleFalling", { pct: flipPct(futbin.trend * 100) })); fbRisky = true; }
+      if (futbin.listings24 >= 10 && futbin.sellThrough < 0.1) warnings.push(ft("w_lowSellThrough", { pct: `${Math.round(futbin.sellThrough * 100)}%` }));
+      if (futbin.outliers.length) warnings.push(ft("w_outlierSale", { list: futbin.outliers.map(flipShort).join(", ") }));
     } else {
-      if (lowOdd) warnings.push(`low ${priceFormat.format(card.low)} was eenmalig (genegeerd)`);
-      if (highOdd) warnings.push(`high ${priceFormat.format(card.high)} los van de trend (te weinig data?)`);
-      if (avgOdd) warnings.push(`gemiddelde ${priceFormat.format(card.avg)} scheef`);
+      if (lowOdd) warnings.push(ft("w_lowOdd", { price: flipShort(card.low) }));
+      if (highOdd) warnings.push(ft("w_highOdd", { price: flipShort(card.high) }));
+      if (avgOdd) warnings.push(ft("w_avgOdd", { price: flipShort(card.avg) }));
     }
     const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
     const pct = buy > 0 ? profit / buy * 100 : 0;
     const gap = buy > 0 ? card.now / buy - 1 : 1;
     const sparse = !useFutbin && card.trend.length < 12;
-    if (sparse) warnings.push(`maar ${card.trend.length} uurpunten`);
+    if (sparse) warnings.push(ft("w_sparse", { n: card.trend.length }));
     // A card that crashed today: its low is the new price, not a deal (fodder.gg's own 24h change).
     const crashed = card.change <= -15;
-    if (crashed) warnings.unshift(`${card.change.toFixed(0)}% in 24u`);
+    if (crashed) warnings.unshift(ft("w_crashed", { pct: flipPct(card.change) }));
     // Now at the day's low after a drop: you'd buy the bottom of a falling line (e.g. 345K → 300K).
     const atBottom = !crashed && card.change <= -8 && card.now <= card.low * 1.01;
-    if (atBottom) warnings.unshift(`op de dagbodem na ${card.change.toFixed(0)}% daling`);
-    if (falling) warnings.push("dalende trend");
+    if (atBottom) warnings.unshift(ft("w_atBottom", { pct: `${Math.abs(card.change).toFixed(0)}%` }));
+    if (falling) warnings.push(ft("w_falling"));
     // Sheet: "low fluctuation within the last 12 hrs". A card swinging > 20% around its middle (one-off
     // sales already left out) is restless: the low may be a dip you can't sell out of.
     const coreMin = core.length ? Math.min(...core) : mid;
     const restless = core.length >= 6 && (coreMax - coreMin) / mid > 0.2;
-    if (restless) warnings.push(`onrustig: 12u tussen ${priceFormat.format(coreMin)} en ${priceFormat.format(coreMax)}`);
+    if (restless) warnings.push(ft("w_restless", { low: flipShort(coreMin), high: flipShort(coreMax) }));
     // Thin data or a crazy high (sheet: skip it), a falling or restless price or a crash: never plain green.
     const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky;
     const cheap = gap <= 0.06;
@@ -6730,13 +6920,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     return { buy, sell, profit, pct, gap, warnings, status, risky, futbin: useFutbin ? futbin : null };
   }
 
-  const FLIP_STATUS = {
-    buy: ["🟢", "Nu op/onder de low"],
-    near: ["🟡", "Binnen 6% van je koopprijs"],
-    risk: ["🟠", "Goedkoop, maar let op: zie de waarschuwing onder de naam. Check eerst zelf de markt"],
-    wait: ["⚪", "Nu te duur, wachten"],
-    skip: ["⛔", "Geen winst na belasting"]
-  };
+  // Icon per signal; the texts are st_<status> (long) and sts_<status> (short) in FLIP_TEXT.
+  const FLIP_ICON = { buy: "🟢", near: "🟡", risk: "🟠", wait: "⚪", skip: "⛔" };
   const FLIP_ORDER = { buy: 0, near: 1, risk: 2, wait: 3, skip: 4 };
 
   function flipSparkline(values, up) {
@@ -6757,8 +6942,6 @@ function priceWatchMain(SCRIPT_VERSION) {
     svg.appendChild(line);
     return svg;
   }
-
-  const flipK = value => `${value >= 100000 ? Math.round(value / 1000) : (value / 1000).toFixed(1)}K`;
 
   // Stored PC history (max 72 h): the price line over real time, dashed = median, dotted = lowest,
   // dot = now. Only what was really recorded is drawn.
@@ -6859,13 +7042,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       fresh = flipRows(flipData, state).filter(row => still.has(row.card.id) && fresh.some(item => item.card.id === row.card.id));
       if (!fresh.length) return;
     }
-    const k = value => `${Math.round(value / 1000)}K`;
     const lines = fresh.map(({ card, calc }) =>
-      `🟢 ${card.name} ${card.rating}${card.holo ? " holo" : ""}: nu ${k(card.now)} · koop ≤ ${k(calc.buy)} · verkoop ${k(calc.sell)} (+${k(calc.profit)})${calc.futbin ? ` · FUTBIN ${calc.futbin.sales24} verk./24u` : ""}`);
+      ft("hitLine", { name: `${card.name} ${card.rating}${card.holo ? " holo" : ""}`, now: flipShort(card.now), buy: flipShort(calc.buy), sell: flipShort(calc.sell), profit: flipShort(calc.profit) })
+      + (calc.futbin ? ft("hitSales", { n: calc.futbin.sales24 }) : ""));
     if (chimeAudio) playChime();
     showToast(lines.join(" · "), true);
     // Push from the pc only (FUT Genie there), so a phone with the app open doesn't send it twice.
-    if (genie()) relayCall("notify", { title: fresh.length > 1 ? `Flip: ${fresh.length} kaarten op 🟢` : "Flip: kaart op 🟢", text: lines.join("\n") })
+    if (genie()) relayCall("notify", { title: fresh.length > 1 ? ft("hitTitleMany", { n: fresh.length }) : ft("hitTitleOne"), text: lines.join("\n") })
       .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
   }
 
@@ -7121,7 +7304,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const sMedian = clamp100(50 - (now / ref.median - 1) * 500); // −10% → 100, +10% → 0
       const sRange = ref.high > ref.low ? clamp100((1 - (now - ref.low) / (ref.high - ref.low)) * 100) : 50;
       price = 0.65 * sMedian + 0.35 * sRange;
-    } else missing.push("prijspositie (te weinig historie)");
+    } else missing.push("price");
 
     // B. Profit potential: buy/sell of the flip calc (FUTBIN P10/P75 when checked), 5% tax. Scored on
     // what you pay now (now, or your buy price when lower): a card far above its buy price isn't a deal yet.
@@ -7148,7 +7331,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (fb) {
       const sSales = clamp100(fb.sales24 / 15 * 100);
       liquidity = fb.listings24 >= 3 ? 0.65 * sSales + 0.35 * clamp100(fb.sellThrough / 0.4 * 100) : sSales;
-    } else missing.push("liquiditeit (📊 check verkopen)");
+    } else missing.push("liquidity");
 
     // D. Trend & stability: 24 h / 72 h change, temporary dip vs structural fall, swings, FUTBIN sales trend.
     const change24 = useHist && hist.change24 != null ? hist.change24 : card.change / 100;
@@ -7186,26 +7369,27 @@ function priceWatchMain(SCRIPT_VERSION) {
     let score = OPP_WEIGHTS.price * part(price) + OPP_WEIGHTS.profit * profit + OPP_WEIGHTS.liquidity * part(liquidity)
       + OPP_WEIGHTS.trend * trend + OPP_WEIGHTS.reliability * reliability;
     const caps = [];
+    // caps/missing/warnings/dip are codes; the table shows them in your language (cap_*, miss_*, ow_*, dip_*).
     const cap = (max, why) => { if (score > max) { score = max; caps.push(why); } };
-    if (net <= 0) cap(25, "geen winst na belasting");
-    else if (calc.status === "skip") cap(25, "onder je min. winst");
-    else if (netNow <= 0) cap(35, "nu te duur (wacht op je koopprijs)");
-    if (calc.risky) cap(60, "risico volgens de sheet-regels (zie ⚠ bij de naam)");
-    if (reliability < 40) cap(55, "onvoldoende data");
+    if (net <= 0) cap(25, "noProfit");
+    else if (calc.status === "skip") cap(25, "underMin");
+    else if (netNow <= 0) cap(35, "tooExpensive");
+    if (calc.risky) cap(60, "risky");
+    if (reliability < 40) cap(55, "lowData");
     const restless = volatility != null && volatility > 0.2;
-    if (restless) cap(65, "onrustige prijs");
-    if (!fb) cap(69, "hoog pas met echte FUTBIN-verkopen");
+    if (restless) cap(65, "restless");
+    if (!fb) cap(69, "noSales");
     score = Math.round(score);
     const warnings = [];
-    if (reliability < 40) warnings.push("onvoldoende data");
-    if (restless) warnings.push(`onrustig (${Math.round(volatility * 100)}% spreiding)`);
-    if (direction === "neg") warnings.push(structural ? "structurele daling" : "negatieve trend");
+    if (reliability < 40) warnings.push("lowData");
+    if (restless) warnings.push("restless");
+    if (direction === "neg") warnings.push(structural ? "structural" : "negTrend");
     return {
       score,
       level: score >= 70 ? "high" : score >= 45 ? "mid" : "low",
       parts: { price, profit, liquidity, trend, reliability },
       missing, caps, warnings, direction,
-      dip: belowNormal ? (structural ? "structurele daling" : recovering ? "tijdelijke dip, herstelt" : "onder normaal niveau") : "",
+      dip: belowNormal ? (structural ? "structural" : recovering ? "recovering" : "below") : "",
       basis: ref ? ref.basis : "",
       net, roi, netNow, roiNow, volatility, change24, change72, hist
     };
@@ -7222,7 +7406,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   function formatSpan(ms) {
     const minutes = Math.max(0, Math.round(ms / 60000));
     const hours = Math.floor(minutes / 60);
-    return hours ? `${hours}u${minutes % 60 ? ` ${minutes % 60}m` : ""}` : `${minutes}m`;
+    const h = flipLang() === "en" ? "h" : "u";
+    return hours ? `${hours}${h}${minutes % 60 ? ` ${minutes % 60}m` : ""}` : `${minutes}m`;
   }
 
   // --- FUTBIN sales for flip cards ------------------------------------------------------------------
@@ -7382,7 +7567,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (futbinState.busy) return;
     const todo = cards.filter(card => !futbinSalesFor(card, platform)).slice(0, FUTBIN_BATCH_MAX);
     if (!todo.length) {
-      showToast("FUTBIN: alles is al gecheckt (vers, < 45 min)", true);
+      showToast(ft("fbAllFresh"), true);
       return;
     }
     Object.assign(futbinState, { busy: true, done: 0, total: todo.length, error: "", stop: false });
@@ -7403,13 +7588,17 @@ function priceWatchMain(SCRIPT_VERSION) {
       futbinState.busy = false;
       listeners.forEach(listener => listener());
     }
-    if (futbinState.error) showToast(`FUTBIN gestopt: ${futbinState.error}`, false);
-    else showToast(`FUTBIN: ${futbinState.done} kaart(en) gecheckt${missing.length ? ` · niet gevonden: ${missing.join(", ")}` : ""}`, !missing.length);
+    if (futbinState.error) showToast(ft("fbStopped", { error: futbinState.error }), false);
+    else showToast(ft("fbDone", { n: futbinState.done }) + (missing.length ? ft("fbMissing", { list: missing.join(", ") }) : ""), !missing.length);
   }
 
   let flipOnShow = () => {};
   let flipTimer = 0;
 
+  // Calm layout: per row only what you need to decide (score, price, buy/sell, profit, trend);
+  // everything else (score breakdown, fodder.gg prices, FUTBIN sales, all warnings) opens with a click
+  // on the row. Settings (link, max price, min profit) and the explanation sit behind ⚙ and ?.
+  // All texts come from FLIP_TEXT (ft) and are set on every render, so NL/EN switches at once.
   function buildFlipSection(root) {
     const card = el("div", "pt-watch-card pt-flip-card");
     root.appendChild(card);
@@ -7418,70 +7607,82 @@ function priceWatchMain(SCRIPT_VERSION) {
     const status = el("div", "pt-watch-status");
     heading.append(el("h2", "pt-watch-title", "Flip sheet"), status);
 
-    const controls = el("div", "pt-stock-list-buttons");
-    const link = el("input", "pt-target-input pt-flip-link");
-    link.placeholder = "Plak je fodder.gg/price-watch/… link";
-    link.title = "De link van de Price Watch-lijst op fodder.gg. Wordt alleen in deze browser bewaard.";
+    const button = (text, extra) => {
+      const item = el("button", "pt-watch-refresh" + (extra ? ` ${extra}` : ""), text);
+      item.type = "button";
+      return item;
+    };
     const platform = el("select", "pt-stock-select pt-mode-select");
     platform.append(new Option("PC", "pc"), new Option("Console", "console"));
     const sortSelect = el("select", "pt-stock-select pt-mode-select");
-    sortSelect.append(new Option("Sorteer: Score", "score"), new Option("Sorteer: Signaal", "signal"));
-    sortSelect.title = "Score = Opportunity Score (0–100, alleen PC): prijspositie, winst, liquiditeit, trend en betrouwbaarheid samen. Signaal = de oude volgorde (🟢 → ⛔, dan winst %).";
-    const field = (label, title) => {
-      const box = el("label", "pt-goal");
-      const input = el("input", "pt-target-input");
-      input.inputMode = "numeric";
-      input.title = title;
-      box.append(el("span", "pt-muted", label), input);
-      return { box, input };
-    };
-    const maxPrice = field("Max prijs", "Kaarten boven deze prijs verbergen (sheet: belastingschijf < 500K)");
-    const minPct = field("Min winst %", "Minimale winst na 5% belasting, ten opzichte van je koopprijs");
+    sortSelect.append(new Option("", "score"), new Option("", "signal"));
     const dealsBox = el("label", "pt-goal");
     const onlyDeals = el("input");
     onlyDeals.type = "checkbox";
-    dealsBox.append(onlyDeals, el("span", "pt-muted", "Alleen 🟢/🟡"));
-    const refresh = el("button", "pt-watch-refresh", "↻ Ophalen");
-    const alertButton = el("button", "pt-watch-refresh pt-flip-alert");
-    alertButton.type = "button";
-    alertButton.title = "Pling + melding (en ntfy-push naar je telefoon) als een kaart nieuw op 🟢 komt. Blijft elke 10 min verversen zolang de web-app open is, ook op andere schermen. Telefoon-topic instellen: 📲 op de Spelers-tab.";
+    const dealsText = el("span", "pt-muted");
+    dealsBox.append(onlyDeals, dealsText);
+    const refresh = button("↻");
+    const alertButton = button("", "pt-flip-alert");
     alertButton.addEventListener("click", () => {
       unlockChime();
       update(state => { state.alert = !state.alert; });
       const on = getFlip().alert;
-      showToast(on ? "🔔 Flip-melding aan: pling + push als een kaart nieuw 🟢 wordt" : "🔕 Flip-melding uit", true);
+      showToast(ft(on ? "alertOnToast" : "alertOffToast"), true);
       if (on) loadFlipSheet(false);
     });
-    const futbinButton = el("button", "pt-watch-refresh");
-    futbinButton.type = "button";
-    futbinButton.title = "Zoekt voor de 🟢/🟡/🟠-kaarten de echte verkopen op FUTBIN op (alleen Sold for). Koop ≤ = P10 en Verkoop = P75 van de verkopen. Eén kaart per paar seconden, max 30 per klik, 45 min onthouden. Nogmaals klikken = stoppen.";
+    const futbinButton = button("");
     futbinButton.addEventListener("click", () => {
       if (futbinState.busy) { futbinState.stop = true; return; }
       const state = getFlip();
       const cards = shown.filter(row => ["buy", "near", "risk"].includes(row.calc.status)).map(row => row.card);
-      if (!cards.length) return showToast("Geen 🟢/🟡/🟠-kaarten om te checken.", false);
+      if (!cards.length) return showToast(ft("noCardsToCheck"), false);
       futbinCheckCards(cards, state.platform);
     });
-    const runButton = el("button", "pt-watch-refresh pt-cycle-btn", "🔄 Run maken");
-    const watchButton = el("button", "pt-watch-refresh", "+ Spelers");
-    [refresh, runButton, watchButton].forEach(button => { button.type = "button"; });
-    runButton.title = "Run-lijst van de aangevinkte kaarten: per kaart het marktfilter met max BIN = koopprijs. Zoeken en kopen doe je zelf.";
-    watchButton.title = "Aangevinkte kaarten op de Spelers-tab, doel = koopprijs";
-    maxPrice.input.classList.add("pt-flip-max");
-    controls.append(link, platform, sortSelect, maxPrice.box, minPct.box, dealsBox, refresh, alertButton, futbinButton, runButton, watchButton);
+    const runButton = button("", "pt-cycle-btn");
+    const watchButton = button("");
+    const settingsButton = button("⚙");
+    const helpButton = button("?");
+    const langButton = button("", "pt-flip-lang");
+    langButton.addEventListener("click", () => update(state => { state.lang = state.lang === "en" ? "nl" : "en"; }));
+    const controls = el("div", "pt-stock-list-buttons");
+    controls.append(platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, runButton, watchButton, settingsButton, helpButton, langButton);
     toolbar.append(heading, controls);
     card.appendChild(toolbar);
 
-    const note = el("div", "pt-watch-status pt-small",
-      "Koop ≤ = de low van 24 u (of lager); verkoop = tussen gemiddelde en high, iets onder de high. Blauw = uit echte FUTBIN-verkopen (📊): koop ≤ P10, verkoop P75. Check altijd zelf de laatste verkopen (FUTBIN) en let op content/leaks. ⚠ = uitschieter in de data: overslaan of zelf checken. Score (PC) = prijspositie 25% · winst 25% · liquiditeit 20% · trend 20% · betrouwbaarheid 10%; boven de 69 pas met echte FUTBIN-verkopen (📊). Historie = de PC-prijs van fodder.gg, elke 15 min opgeslagen door je pc (max 72 u).");
-    card.appendChild(note);
+    // ⚙ Settings (open by itself while there is no link yet).
+    const settings = el("div", "pt-flip-panel");
+    const link = el("input", "pt-target-input pt-flip-link");
+    const field = () => {
+      const box = el("label", "pt-goal");
+      const input = el("input", "pt-target-input");
+      input.inputMode = "numeric";
+      const label = el("span", "pt-muted");
+      box.append(label, input);
+      return { box, input, label };
+    };
+    const maxPrice = field();
+    const minPct = field();
+    maxPrice.input.classList.add("pt-flip-max");
+    const linkLabel = el("span", "pt-muted");
+    const settingsRow = el("div", "pt-stock-list-buttons");
+    settingsRow.append(linkLabel, link, maxPrice.box, minPct.box);
+    settings.appendChild(settingsRow);
+    card.appendChild(settings);
+
+    // ? Explanation.
+    const help = el("div", "pt-flip-panel pt-flip-help");
+    card.appendChild(help);
+    let settingsOpen = false;
+    let helpOpen = false;
+    settingsButton.addEventListener("click", () => { settingsOpen = !settingsOpen; render(); });
+    helpButton.addEventListener("click", () => { helpOpen = !helpOpen; render(); });
 
     const wrap = el("div", "pt-flip-wrap");
     const table = el("table", "pt-watch-table pt-flip-table");
     const head = el("tr");
-    [["", "pt-col-tick"], ["", "pt-col-sig"], ["Score", "pt-col-score"], ["OVR", "pt-col-ovr"], ["Speler", "pt-col-name"], ["Low", "pt-col-num"], ["Gem", "pt-col-num"],
-      ["High", "pt-col-num"], ["Nu", "pt-col-num"], ["Koop ≤", "pt-col-num"], ["Verkoop", "pt-col-num"], ["Winst", "pt-col-num"], ["24u %", "pt-col-num"], ["Historie", "pt-col-spark"]]
-      .forEach(([label, cls]) => head.appendChild(el("th", cls, label)));
+    const HEADERS = [["", "pt-col-tick"], ["h_score", "pt-col-score"], ["h_player", "pt-col-name"], ["h_now", "pt-col-num"], ["h_buy", "pt-col-num"],
+      ["h_sell", "pt-col-num"], ["h_profit", "pt-col-num"], ["h_trend", "pt-col-spark"], ["", "pt-col-more"]];
+    const headCells = HEADERS.map(([, cls]) => head.appendChild(el("th", cls)));
     const thead = el("thead");
     thead.appendChild(head);
     const tbody = el("tbody");
@@ -7489,10 +7690,44 @@ function priceWatchMain(SCRIPT_VERSION) {
     wrap.appendChild(table);
     card.appendChild(wrap);
 
+    // Texts that don't depend on the data (set again on every render, for the language switch).
+    let textsLang = "";
+    function applyTexts() {
+      if (textsLang === flipLang()) return;
+      textsLang = flipLang();
+      sortSelect.options[0].textContent = ft("sortScore");
+      sortSelect.options[1].textContent = ft("sortSignal");
+      sortSelect.title = ft("sortTitle");
+      dealsText.textContent = ft("onlyDeals");
+      refresh.title = ft("refreshTitle");
+      futbinButton.title = ft("futbinTitle");
+      runButton.title = ft("runTitle");
+      watchButton.title = ft("playersTitle");
+      settingsButton.title = ft("settingsTitle");
+      helpButton.title = ft("helpTitle");
+      langButton.textContent = flipLang() === "en" ? "🌐 EN" : "🌐 NL";
+      langButton.title = ft("langTitle");
+      linkLabel.textContent = ft("linkLabel");
+      link.placeholder = ft("linkPlaceholder");
+      link.title = ft("linkTitle");
+      maxPrice.label.textContent = ft("maxPrice");
+      maxPrice.input.title = ft("maxPriceTitle");
+      minPct.label.textContent = ft("minPct");
+      minPct.input.title = ft("minPctTitle");
+      HEADERS.forEach(([key], i) => { headCells[i].textContent = key ? ft(key) : ""; });
+      help.textContent = "";
+      ["score", "dot", "prices", "trend", "details", "self"].forEach(key => {
+        const line = el("div", "pt-flip-help-line");
+        line.append(el("b", "", ft(`help_${key}`)), el("span", "", ft(`help_${key}Text`)));
+        help.appendChild(line);
+      });
+    }
+
     // Only the cards you ticked/unticked yourself are remembered; all others follow the current signal
     // (🟢/🟡 on, the rest off), also after a refresh or a changed filter.
     const ticked = new Map(); // id -> bool, your own clicks
     const isTicked = row => (ticked.has(row.card.id) ? ticked.get(row.card.id) : row.calc.status === "buy" || row.calc.status === "near");
+    const expanded = new Set(); // ids with their details open
     let shown = [];
 
     const update = mutate => {
@@ -7504,7 +7739,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     link.addEventListener("change", () => {
       const token = flipTokenFrom(link.value);
       if (!token && link.value.trim()) {
-        showToast("Geen geldige fodder.gg price-watch link", false);
+        showToast(ft("badLink"), false);
         return;
       }
       update(state => { state.token = token; });
@@ -7524,7 +7759,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const selectedRows = () => shown.filter(isTicked);
     runButton.addEventListener("click", async () => {
       const rows = selectedRows();
-      if (!rows.length) return showToast("Vink eerst kaarten aan.", false);
+      if (!rows.length) return showToast(ft("tickFirst"), false);
       runButton.disabled = true;
       try {
         const players = await flipPlayers(rows);
@@ -7544,150 +7779,234 @@ function priceWatchMain(SCRIPT_VERSION) {
         });
         saveStock();
         startRun(FLIP_RUN_ID);
-        showToast(`Run met ${players.length} kaart(en) gestart · max BIN = koopprijs`, true);
+        showToast(ft("runStarted", { n: players.length }), true);
       } finally {
         runButton.disabled = false;
       }
     });
     watchButton.addEventListener("click", async () => {
       const rows = selectedRows();
-      if (!rows.length) return showToast("Vink eerst kaarten aan.", false);
+      if (!rows.length) return showToast(ft("tickFirst"), false);
       const added = addPlayersToWatch(await flipPlayers(rows));
-      showToast(`${added} kaart(en) op de Spelers-tab gezet`, true);
+      showToast(ft("playersAdded", { n: added }), true);
     });
+
+    const money = value => priceFormat.format(Math.round(value));
+    const signed = value => `${value > 0 ? "+" : ""}${priceFormat.format(Math.round(value))}`;
+    const pctOf = fraction => flipPct(fraction * 100, 1);
+    const externalLink = (text, href) => {
+      const anchor = el("a", "pt-flip-link-out", text);
+      anchor.href = href;
+      anchor.target = "_blank";
+      anchor.rel = "noopener";
+      return anchor;
+    };
+    const section = (title, extraClass) => {
+      const box = el("div", "pt-flip-box" + (extraClass ? ` ${extraClass}` : ""));
+      box.appendChild(el("div", "pt-flip-box-title", title));
+      return box;
+    };
+    // One label + value per line, never wrapped (long text is cut off with … and shown on hover).
+    const pair = (box, label, value, className) => {
+      const line = el("div", "pt-flip-kv");
+      const left = el("span", "pt-muted pt-flip-kv-label", label);
+      left.title = label;
+      line.append(left, el("span", "pt-flip-kv-value" + (className ? ` ${className}` : ""), value));
+      box.appendChild(line);
+    };
+    const oppWarning = (code, opp) => ft(`ow_${code}`, { pct: opp.volatility != null ? `${Math.round(opp.volatility * 100)}%` : "" });
+
+    // The opened details of one row.
+    function detailRow(row) {
+      const { card: item, calc, opp } = row;
+      const tr = el("tr", "pt-flip-detail");
+      const td = el("td");
+      td.colSpan = 9;
+      const grid = el("div", "pt-flip-detail-grid");
+
+      if (opp) {
+        const box = section(ft("d_score", { score: opp.score, level: ft(`lvl_${opp.level}`) }));
+        [["d_partPrice", opp.parts.price], ["d_partProfit", opp.parts.profit], ["d_partLiquidity", opp.parts.liquidity],
+          ["d_partTrend", opp.parts.trend], ["d_partReliability", opp.parts.reliability]].forEach(([key, value]) => {
+          const line = el("div", "pt-flip-bar-line");
+          const bar = el("div", "pt-flip-bar");
+          const fill = el("span");
+          fill.style.width = `${value == null ? 0 : Math.round(value)}%`;
+          bar.appendChild(fill);
+          line.append(el("span", "pt-muted pt-flip-kv-label", ft(key)), bar, el("span", "pt-flip-bar-value", value == null ? "?" : String(Math.round(value))));
+          box.appendChild(line);
+        });
+        if (opp.missing.length) box.appendChild(el("div", "pt-flip-note", ft("d_unknown", { list: opp.missing.map(code => ft(`miss_${code}`)).join(", ") })));
+        if (opp.caps.length) box.appendChild(el("div", "pt-flip-note", ft("d_capped", { list: opp.caps.map(code => ft(`cap_${code}`)).join(", ") })));
+        grid.appendChild(box);
+      }
+
+      const prices = section(ft("d_price"));
+      pair(prices, ft("d_now"), money(item.now), "pt-flip-now");
+      pair(prices, ft("d_status"), `${FLIP_ICON[calc.status]} ${ft(`sts_${calc.status}`)}`);
+      pair(prices, ft("d_low24"), money(item.low));
+      pair(prices, ft("d_avg24"), money(item.avg));
+      pair(prices, ft("d_high24"), money(item.high));
+      pair(prices, ft("d_change24"), flipPct(item.change, 1), item.change < 0 ? "pt-flip-minus" : "pt-flip-plus");
+      const hist = opp && opp.hist;
+      if (hist) {
+        pair(prices, ft("d_history"), ft("d_historyValue", { span: formatSpan(hist.spanMs), n: hist.samples }));
+        pair(prices, ft("d_normal"), money(hist.median));
+        pair(prices, ft("d_histLow"), money(hist.low));
+        pair(prices, ft("d_histHigh"), money(hist.high));
+        if (opp.change72 != null) pair(prices, ft("d_change72"), pctOf(opp.change72), opp.change72 < 0 ? "pt-flip-minus" : "pt-flip-plus");
+        if (opp.dip) pair(prices, ft("d_verdict"), ft(`dip_${opp.dip}`), opp.dip === "structural" ? "pt-flip-minus" : "");
+      } else if (getFlip().platform === "pc") {
+        pair(prices, ft("d_history"), ft("d_historyNone"));
+      }
+      grid.appendChild(prices);
+
+      const sales = section(ft("d_sales"));
+      const fb = calc.futbin;
+      if (fb) {
+        pair(sales, ft("d_sold24"), ft("d_soldValue", { n: fb.sales24, pct: `${Math.round(fb.sellThrough * 100)}%` }));
+        pair(sales, ft("d_p10"), money(fb.p10), "pt-flip-fbval");
+        pair(sales, ft("d_median"), money(fb.median));
+        pair(sales, ft("d_p75"), money(fb.p75), "pt-flip-fbval");
+        pair(sales, ft("d_p90"), money(fb.p90));
+        if (fb.trend != null) pair(sales, ft("d_vsYesterday"), pctOf(fb.trend), fb.trend < 0 ? "pt-flip-minus" : "pt-flip-plus");
+        pair(sales, ft("d_checkedAt"), formatTime(fb.fetchedAt));
+        sales.appendChild(externalLink(ft("d_salesLink"), `https://www.futbin.com${fb.path}?platform=${futbinPlatform(getFlip().platform)}`));
+      } else {
+        sales.appendChild(el("div", "pt-flip-note", ft("d_notChecked")));
+        if (!futbinState.busy) {
+          const check = button(ft("d_checkButton"), "pt-flip-small-btn");
+          check.title = ft("d_checkTitle");
+          check.addEventListener("click", () => futbinCheckCards([item], getFlip().platform));
+          sales.appendChild(check);
+        }
+      }
+      sales.appendChild(externalLink(ft("d_searchLink"), `https://www.futbin.com/players?search=${encodeURIComponent(item.name)}`));
+      grid.appendChild(sales);
+
+      const warnings = calc.warnings.concat(opp ? opp.warnings.map(code => oppWarning(code, opp)) : []);
+      if (warnings.length) {
+        const box = section(ft("d_warn"), "pt-flip-box-warn");
+        warnings.forEach(text => box.appendChild(el("div", "pt-flip-warn-line", `⚠ ${text}`)));
+        grid.appendChild(box);
+      }
+      td.appendChild(grid);
+      tr.appendChild(td);
+      return tr;
+    }
 
     function render() {
       const state = getFlip();
+      applyTexts();
       if (document.activeElement !== link) link.value = state.token ? `https://fodder.gg/price-watch/${state.token}` : "";
       platform.value = state.platform;
       if (document.activeElement !== maxPrice.input) maxPrice.input.value = state.maxPrice ? priceFormat.format(state.maxPrice) : "";
       if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
       onlyDeals.checked = !!state.onlyDeals;
       sortSelect.value = state.sort === "signal" ? "signal" : "score";
-      sortSelect.disabled = state.platform !== "pc";
-      alertButton.textContent = state.alert ? "🔔 Melding aan" : "🔕 Melding uit";
-      futbinButton.textContent = futbinState.busy ? `📊 FUTBIN ${futbinState.done}/${futbinState.total}… (stop)` : "📊 FUTBIN-check";
+      sortSelect.style.display = state.platform === "pc" ? "" : "none";
+      alertButton.textContent = state.alert ? "🔔" : "🔕";
+      alertButton.title = `${ft(state.alert ? "alertOn" : "alertOff")}. ${ft("alertTitle")}`;
       alertButton.classList.toggle("pt-flip-alert-on", !!state.alert);
+      futbinButton.textContent = futbinState.busy ? ft("futbinBusy", { done: futbinState.done, total: futbinState.total }) : ft("futbinButton");
+      settings.style.display = settingsOpen || !state.token ? "" : "none";
+      settingsButton.classList.toggle("pt-flip-alert-on", settingsOpen);
+      help.style.display = helpOpen ? "" : "none";
+      helpButton.classList.toggle("pt-flip-alert-on", helpOpen);
 
       const data = flipData && flipData.token === state.token ? flipData : null;
-      // Score per row (PC), highest first; "Signaal" (and console, no score) keeps the old order.
+      // Score per row (PC), highest first; "green first" (and console, no score) keeps the old order.
       shown = rankFlipOpportunities(flipRows(data, state)
         .filter(row => !state.onlyDeals || row.calc.status === "buy" || row.calc.status === "near"), state.platform);
       if (state.sort === "signal" || state.platform !== "pc") shown.sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
+
+      const count = key => shown.filter(row => row.calc.status === key).length;
       const history = getFlipHistory();
       const historyText = state.platform !== "pc" ? ""
         : history && history.times.length
-          ? ` · historie ${history.times.length} snapshots over ${formatSpan(history.times[history.times.length - 1] - history.times[0])} (laatste ${formatTime(history.times[history.times.length - 1])}${genie() ? "" : ", van je pc"})`
-          : genie() ? " · historie: wordt opgebouwd (elke 15 min)" : " · historie: nog niets van je pc";
-
-      const deals = shown.filter(row => row.calc.status === "buy").length;
-      const near = shown.filter(row => row.calc.status === "near").length;
-      const risk = shown.filter(row => row.calc.status === "risk").length;
+          ? ft("histStatus", { n: history.times.length, span: formatSpan(history.times[history.times.length - 1] - history.times[0]), time: formatTime(history.times[history.times.length - 1]), remote: genie() ? "" : ft("histRemote") })
+          : ft(genie() ? "histBuilding" : "histNone");
       status.textContent = !state.token
-        ? "Plak hierboven je fodder.gg Price Watch-link."
+        ? ft("statusNoLink")
         : flipLoading
-          ? "fodder.gg ophalen…"
+          ? ft("statusLoading")
           : data
-            ? `${state.platform === "pc" ? "PC" : "Console"} · ${shown.length} kaarten · 🟢 ${deals} · 🟡 ${near} · 🟠 ${risk} · data van ${formatTime(data.at)} (opgehaald ${formatTime(data.fetchedAt)}, elke 10 min)` + historyText + (flipError ? ` · fout: ${flipError}` : "")
-            : flipError ? `Ophalen mislukt: ${flipError}` : "Nog geen data · klik ↻ Ophalen";
+            ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) })
+              + (flipError ? ft("statusError", { error: flipError }) : "")
+            : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
+      status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
 
       tbody.textContent = "";
       shown.forEach(row => {
-        const { card: item, calc } = row;
-        const tr = el("tr", `pt-flip-row-${calc.status}`);
+        const { card: item, calc, opp } = row;
+        const open = expanded.has(item.id);
+        const tr = el("tr", `pt-flip-row pt-flip-row-${calc.status}${open ? " pt-flip-open" : ""}`);
+        tr.title = ft("rowTitle");
+        tr.addEventListener("click", event => {
+          if (event.target.closest("input, a, button, select")) return;
+          if (open) expanded.delete(item.id); else expanded.add(item.id);
+          render();
+        });
+
         const tickCell = el("td", "pt-col-tick");
         const tick = el("input");
         tick.type = "checkbox";
         tick.checked = isTicked(row);
         tick.addEventListener("change", () => { ticked.set(item.id, tick.checked); updateCount(); });
         tickCell.appendChild(tick);
-        const [icon, label] = FLIP_STATUS[calc.status];
-        const sig = el("td", "pt-col-sig", icon);
+
         const scoreCell = el("td", "pt-col-score");
-        const opp = row.opp;
+        const dot = el("span", "pt-flip-dot", FLIP_ICON[calc.status]);
+        dot.title = ft(`st_${calc.status}`) + (calc.status !== "skip" ? ` · ${ft("gapTitle", { pct: pctOf(calc.gap) })}` : "");
+        scoreCell.appendChild(dot);
         if (opp) {
-          const pct = value => `${value >= 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
-          const partText = value => (value == null ? "ontbreekt" : String(Math.round(value)));
-          scoreCell.appendChild(el("span", `pt-opp pt-opp-${opp.level}`, String(opp.score)));
-          const rel = Math.round(opp.parts.reliability);
-          scoreCell.appendChild(el("div", "pt-opp-sub" + (rel < 40 ? " pt-opp-weak" : ""), `${rel < 40 ? "⚠ " : ""}betr. ${rel}`));
-          if (opp.direction === "neg") scoreCell.appendChild(el("div", "pt-opp-sub pt-flip-minus", opp.dip === "structurele daling" ? "↘ structureel" : "↘ trend"));
-          scoreCell.title = [
-            `Opportunity Score ${opp.score}/100 (${opp.level === "high" ? "aantrekkelijk" : opp.level === "mid" ? "neutraal" : "minder interessant"})`,
-            `Prijspositie ${partText(opp.parts.price)} (25%)${opp.basis ? ` · ${opp.basis}` : ""}${opp.dip ? ` · ${opp.dip}` : ""}`,
-            `Winst ${partText(opp.parts.profit)} (25%) · op koopprijs ${opp.net > 0 ? "+" : ""}${priceFormat.format(opp.net)} (${opp.roi.toFixed(1)}%) · nu kopen ${opp.netNow > 0 ? "+" : ""}${priceFormat.format(opp.netNow)}`,
-            `Liquiditeit ${partText(opp.parts.liquidity)} (20%)${calc.futbin ? ` · ${calc.futbin.sales24} verk./24u · ${Math.round(calc.futbin.sellThrough * 100)}% verkocht` : ""}`,
-            `Trend & stabiliteit ${partText(opp.parts.trend)} (20%) · 24u ${pct(opp.change24)}${opp.change72 != null ? ` · 72u ${pct(opp.change72)}` : ""}${opp.volatility != null ? ` · spreiding ${Math.round(opp.volatility * 100)}%` : ""}`,
-            `Betrouwbaarheid ${rel} (10%) · ${opp.hist ? `${opp.hist.samples} snapshots, ${formatSpan(opp.hist.spanMs)}` : "geen historie"} · ${calc.futbin ? `${calc.futbin.salesInBase} FUTBIN-verkopen` : "geen FUTBIN-verkopen"}`,
-            opp.missing.length ? `Ontbreekt: ${opp.missing.join(", ")}` : "",
-            opp.caps.length ? `Begrensd: ${opp.caps.join(", ")}` : "",
-            opp.warnings.length ? `⚠ ${opp.warnings.join(" · ")}` : ""
-          ].filter(Boolean).join("\n");
-        } else {
-          scoreCell.textContent = "–";
-          scoreCell.title = "Opportunity Score en historie alleen voor PC";
+          const badge = el("span", `pt-opp pt-opp-${opp.level}`, String(opp.score));
+          badge.title = ft("badgeTitle", { score: opp.score, level: ft(`lvl_${opp.level}`) });
+          scoreCell.appendChild(badge);
         }
-        sig.title = label + (calc.status !== "skip" ? ` · nu ${calc.gap >= 0 ? "+" : ""}${(calc.gap * 100).toFixed(1)}% t.o.v. koopprijs` : "");
+
         const nameCell = el("td", "pt-col-name");
-        const futbin = el("a", "pt-flip-futbin", "FUTBIN ↗");
-        futbin.href = `https://www.futbin.com/players?search=${encodeURIComponent(item.name)}`;
-        futbin.target = "_blank";
-        futbin.rel = "noopener";
-        futbin.title = `Zoek ${item.name} op FUTBIN: kies de ${item.rarity}${item.holo ? " holo" : ""}-versie en kijk bij Sales wat er echt verkocht is (zet FUTBIN op ${getFlip().platform === "pc" ? "PC" : "console"})`;
-        const sub = el("div", "pt-muted pt-small", `${item.rarity}${item.holo ? " · ✨ Holo" : ""} · `);
-        sub.appendChild(futbin);
-        nameCell.append(el("div", "pt-cheapest-main", item.name), sub);
-        // Real sales from FUTBIN (or a button to check this one card).
-        if (calc.futbin) {
-          const fb = calc.futbin;
-          const line = el("a", "pt-flip-fb",
-            `📊 FUTBIN: ${fb.sales24} verk./24u · ${Math.round(fb.sellThrough * 100)}% verkocht · P10 ${priceFormat.format(Math.round(fb.p10))} · med ${priceFormat.format(Math.round(fb.median))} · P90 ${priceFormat.format(Math.round(fb.p90))}` +
-            (fb.trend != null ? ` · ${fb.trend >= 0 ? "+" : ""}${(fb.trend * 100).toFixed(1)}% vs dag ervoor` : ""));
-          line.href = `https://www.futbin.com${fb.path}?platform=${futbinPlatform(getFlip().platform)}`;
-          line.target = "_blank";
-          line.rel = "noopener";
-          line.title = `Echte verkopen (${fb.window}), gecheckt om ${formatTime(fb.fetchedAt)}. Klik voor de FUTBIN-salespagina.`;
-          nameCell.appendChild(line);
-        } else if (!futbinState.busy) {
-          const check = el("button", "pt-flip-fb-check", "📊 check verkopen");
-          check.type = "button";
-          check.title = "Echte verkopen van deze kaart op FUTBIN ophalen";
-          check.addEventListener("click", () => futbinCheckCards([item], getFlip().platform));
-          nameCell.appendChild(check);
+        nameCell.appendChild(el("div", "pt-cheapest-main", item.name));
+        const sub = el("div", "pt-flip-sub", `${item.rating} · ${item.rarity}${item.holo ? " · ✨" : ""}`);
+        if (calc.futbin) sub.appendChild(el("span", "pt-flip-fb-mark", ` · ${ft("checked")}`));
+        nameCell.appendChild(sub);
+        // One short warning, only where it matters (cards you could buy now); the rest is in the details.
+        if (calc.warnings.length && ["buy", "near", "risk"].includes(calc.status)) {
+          const warn = el("div", "pt-flip-warn", `⚠ ${calc.warnings[0]}${calc.warnings.length > 1 ? `  +${calc.warnings.length - 1}` : ""}`);
+          warn.title = calc.warnings.join("\n");
+          nameCell.appendChild(warn);
         }
-        // Warnings as visible text (no hover on the phone).
-        if (calc.warnings.length) nameCell.appendChild(el("div", "pt-flip-warn", `⚠ ${calc.warnings.join(" · ")}`));
-        const k = value => el("td", "pt-col-num", priceFormat.format(value));
-        const nowCell = k(item.now);
-        nowCell.classList.add("pt-flip-now");
-        const profitCell = el("td", "pt-col-num " + (calc.profit > 0 ? "pt-flip-plus" : "pt-flip-minus"),
-          `${calc.profit > 0 ? "+" : ""}${priceFormat.format(calc.profit)}`);
+
+        const num = (text, className) => el("td", "pt-col-num" + (className ? ` ${className}` : ""), text);
+        const profitCell = num(signed(calc.profit), calc.profit > 0 ? "pt-flip-plus" : "pt-flip-minus");
         profitCell.appendChild(el("div", "pt-flip-pct", `${calc.pct.toFixed(1)}%`));
-        profitCell.title = `Koop ${priceFormat.format(calc.buy)} → verkoop ${priceFormat.format(calc.sell)} − 5% belasting`;
-        const spark = el("td", "pt-col-spark");
+        profitCell.title = ft("profitTitle", { buy: money(calc.buy), sell: money(calc.sell) });
+
+        const trendCell = el("td", "pt-col-spark");
         const hist = opp && opp.hist;
+        const change = opp ? opp.change24 : item.change / 100;
         if (hist && hist.points.length >= 2) {
-          spark.appendChild(flipHistoryChart(hist, item.now, opp.direction));
-          const arrow = opp.direction === "neg" ? "↘" : opp.direction === "pos" ? "↗" : "→";
-          spark.appendChild(el("div", "pt-flip-hist", `${arrow} ${formatSpan(hist.spanMs)} · med ${flipK(hist.median)} · low ${flipK(hist.low)}`));
-          spark.title = `PC-historie (fodder.gg, elke 15 min): ${hist.samples} snapshots over ${formatSpan(hist.spanMs)}\nmediaan ${priceFormat.format(Math.round(hist.median))} · laagste ${priceFormat.format(hist.low)} · hoogste ${priceFormat.format(hist.high)} · nu ${priceFormat.format(item.now)}\nStreepjes = mediaan, stippels = laagste, gele stip = nu`;
+          trendCell.appendChild(flipHistoryChart(hist, item.now, opp.direction));
+          trendCell.title = ft("trendHistTitle", { span: formatSpan(hist.spanMs), median: money(hist.median), low: money(hist.low) });
         } else {
-          spark.appendChild(flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
-          if (getFlip().platform === "pc") spark.appendChild(el("div", "pt-flip-hist", hist ? "1 snapshot · 24u fodder" : "nog geen historie · 24u fodder"));
+          trendCell.appendChild(flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
+          trendCell.title = ft("trendTodayTitle");
         }
-        tr.append(tickCell, sig, scoreCell, el("td", "pt-col-ovr", String(item.rating)), nameCell, k(item.low), k(item.avg), k(item.high), nowCell,
-          el("td", "pt-col-num pt-flip-buy" + (calc.futbin ? " pt-flip-fbval" : ""), priceFormat.format(calc.buy)),
-          el("td", "pt-col-num" + (calc.futbin ? " pt-flip-fbval" : ""), priceFormat.format(calc.sell)), profitCell,
-          el("td", "pt-col-num " + (item.change <= -15 ? "pt-flip-minus pt-flip-bold" : item.change < 0 ? "pt-flip-minus" : "pt-flip-plus"),
-            `${item.change > 0 ? "+" : ""}${item.change.toFixed(1)}%`), spark);
+        trendCell.appendChild(el("div", "pt-flip-trend " + (change <= -0.05 ? "pt-flip-minus" : change >= 0.03 ? "pt-flip-plus" : "pt-muted"),
+          `${change <= -0.05 ? "↘" : change >= 0.03 ? "↗" : "→"} ${pctOf(change)} ${ft("h24")}`));
+
+        tr.append(tickCell, scoreCell, nameCell, num(money(item.now), "pt-flip-now"),
+          num(money(calc.buy), "pt-flip-buy" + (calc.futbin ? " pt-flip-fbval" : "")),
+          num(money(calc.sell), calc.futbin ? "pt-flip-fbval" : ""), profitCell, trendCell, el("td", "pt-col-more", open ? "▾" : "▸"));
         tbody.appendChild(tr);
+        if (open) tbody.appendChild(detailRow(row));
       });
       updateCount();
     }
     function updateCount() {
       const count = selectedRows().length;
-      runButton.textContent = `🔄 Run maken (${count})`;
-      watchButton.textContent = `+ Spelers (${count})`;
+      runButton.textContent = ft("run", { n: count });
+      watchButton.textContent = ft("players", { n: count });
     }
 
     // Refresh when the tab opens and every 10 minutes while it is visible.
@@ -10259,45 +10578,70 @@ function priceWatchMain(SCRIPT_VERSION) {
 
 /* Flip sheet (fodder.gg) */
 .pt-watch-view .pt-flip-card { margin-top: 0; }
-.pt-watch-view .pt-flip-link { width: 300px; }
+.pt-watch-view .pt-flip-link { width: 320px; }
 .pt-watch-view .pt-flip-max { width: 90px; }
-.pt-watch-view a.pt-flip-futbin { color: #63b3ff; text-decoration: none; }
-.pt-watch-view a.pt-flip-futbin:hover { color: #fff; }
-.pt-watch-view a.pt-flip-fb { display: block; color: #63b3ff; font-size: 12px; text-decoration: none; white-space: normal; }
-.pt-watch-view a.pt-flip-fb:hover { color: #fff; }
-.pt-flip-fb-check { margin-top: 2px; padding: 1px 6px; font-size: 11px; cursor: pointer; background: #151d29; color: #9aa6b8; border: 1px solid #3a4a5e; border-radius: 5px; }
-.pt-flip-fb-check:hover { color: #fff; border-color: #63b3ff; }
-.pt-flip-fbval { color: #63b3ff !important; }
 .pt-flip-alert-on { border-color: #27d98b; color: #fff; background: #1d4f3a; }
-.pt-flip-pct { font-size: 12px; font-weight: 600; opacity: .8; }
+.pt-flip-panel { margin: 4px 0 10px; padding: 10px 12px; background: #121a25; border: 1px solid rgba(255, 255, 255, .07); border-radius: 8px; }
+.pt-flip-help { display: grid; gap: 6px; font-size: 13px; color: #c9d3e0; }
+.pt-flip-help-line { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }
+.pt-flip-help-line b { color: #fff; }
 .pt-flip-wrap { overflow-x: auto; }
-.pt-flip-table { min-width: 1080px; font-size: 14px; }
-.pt-flip-table td { height: auto; padding-top: 6px; padding-bottom: 6px; }
+.pt-flip-table { min-width: 820px; font-size: 14px; }
+.pt-flip-table td { height: auto; padding-top: 8px; padding-bottom: 8px; vertical-align: middle; }
 .pt-flip-table .pt-col-tick { width: 3%; }
-.pt-flip-table .pt-col-sig { width: 3%; text-align: center; }
-.pt-flip-table .pt-col-ovr { width: 4%; text-align: center; font-weight: 700; }
-.pt-flip-table .pt-col-name { width: 19%; }
-.pt-flip-table .pt-col-num { width: 6.5%; text-align: right; font-variant-numeric: tabular-nums; }
-.pt-flip-table .pt-col-spark { width: 11%; text-align: center; overflow: visible; }
-.pt-flip-table td.pt-col-num:nth-child(12) { width: 9%; }
-.pt-flip-table td.pt-col-num:nth-child(13) { width: 6%; }
-.pt-flip-table .pt-col-score { width: 6%; text-align: center; overflow: visible; white-space: normal; }
-.pt-opp { display: inline-block; min-width: 30px; padding: 2px 6px; border-radius: 6px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.pt-flip-table .pt-col-score { width: 9%; white-space: nowrap; overflow: visible; }
+.pt-flip-table .pt-col-name { width: 31%; }
+.pt-flip-table .pt-col-num { width: 10%; text-align: right; font-variant-numeric: tabular-nums; }
+.pt-flip-table .pt-col-spark { width: 14%; text-align: center; overflow: visible; }
+.pt-flip-table .pt-col-more { width: 3%; text-align: center; color: #9aa6b8; font-size: 16px; }
+.pt-flip-row:hover .pt-col-more { color: #fff; }
+.pt-flip-row { cursor: pointer; }
+.pt-flip-row:hover td { background: rgba(255, 255, 255, .03); }
+.pt-flip-open td { background: rgba(99, 179, 255, .06); border-bottom-color: transparent; }
+.pt-flip-dot { display: inline-block; width: 20px; font-size: 12px; }
+.pt-opp { display: inline-block; min-width: 30px; padding: 2px 6px; border-radius: 6px; font-weight: 800; text-align: center; font-variant-numeric: tabular-nums; }
 .pt-opp-high { color: #27d98b; background: rgba(39, 217, 139, .16); border: 1px solid rgba(39, 217, 139, .45); }
 .pt-opp-mid { color: #f4c95d; background: rgba(244, 201, 93, .10); border: 1px solid rgba(244, 201, 93, .30); }
 .pt-opp-low { color: #9aa6b8; background: rgba(154, 166, 184, .08); border: 1px solid rgba(154, 166, 184, .25); }
-.pt-opp-sub { font-size: 11px; color: #9aa6b8; white-space: nowrap; }
-.pt-opp-weak { color: #f4a35d; font-weight: 600; }
-.pt-flip-hist { font-size: 11px; line-height: 1.25; color: #9aa6b8; white-space: normal; }
+.pt-flip-sub { font-size: 12px; color: #8a96a8; margin-top: 1px; }
+.pt-flip-fb-mark { color: #63b3ff; }
+.pt-flip-warn { margin-top: 2px; color: #f4a35d; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.pt-flip-pct { font-size: 12px; font-weight: 600; opacity: .75; }
+.pt-flip-trend { font-size: 11px; margin-top: 1px; white-space: nowrap; }
 .pt-flip-now { color: #f4c95d; font-weight: 700; }
 .pt-flip-buy { color: #fff; font-weight: 700; }
+.pt-flip-fbval { color: #63b3ff !important; }
 .pt-flip-plus { color: #27d98b; font-weight: 700; }
 .pt-flip-minus { color: #ff8080; }
-.pt-flip-warn { color: #f4a35d; font-size: 12px; font-weight: 600; white-space: normal; }
-.pt-flip-bold { font-weight: 700; }
-.pt-flip-row-risk td { background: rgba(244, 163, 93, .06); }
-.pt-flip-row-buy td { background: rgba(39, 217, 139, .07); }
-.pt-flip-row-skip td { opacity: .55; }
+.pt-flip-row-buy td { background: rgba(39, 217, 139, .06); }
+.pt-flip-row-skip td, .pt-flip-row-wait td { color: #9aa6b8; }
+.pt-flip-row-skip td { opacity: .6; }
+.pt-flip-detail td { padding: 4px 8px 14px; background: rgba(99, 179, 255, .06); white-space: normal; overflow: visible; height: auto; }
+.pt-flip-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.pt-flip-box { padding: 10px 12px; background: #0f1621; border: 1px solid rgba(255, 255, 255, .07); border-radius: 8px; font-size: 13px; }
+.pt-flip-box-title { margin-bottom: 6px; font-weight: 700; color: #fff; }
+.pt-flip-box-warn { border-color: rgba(244, 163, 93, .35); }
+.pt-flip-kv { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 2px 0; }
+.pt-flip-kv-label { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pt-flip-kv-value { flex: 0 0 auto; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+.pt-flip-bar-line { display: grid; grid-template-columns: minmax(0, 1fr) 80px 26px; align-items: center; gap: 8px; padding: 2px 0; }
+.pt-flip-lang { min-width: 64px; }
+.pt-flip-bar { height: 6px; background: rgba(255, 255, 255, .08); border-radius: 3px; overflow: hidden; }
+.pt-flip-bar span { display: block; height: 100%; background: #63b3ff; border-radius: 3px; }
+.pt-flip-bar-value { text-align: right; font-variant-numeric: tabular-nums; color: #c9d3e0; }
+.pt-flip-note { margin-top: 6px; font-size: 12px; color: #9aa6b8; }
+.pt-flip-warn-line { padding: 2px 0; color: #f4a35d; }
+.pt-watch-view a.pt-flip-link-out { display: inline-block; margin-top: 6px; margin-right: 12px; color: #63b3ff; text-decoration: none; font-size: 12px; }
+.pt-watch-view a.pt-flip-link-out:hover { color: #fff; }
+.pt-flip-small-btn { margin-top: 6px; padding: 4px 10px; font-size: 12px; }
+@media (max-width: 700px) {
+  .pt-watch-view .pt-flip-link { width: 100%; }
+  .pt-flip-help-line { grid-template-columns: 1fr; gap: 0; }
+  .pt-flip-table { min-width: 560px; }
+  .pt-flip-table .pt-col-spark { display: none; }
+  .pt-flip-table .pt-col-name { width: 34%; }
+  .pt-flip-detail-grid { grid-template-columns: 1fr; position: sticky; left: 0; width: calc(100vw - 44px); max-width: calc(100vw - 44px); }
+}
 
 /* Fodder table */
 .pt-fodder-table .pt-col-rating   { width: 7%; text-align: center; font-size: 16px; }

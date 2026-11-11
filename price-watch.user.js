@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.58.1
+// @version      2.59.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6855,6 +6855,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     d_nowSrc: ["Nu komt uit", "Now comes from"],
     d_nowIndex: ["FUT.GG-prijsindex ({time})", "FUT.GG price index ({time})"],
     d_nowList: ["momentum-lijst", "momentum list"],
+    d_nowFodder: ["fodder.gg Nu", "fodder.gg now"],
+    d_nowDiff: ["index {pct}", "index {pct}"],
+    d_nowFodderOnly: ["fodder.gg (niet in de FUT.GG-index)", "fodder.gg (not in the FUT.GG index)"],
     mPricesAt: [" · prijzen {time}", " · prices {time}"],
     d_mNotChecked: ["Nog niet gecheckt. Pas met echte verkopen is er een koop- en verkoopprijs.", "Not checked yet. Only real sales give a buy and sell price."],
     d_m24: ["24 uur", "24 hours"],
@@ -7168,10 +7171,20 @@ function priceWatchMain(SCRIPT_VERSION) {
     openFilters(criteria, repositories.Item.getStaticDataByDefId(baseId));
   }
 
+  // "Now" of a fodder.gg card on PC: FUT.GG's price index (republished every few minutes, checked every
+  // minute; exact card id incl. holo) instead of fodder.gg's last hourly point. Everything else of the row
+  // (list, low/avg/high, hourly trend, sheet buy/sell) stays fodder.gg, and the stored 72 h history keeps
+  // fodder.gg's own "now" (recordFlipHistory reads the raw sheet). Not in the index / console: fodder.gg.
+  function fodderNow(card, platform) {
+    const live = platform === "pc" ? Number(futggPrices[String(card.id)]) : 0;
+    return live > 0 ? { ...card, now: live, nowSrc: "index", fodderNow: card.now } : { ...card, nowSrc: "fodder", fodderNow: card.now };
+  }
+
   // Rows for the current link/platform with your max price and min profit (shared by the table and the alert).
   function flipRows(data, state) {
     const cards = data ? data[state.platform] || [] : [];
     return cards
+      .map(item => fodderNow(item, state.platform))
       .map(item => ({ card: item, calc: flipCalc(item, state.platform) }))
       .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
       .map(row => (row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row));
@@ -8543,6 +8556,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (opp && opp.normal) pair(prices, ft("d_normalFb"), money(opp.normal), "pt-flip-fbval");
         if (item.url) prices.appendChild(externalLink(ft("d_futggLink"), `https://www.fut.gg${item.url}`));
       } else {
+      if (item.nowSrc === "index") {
+        const diff = item.fodderNow > 0 ? item.now / item.fodderNow - 1 : 0;
+        pair(prices, ft("d_nowSrc"), ft("d_nowIndex", { time: formatTime(futggPricesAt) }));
+        pair(prices, ft("d_nowFodder"), `${money(item.fodderNow)}${Math.abs(diff) > 0.05 ? ` (${ft("d_nowDiff", { pct: pctOf(diff) })})` : ""}`,
+          Math.abs(diff) > 0.05 ? "pt-flip-warn-text" : "");
+      } else if (getFlip().platform === "pc") {
+        pair(prices, ft("d_nowSrc"), ft("d_nowFodderOnly"));
+      }
       pair(prices, ft("d_low24"), money(item.low));
       pair(prices, ft("d_avg24"), money(item.avg));
       pair(prices, ft("d_high24"), money(item.high));
@@ -8665,6 +8686,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           ? ft("statusLoading")
           : data
             ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) })
+              + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
               + (flipError ? ft("statusError", { error: flipError }) : "")
             : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
       status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";

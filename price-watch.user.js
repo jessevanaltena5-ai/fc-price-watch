@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.53.0
+// @version      2.54.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6662,6 +6662,16 @@ function priceWatchMain(SCRIPT_VERSION) {
     runTitle: ["Maakt een run van de aangevinkte kaarten: per kaart het marktfilter met max. prijs = koopprijs. Zoeken en kopen doe je zelf.", "Makes a run of the ticked cards: a market filter per card with max price = buy price. You search and buy yourself."],
     players: ["+ Spelers ({n})", "+ Players ({n})"],
     bids: ["🔨 Check bids ({n})", "🔨 Check bids ({n})"],
+    sel_placeholder: ["☑ Aanvinken…", "☑ Tick…"],
+    sel_title: ["Vink in één keer een groep kaarten aan (van wat nu in de tabel staat). Daarna kun je losse vinkjes nog aanpassen.", "Tick a group of cards at once (of what is in the table now). You can still change single ticks afterwards."],
+    sel_headTitle: ["Alles aan / alles uit", "All on / all off"],
+    sel_default: ["Standaard (🟢/🟡)", "Default (🟢/🟡)"],
+    sel_deals: ["🟢/🟡/🟠", "🟢/🟡/🟠"],
+    sel_profit: ["Alles met winst (geen ⛔)", "Everything with profit (no ⛔)"],
+    sel_top10: ["Top 10 score", "Top 10 score"],
+    sel_top20: ["Top 20 score", "Top 20 score"],
+    sel_all: ["Alles", "Everything"],
+    sel_none: ["Niets", "Nothing"],
     bidsTitle: ["Loop de aangevinkte kaarten één voor één af om te bieden: per kaart het marktfilter met max. bod = je koopprijs. De balk staat bovenin met de max. bod, en in de zoekresultaten en Transfer Targets staat bij elke kaart hoeveel je nog mag bieden. Bieden doe je zelf.", "Go through the ticked cards one by one to bid: a market filter per card with max bid = your buy price. The bar sits on top with the max bid, and search results and Transfer Targets show per card how much you may still bid. You place the bids yourself."],
     bidRunStarted: ["Bied-run met {n} kaart(en) gestart · max. bod = koopprijs", "Bid run with {n} card(s) started · max bid = buy price"],
     run_bidTitle: ["🔨 {name} · max bod {max}", "🔨 {name} · max bid {max}"],
@@ -7871,7 +7881,16 @@ function priceWatchMain(SCRIPT_VERSION) {
     const langButton = button("", "pt-flip-lang");
     langButton.addEventListener("click", () => update(state => { state.lang = state.lang === "en" ? "nl" : "en"; }));
     const controls = el("div", "pt-stock-list-buttons");
-    controls.append(platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, runButton, bidButton, watchButton, settingsButton, helpButton, langButton);
+    // Tick many cards at once (instead of one by one): presets for the shown rows.
+    const SELECTIONS = ["default", "deals", "profit", "top10", "top20", "all", "none"];
+    const selectMenu = el("select", "pt-stock-select pt-mode-select pt-flip-select");
+    selectMenu.append(new Option("", ""), ...SELECTIONS.map(key => new Option("", key)));
+    selectMenu.addEventListener("change", () => {
+      const key = selectMenu.value;
+      selectMenu.value = "";
+      if (key) applySelection(key);
+    });
+    controls.append(platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, selectMenu, runButton, bidButton, watchButton, settingsButton, helpButton, langButton);
     toolbar.append(heading, controls);
     card.appendChild(toolbar);
 
@@ -7909,6 +7928,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const HEADERS = [["", "pt-col-tick"], ["h_score", "pt-col-score"], ["h_player", "pt-col-name"], ["h_now", "pt-col-num"], ["h_buy", "pt-col-num"],
       ["h_sell", "pt-col-num"], ["h_profit", "pt-col-num"], ["h_trend", "pt-col-spark"], ["", "pt-col-more"]];
     const headCells = HEADERS.map(([, cls]) => head.appendChild(el("th", cls)));
+    const headTick = el("input");
+    headTick.type = "checkbox";
+    headTick.addEventListener("change", () => applySelection(headTick.checked ? "all" : "none"));
+    headCells[0].appendChild(headTick);
     const thead = el("thead");
     thead.appendChild(head);
     const tbody = el("tbody");
@@ -7941,7 +7964,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       maxPrice.input.title = ft("maxPriceTitle");
       minPct.label.textContent = ft("minPct");
       minPct.input.title = ft("minPctTitle");
-      HEADERS.forEach(([key], i) => { headCells[i].textContent = key ? ft(key) : ""; });
+      HEADERS.forEach(([key], i) => { if (key) headCells[i].textContent = ft(key); });
+      headTick.title = ft("sel_headTitle");
+      selectMenu.title = ft("sel_title");
+      selectMenu.options[0].textContent = ft("sel_placeholder");
+      SELECTIONS.forEach((key, i) => { selectMenu.options[i + 1].textContent = ft(`sel_${key}`); });
       help.textContent = "";
       ["score", "dot", "prices", "trend", "futbin", "details", "self"].forEach(key => {
         const line = el("div", "pt-flip-help-line");
@@ -7955,6 +7982,28 @@ function priceWatchMain(SCRIPT_VERSION) {
     const ticked = new Map(); // id -> bool, your own clicks
     const isTicked = row => (ticked.has(row.card.id) ? ticked.get(row.card.id) : row.calc.status === "buy" || row.calc.status === "near");
     const expanded = new Set(); // ids with their details open
+    function applySelection(key) {
+      if (key === "default") {
+        shown.forEach(row => ticked.delete(row.card.id)); // back to following the signal (🟢/🟡)
+      } else {
+        let pick;
+        if (key === "top10" || key === "top20") {
+          const best = shown.filter(row => row.calc.status !== "skip")
+            .sort((a, b) => (b.opp ? b.opp.score : -1) - (a.opp ? a.opp.score : -1) || b.calc.pct - a.calc.pct)
+            .slice(0, key === "top10" ? 10 : 20);
+          pick = row => best.includes(row);
+        } else {
+          pick = {
+            deals: row => ["buy", "near", "risk"].includes(row.calc.status),
+            profit: row => row.calc.status !== "skip",
+            all: () => true,
+            none: () => false
+          }[key];
+        }
+        shown.forEach(row => ticked.set(row.card.id, pick(row)));
+      }
+      render();
+    }
     let shown = [];
 
     const update = mutate => {
@@ -8287,6 +8336,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     function updateCount() {
       const count = selectedRows().length;
+      headTick.checked = shown.length > 0 && count === shown.length;
+      headTick.indeterminate = count > 0 && count < shown.length;
       runButton.textContent = ft("run", { n: count });
       bidButton.textContent = ft("bids", { n: count });
       watchButton.textContent = ft("players", { n: count });
@@ -10910,6 +10961,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-kv-value { flex: 0 0 auto; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .pt-flip-bar-line { display: grid; grid-template-columns: minmax(0, 1fr) 80px 26px; align-items: center; gap: 8px; padding: 2px 0; }
 .pt-flip-lang { min-width: 64px; }
+.pt-watch-view .pt-flip-select { width: auto; min-width: 120px; }
 .pt-flip-name-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .pt-flip-name-line .pt-cheapest-main { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pt-flip-search { flex: 0 0 auto; }

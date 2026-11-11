@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.57.0
+// @version      2.58.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6671,7 +6671,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     alertOffToast: ["🔕 Melding uit", "🔕 Alerts off"],
     futbinButton: ["📊 Check echte verkopen", "📊 Check real sales"],
     futbinBusy: ["📊 {done}/{total}… stop", "📊 {done}/{total}… stop"],
-    futbinTitle: ["Zoekt voor de 🟢/🟡/🟠-kaarten op FUTBIN op waarvoor ze echt verkocht zijn. Pas daarna kan een kaart 70+ scoren. Eén kaart per paar seconden, max 30 per klik, 45 min onthouden. Nog eens klikken = stoppen.", "Looks up on FUTBIN what the 🟢/🟡/🟠 cards really sold for. Only then can a card score 70+. One card every few seconds, max 30 per click, remembered for 45 min. Click again = stop."],
+    futbinTitle: ["Zoekt voor de 🟢/🟡/🟠-kaarten op FUTBIN op waarvoor ze echt verkocht zijn. Pas daarna kan een kaart 70+ scoren. Eén kaart per paar seconden, max 30 per klik, 3 uur bewaard (na 45 min opnieuw als er ruimte is). Nog eens klikken = stoppen.", "Looks up on FUTBIN what the 🟢/🟡/🟠 cards really sold for. Only then can a card score 70+. One card every few seconds, max 30 per click, remembered for 45 min. Click again = stop."],
     noCardsToCheck: ["Geen 🟢/🟡/🟠-kaarten om te checken.", "No 🟢/🟡/🟠 cards to check."],
     run: ["🔄 Run maken ({n})", "🔄 Start run ({n})"],
     runTitle: ["Maakt een run van de aangevinkte kaarten: per kaart het marktfilter met max. prijs = koopprijs. Zoeken en kopen doe je zelf.", "Makes a run of the ticked cards: a market filter per card with max price = buy price. You search and buy yourself."],
@@ -6831,7 +6831,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     d_noData: ["?", "?"],
     d_oldCheck: ["Oudere check zonder 72-uursdata: check opnieuw.", "Older check without 72-hour data: check again."],
     // FUTBIN checks and alerts
-    fbAllFresh: ["FUTBIN: alles is al gecheckt (minder dan 45 min geleden)", "FUTBIN: everything was already checked (less than 45 min ago)"],
+    fbAllFresh: ["FUTBIN: alles is al gecheckt (minder dan 45 min geleden). Wil je toch opnieuw: vink aan en klik 🔁 Recheck.", "FUTBIN: everything was already checked (less than 45 min ago). To check again anyway: tick and click 🔁 Recheck."],
+    recheck: ["🔁 Recheck ({n})", "🔁 Recheck ({n})"],
+    recheckTitle: ["Check de aangevinkte kaarten opnieuw op FUTBIN, ook als ze net gecheckt zijn (max 30 per klik, één per paar seconden).", "Check the ticked cards on FUTBIN again, also when they were just checked (max 30 per click, one every few seconds)."],
+    d_recheckButton: ["🔁 Opnieuw checken", "🔁 Check again"],
+    d_recheckTitle: ["Haal de echte verkopen van deze kaart nu opnieuw op bij FUTBIN.", "Fetch this card's real sales from FUTBIN again now."],
+    d_staleCheck: ["Check is ouder dan 45 min: wordt nog gebruikt (tot 3 uur) en opnieuw gecheckt zodra er ruimte is.", "Check is older than 45 min: still used (up to 3 hours) and checked again when there is room."],
+    d_checkedAgo: ["{time} ({min} min geleden)", "{time} ({min} min ago)"],
     fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
     fbDone: ["FUTBIN: {n} kaart(en) gecheckt", "FUTBIN: {n} card(s) checked"],
     srcFodder: ["Bron: fodder.gg", "Source: fodder.gg"],
@@ -7690,7 +7696,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Only on your click (or a new 🟢 with 🔔 on): one card at a time, 2.5–4 s apart, cached.
   const FUTBIN_IDS_KEY = "pt_futbin_ids_v1"; // { eaId: "/27/player/23024/andrei-ratiu" }
   const FUTBIN_SALES_KEY = "pt_futbin_sales_v1"; // { "eaId|pc": stats }
-  const FUTBIN_FRESH_MS = 45 * 60 * 1000;
+  // A check is used for 3 hours (its 24-72 h sales hardly move in that time; "now" comes fresh from the
+  // sheet/FUT.GG anyway) and counts as "to refresh" after 45 min: the auto rounds take never-checked
+  // cards first, then the oldest checks.
+  const FUTBIN_FRESH_MS = 3 * 60 * 60 * 1000;
+  const FUTBIN_REFRESH_MS = 45 * 60 * 1000;
   const FUTBIN_BATCH_MAX = 30;
   const futbinState = { busy: false, done: 0, total: 0, error: "", stop: false };
 
@@ -7718,7 +7728,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const FUTBIN_STATS_VERSION = 2;
   function futbinNeedsCheck(card, platform) {
     const entry = futbinSalesFor(card, platform);
-    return !entry || entry.v !== FUTBIN_STATS_VERSION;
+    return !entry || entry.v !== FUTBIN_STATS_VERSION || Date.now() - entry.fetchedAt >= FUTBIN_REFRESH_MS;
   }
 
   function futbinHtml(url) {
@@ -7949,12 +7959,14 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // Check cards one by one (cached ones skipped); stops on the first FUTBIN error (blocked/rate limit).
-  // options: { max } = how many at most (default 30), { calm } = longer pauses (5-8 s) for big auto rounds.
+  // options: { max } = how many at most (default 30), { calm } = longer pauses (5-8 s) for big auto rounds,
+  // { force } = check again even when the stored check is still recent.
   // Returns { done, error } of this round only (an old error from an earlier round never counts again).
   async function futbinCheckCards(cards, platform, quiet, options = {}) {
     if (futbinState.busy) return { done: 0, error: "", busy: true };
     if (!quiet) futbinAutoPause = 0; // checking by hand = you want FUTBIN now: the auto pause ends too
-    const todo = cards.filter(card => futbinNeedsCheck(card, platform)).slice(0, options.max || FUTBIN_BATCH_MAX);
+    // options.force: 🔁 recheck, also cards that were checked a moment ago.
+    const todo = (options.force ? cards : cards.filter(card => futbinNeedsCheck(card, platform))).slice(0, options.max || FUTBIN_BATCH_MAX);
     if (!todo.length) {
       if (!quiet) showToast(ft("fbAllFresh"), true);
       return { done: 0, error: "" };
@@ -8007,7 +8019,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       // FUT.GG momentum: the biggest 24h dips (within your max price) - FUTBIN then says if it's a real deal.
       cards = momentumRows(state).filter(row => row.card.m24 != null && row.card.m24 < 0 && row.calc.status !== "skip"
           && futbinNeedsCheck(row.card, state.platform))
-        .sort((a, b) => MOMENTUM_AUTO_ORDER[a.calc.move || "none"] - MOMENTUM_AUTO_ORDER[b.calc.move || "none"] || a.card.m24 - b.card.m24)
+        .sort((a, b) => MOMENTUM_AUTO_ORDER[a.calc.move || "none"] - MOMENTUM_AUTO_ORDER[b.calc.move || "none"]
+          || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0) // never checked first, then the old checks
+          || a.card.m24 - b.card.m24)
         .slice(0, MOMENTUM_AUTO_TOP).map(row => row.card);
     } else {
       if (!flipData || flipData.token !== state.token) return;
@@ -8213,6 +8227,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!cards.length) return showToast(ft("noCardsToCheck"), false);
       futbinCheckCards(cards, state.platform);
     });
+    // 🔁 Recheck: the ticked cards again on FUTBIN, also when their check is recent (max 30 per click).
+    const recheckButton = button("");
+    recheckButton.addEventListener("click", () => {
+      if (futbinState.busy) { futbinState.stop = true; return; }
+      const cards = shown.filter(isTicked).map(row => row.card);
+      if (!cards.length) return showToast(ft("tickFirst"), false);
+      futbinCheckCards(cards, getFlip().platform, false, { force: true });
+    });
     const runButton = button("", "pt-cycle-btn");
     const bidButton = button("", "pt-cycle-btn");
     const watchButton = button("");
@@ -8230,7 +8252,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       selectMenu.value = "";
       if (key) applySelection(key);
     });
-    controls.append(sourceSelect, platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, selectMenu, runButton, bidButton, watchButton, settingsButton, helpButton, langButton);
+    controls.append(sourceSelect, platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, recheckButton, selectMenu, runButton, bidButton, watchButton, settingsButton, helpButton, langButton);
     toolbar.append(heading, controls);
     card.appendChild(toolbar);
 
@@ -8302,6 +8324,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       dealsText.textContent = ft("onlyDeals");
       refresh.title = ft("refreshTitle");
       futbinButton.title = ft("futbinTitle");
+      recheckButton.title = ft("recheckTitle");
       runButton.title = ft("runTitle");
       bidButton.title = ft("bidsTitle");
       watchButton.title = ft("playersTitle");
@@ -8547,14 +8570,15 @@ function priceWatchMain(SCRIPT_VERSION) {
           pair(sales, ft("d_p90"), money(fb.p90));
           if (fb.trend != null) pair(sales, ft("d_vsYesterday"), pctOf(fb.trend), fb.trend < 0 ? "pt-flip-minus" : "pt-flip-plus");
         }
-        if (futbinNeedsCheck(item, getFlip().platform) && !futbinState.busy) {
-          sales.appendChild(el("div", "pt-flip-note", ft("d_oldCheck")));
-          const again = button(ft("d_checkButton"), "pt-flip-small-btn");
-          again.title = ft("d_checkTitle");
-          again.addEventListener("click", () => futbinCheckCards([item], getFlip().platform));
+        const stale = futbinNeedsCheck(item, getFlip().platform);
+        if (stale) sales.appendChild(el("div", "pt-flip-note", ft(fb.v !== FUTBIN_STATS_VERSION ? "d_oldCheck" : "d_staleCheck")));
+        pair(sales, ft("d_checkedAt"), ft("d_checkedAgo", { time: formatTime(fb.fetchedAt), min: Math.round((Date.now() - fb.fetchedAt) / 60000) }), stale ? "pt-flip-warn-text" : "");
+        if (!futbinState.busy) {
+          const again = button(ft("d_recheckButton"), "pt-flip-small-btn");
+          again.title = ft("d_recheckTitle");
+          again.addEventListener("click", () => futbinCheckCards([item], getFlip().platform, false, { force: true }));
           sales.appendChild(again);
         }
-        pair(sales, ft("d_checkedAt"), formatTime(fb.fetchedAt));
         sales.appendChild(externalLink(ft("d_salesLink"), `https://www.futbin.com${fb.path}?platform=${futbinPlatform(getFlip().platform)}`));
       } else {
         sales.appendChild(el("div", "pt-flip-note", ft(item.src === "futgg" ? "d_mNotChecked" : "d_notChecked")));
@@ -8731,6 +8755,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       headTick.checked = shown.length > 0 && count === shown.length;
       headTick.indeterminate = count > 0 && count < shown.length;
       runButton.textContent = ft("run", { n: count });
+      const tickedAll = shown.filter(isTicked).length;
+      recheckButton.textContent = ft("recheck", { n: Math.min(tickedAll, FUTBIN_BATCH_MAX) });
+
       bidButton.textContent = ft("bids", { n: count });
       watchButton.textContent = ft("players", { n: count });
     }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.43.0
+// @version      2.44.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6566,7 +6566,12 @@ function priceWatchMain(SCRIPT_VERSION) {
   function getFlip() {
     let state = null;
     try { state = JSON.parse(localStorage.getItem(FLIP_KEY) || "null"); } catch (_) { /* default */ }
-    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 2, onlyDeals: false, alert: false }, state || {});
+    // Min profit default 5% (sheet: tiny profit at low → high means aim lower). Old saved default 2 → 5 once.
+    if (state && !state.minPct5) {
+      if (state.minPct === 2) state.minPct = 5;
+      state.minPct5 = true;
+    }
+    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false }, state || {});
   }
   function saveFlip(state) {
     try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
@@ -6695,8 +6700,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     const atBottom = !crashed && card.change <= -8 && card.now <= card.low * 1.01;
     if (atBottom) warnings.unshift(`op de dagbodem na ${card.change.toFixed(0)}% daling`);
     if (falling) warnings.push("dalende trend");
-    // Thin data or a crazy high (sheet: skip it), a falling price or a crash: never a plain green signal.
-    const risky = sparse || highOdd || falling || crashed || atBottom;
+    // Sheet: "low fluctuation within the last 12 hrs". A card swinging > 20% around its middle (one-off
+    // sales already left out) is restless: the low may be a dip you can't sell out of.
+    const coreMin = core.length ? Math.min(...core) : mid;
+    const restless = core.length >= 6 && (coreMax - coreMin) / mid > 0.2;
+    if (restless) warnings.push(`onrustig: 12u tussen ${priceFormat.format(coreMin)} en ${priceFormat.format(coreMax)}`);
+    // Thin data or a crazy high (sheet: skip it), a falling or restless price or a crash: never plain green.
+    const risky = sparse || highOdd || falling || crashed || atBottom || restless;
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, sell, profit, pct, gap, warnings, status, risky };
@@ -6880,7 +6890,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     maxPrice.input.addEventListener("change", () => update(state => { state.maxPrice = parsePrice(maxPrice.input.value) || 0; }));
     minPct.input.addEventListener("change", () => update(state => {
       const value = Number(String(minPct.input.value).replace(",", "."));
-      state.minPct = Number.isFinite(value) ? value : 2;
+      state.minPct = Number.isFinite(value) ? value : 5;
     }));
     onlyDeals.addEventListener("change", () => update(state => { state.onlyDeals = onlyDeals.checked; }));
     refresh.addEventListener("click", () => loadFlipSheet(true));
@@ -6960,7 +6970,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         const sig = el("td", "pt-col-sig", icon);
         sig.title = label + (calc.status !== "skip" ? ` · nu ${calc.gap >= 0 ? "+" : ""}${(calc.gap * 100).toFixed(1)}% t.o.v. koopprijs` : "");
         const nameCell = el("td", "pt-col-name");
-        nameCell.append(el("div", "pt-cheapest-main", item.name), el("div", "pt-muted pt-small", `${item.rarity}${item.holo ? " · ✨ Holo" : ""}`));
+        const futbin = el("a", "pt-flip-futbin", "FUTBIN ↗");
+        futbin.href = `https://www.futbin.com/players?search=${encodeURIComponent(item.name)}`;
+        futbin.target = "_blank";
+        futbin.rel = "noopener";
+        futbin.title = `Zoek ${item.name} op FUTBIN: kies de ${item.rarity}${item.holo ? " holo" : ""}-versie en kijk bij Sales wat er echt verkocht is (zet FUTBIN op ${getFlip().platform === "pc" ? "PC" : "console"})`;
+        const sub = el("div", "pt-muted pt-small", `${item.rarity}${item.holo ? " · ✨ Holo" : ""} · `);
+        sub.appendChild(futbin);
+        nameCell.append(el("div", "pt-cheapest-main", item.name), sub);
         // Warnings as visible text (no hover on the phone).
         if (calc.warnings.length) nameCell.appendChild(el("div", "pt-flip-warn", `⚠ ${calc.warnings.join(" · ")}`));
         const k = value => el("td", "pt-col-num", priceFormat.format(value));
@@ -9557,6 +9574,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-view .pt-flip-card { margin-top: 0; }
 .pt-watch-view .pt-flip-link { width: 300px; }
 .pt-watch-view .pt-flip-max { width: 90px; }
+.pt-watch-view a.pt-flip-futbin { color: #63b3ff; text-decoration: none; }
+.pt-watch-view a.pt-flip-futbin:hover { color: #fff; }
 .pt-flip-alert-on { border-color: #27d98b; color: #fff; background: #1d4f3a; }
 .pt-flip-pct { font-size: 12px; font-weight: 600; opacity: .8; }
 .pt-flip-wrap { overflow-x: auto; }

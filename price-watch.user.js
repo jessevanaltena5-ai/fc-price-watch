@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.56.2
+// @version      2.57.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6661,7 +6661,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     // toolbar and table
     sortScore: ["Beste kans eerst", "Best chance first"],
     sortSignal: ["Groen eerst", "Green first"],
-    sortTitle: ["Beste kans eerst = hoogste score bovenaan (alleen PC). Groen eerst = 🟢 → ⛔, dan winst %.", "Best chance first = highest score on top (PC only). Green first = 🟢 → ⛔, then profit %."],
+    sortTitle: ["Beste kans eerst = hoogste score bovenaan (fodder.gg: alleen PC; FUT.GG: elke kaart met FUTBIN-check, daarna de grootste dips). Groen eerst = 🟢 → ⛔.", "Best chance first = highest score on top (fodder.gg: PC only; FUT.GG: every card with a FUTBIN check, then the biggest dips). Green first = 🟢 → ⛔."],
     onlyDeals: ["Alleen 🟢/🟡", "Only 🟢/🟡"],
     refreshTitle: ["Nu ophalen bij fodder.gg (gaat ook vanzelf elke 10 min)", "Fetch fodder.gg now (also happens every 10 min)"],
     alertTitle: ["Pling + melding (en push naar je telefoon) als een kaart nieuw op 🟢 komt. Blijft elke 10 min verversen zolang de web-app open is. Telefoon instellen: 📲 op de Spelers-tab.", "Chime + message (and a push to your phone) when a card turns 🟢. Keeps refreshing every 10 min while the web app is open. Phone setup: 📲 on the Players tab."],
@@ -6803,6 +6803,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     d_used: ["Gebruikt: {list}", "Used: {list}"],
     src_history: ["fodder.gg-historie {span}", "fodder.gg history {span}"],
     src_today: ["fodder.gg vandaag ({hours}u)", "fodder.gg today ({hours}h)"],
+    d_normalFb: ["Normaal (FUTBIN 72u)", "Normal (FUTBIN 72h)"],
+    src_futgg: ["FUT.GG momentum (24u {m24}, 6u {m6})", "FUT.GG momentum (24h {m24}, 6h {m6})"],
+    pos_turning: ["Draait: na de dip loopt de prijs de laatste 6 uur niet meer terug", "Turning: after the dip the price has stopped falling over the last 6 hours"],
     src_noFodder: ["geen fodder.gg-historie", "no fodder.gg history"],
     src_h72: ["FUTBIN-verkopen {hours}u ({sales}×) + {days} dagprijzen", "FUTBIN sales {hours}h ({sales}×) + {days} daily prices"],
     src_basic: ["FUTBIN-verkopen {window}", "FUTBIN sales {window}"],
@@ -6855,7 +6858,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     mEmptyFetch: ["FUT.GG gaf geen kaarten terug", "FUT.GG returned no cards"],
     mTrendTitle: ["Bovenste regel = 6 uur: rood = zakt nog (≤ −2%), groen = draait (24 uur ≤ −3% en 6 uur ≥ 0), het koopmoment. Onderste regel = 24 uur.", "Top line = 6 hours: red = still falling (≤ −2%), green = turning (24 h ≤ −3% and 6 h ≥ 0), the moment to buy. Bottom line = 24 hours."],
     help_momentum: ["FUT.GG momentum", "FUT.GG momentum"],
-    help_momentumText: ["Kies bovenaan de bron. FUT.GG momentum toont de special cards met de grootste daling in 24 uur (t.o.v. hetzelfde uur gisteren, dus echte dips en niet het nachtdal). 6 uur zegt of hij nog zakt (⏬) of draait (↩). Pas na de FUTBIN-check is er een koop- en verkoopprijs; elke ronde worden er 40 automatisch gecheckt (eerst ↩ draait, ⏬ zakt nog als laatste).", "Choose the source at the top. FUT.GG momentum shows the special cards with the biggest drop in 24 hours (vs the same hour yesterday, so real dips, not the night low). 6 hours tells whether it is still falling (⏬) or turning (↩). Only after the FUTBIN check is there a buy and sell price; each round 40 are checked automatically (↩ turning first, ⏬ still falling last)."],
+    help_momentumText: ["Kies bovenaan de bron. Na de FUTBIN-check krijgt een kaart een score uit de echte verkopen van 72 uur (normaal niveau, winst, verkoopbaarheid, verloop) plus de dip en de timing van FUT.GG. FUT.GG momentum toont de special cards met de grootste daling in 24 uur (t.o.v. hetzelfde uur gisteren, dus echte dips en niet het nachtdal). 6 uur zegt of hij nog zakt (⏬) of draait (↩). Pas na de FUTBIN-check is er een koop- en verkoopprijs; elke ronde worden er 40 automatisch gecheckt (eerst ↩ draait, ⏬ zakt nog als laatste).", "Choose the source at the top. After the FUTBIN check a card gets a score from the real sales of 72 hours (normal level, profit, liquidity, course) plus FUT.GG's dip and timing. FUT.GG momentum shows the special cards with the biggest drop in 24 hours (vs the same hour yesterday, so real dips, not the night low). 6 hours tells whether it is still falling (⏬) or turning (↩). Only after the FUTBIN check is there a buy and sell price; each round 40 are checked automatically (↩ turning first, ⏬ still falling last)."],
     fbAutoPaused: ["FUTBIN auto-check gepauzeerd tot {time} (klik 📊 om nu toch te checken)", "FUTBIN auto check paused until {time} (click 📊 to check now anyway)"],
     fbPausedMark: [" · ⏸ auto tot {time}", " · ⏸ auto until {time}"],
     fbPausedTitle: ["De auto-check staat op pauze tot {time} na een FUTBIN-fout. Klik om nu toch te checken (dat beëindigt de pauze).", "The auto check is paused until {time} after a FUTBIN error. Click to check now anyway (that ends the pause)."],
@@ -7570,6 +7573,106 @@ function priceWatchMain(SCRIPT_VERSION) {
       .map(row => ({ ...row, opp: calculateOpportunityScore(row.card, row.calc, platform) }))
       .sort((a, b) => (b.opp ? b.opp.score : -1) - (a.opp ? a.opp.score : -1)
         || FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
+  }
+
+  // FUT.GG momentum cards: the same five parts, but "normal" comes from FUTBIN's real sales of the last
+  // 72 h (median per 24 h, P10..P90) instead of the fodder.gg history; FUT.GG adds the dip (24 h) and the
+  // timing (6 h). Without a FUTBIN check there is no score (null = ❔). Works for PC and console.
+  function calculateMomentumScore(card, calc) {
+    const fb = calc.futbin;
+    if (!fb) return null;
+    const fh = fb.h72 || null;
+    const fbState = fh ? fh.state : null;
+    const now = card.now;
+    const missing = [];
+    const positives = [];
+    // A. Price position: now vs the real sale prices of the last 72 h.
+    const winMedians = fh ? fh.windows.map(w => w.median).filter(value => value > 0) : [];
+    const normal = winMedians.length ? median(winMedians) : fb.median;
+    let price = null;
+    if (normal > 0) {
+      const sMedian = clamp100(50 - (now / normal - 1) * 500); // −10% → 100, +10% → 0
+      const sRange = fb.p90 > fb.p10 ? clamp100((1 - (now - fb.p10) / (fb.p90 - fb.p10)) * 100) : 50;
+      price = 0.65 * sMedian + 0.35 * sRange;
+      if (fbState === "downLong") price = Math.min(price, 40);
+      else if (fbState === "down") price = Math.min(price, 60);
+      else if ((fbState === "stable" || fbState === "recovering") && price >= 60) {
+        price = Math.min(100, price + 10);
+        positives.push("cheapStable");
+      }
+    } else missing.push("price");
+    // B. Profit (FUTBIN P10/P75, 5% tax), scored on what you pay now; selling at the median should pay too.
+    const net = Math.floor(calc.sell * (1 - EA_TAX)) - calc.buy;
+    const roi = calc.buy > 0 ? net / calc.buy * 100 : 0;
+    const buyNow = Math.max(calc.buy, now);
+    const netNow = Math.floor(calc.sell * (1 - EA_TAX)) - buyNow;
+    const roiNow = buyNow > 0 ? netNow / buyNow * 100 : 0;
+    let profit = 0;
+    if (net > 0 && netNow > 0 && buyNow > 0) {
+      const roiMedian = (fb.median * (1 - EA_TAX) - buyNow) / buyNow * 100;
+      profit = 0.5 * clamp100(roiNow / 12 * 100) + 0.2 * clamp100(netNow / 15000 * 100) + 0.3 * clamp100((roiMedian + 2) / 8 * 100);
+    }
+    // C. Liquidity: real sales per 24 h, sell-through, demand over 72 h.
+    let liquidity = clamp100(fb.sales24 / 15 * 100);
+    if (fb.listings24 >= 3) liquidity = 0.65 * liquidity + 0.35 * clamp100(fb.sellThrough / 0.4 * 100);
+    if (fh && fh.demand === "falling") liquidity *= 0.75;
+    else if (fh && fh.demand === "rising") liquidity = Math.min(100, liquidity * 1.1);
+    if (!fbState) missing.push("fbHistory");
+    // D. Trend & timing: real sale prices over 72 h (FUTBIN) + FUT.GG 6 h (still falling / turning).
+    const volatility = normal > 0 && fb.p90 > fb.p10 ? (fb.p90 - fb.p10) / normal : null;
+    let trend = 60;
+    if (fbState) trend += { downLong: -25, down: -12, stable: 5, recovering: 10, up: 5 }[fbState];
+    else if (fb.trend != null) trend += fb.trend <= -0.05 ? -15 : fb.trend >= 0.03 ? 5 : 0;
+    if (fh && fh.vs24 != null) trend += Math.max(-15, Math.min(10, fh.vs24 * 150));
+    if (calc.move === "turning") { trend += 15; positives.push("turning"); }
+    else if (calc.move === "falling") trend -= 20;
+    if (volatility != null) trend -= Math.max(0, Math.min(30, (volatility - 0.15) * 100));
+    if (fbState === "recovering") positives.push("salesRecovering");
+    trend = clamp100(trend);
+    // E. Reliability: how many real sales, how much of the 72 h they cover, daily data, age of the check.
+    let reliability = fh ? Math.min(40, fh.sales72 / 15 * 40) + Math.min(25, fh.coverH / 72 * 25) + (fh.dailyDays >= 14 ? 10 : 0)
+      : Math.min(40, fb.salesInBase / 10 * 40);
+    if (card.m6 != null) reliability += 10;
+    reliability += Date.now() - fb.fetchedAt < 30 * 60000 ? 15 : 5;
+    reliability = clamp100(reliability);
+
+    let score = OPP_WEIGHTS.price * (price == null ? OPP_MISSING : price) + OPP_WEIGHTS.profit * profit
+      + OPP_WEIGHTS.liquidity * liquidity + OPP_WEIGHTS.trend * trend + OPP_WEIGHTS.reliability * reliability;
+    const caps = [];
+    const cap = (max, why) => { if (score > max) { score = max; caps.push(why); } };
+    if (net <= 0) cap(25, "noProfit");
+    else if (calc.status === "skip") cap(25, "underMin");
+    else if (netNow <= 0) cap(35, "tooExpensive");
+    if (fbState === "downLong") cap(50, "fbDownLong");
+    if (calc.risky) cap(60, "risky");
+    if (reliability < 40) cap(55, "lowData");
+    const restless = volatility != null && volatility > 0.35;
+    if (restless) cap(65, "restless");
+    score = Math.round(score);
+    const warnings = [];
+    if (reliability < 40) warnings.push("lowData");
+    if (restless) warnings.push("restless");
+    return {
+      score,
+      level: score >= 70 ? "high" : score >= 45 ? "mid" : "low",
+      parts: { price, profit, liquidity, trend, reliability },
+      missing, caps, warnings, direction: calc.move === "falling" || fbState === "downLong" ? "neg" : calc.move === "turning" ? "pos" : "neutral",
+      dip: "",
+      sources: {
+        futgg: { m24: card.m24, m6: card.m6 },
+        futbin: fh ? { kind: "h72", hours: fh.coverH, sales: fh.sales72, days: fh.dailyDays } : { kind: "basic", window: fb.window }
+      },
+      positives, fbState, fh, normal,
+      net, roi, netNow, roiNow, volatility, change24: card.m24 / 100, change72: null, hist: null
+    };
+  }
+
+  // Momentum rows with their score: scored (checked) cards highest first, then the rest by biggest dip.
+  function rankMomentum(rows, bySignal) {
+    return rows
+      .map(row => ({ ...row, opp: calculateMomentumScore(row.card, row.calc) }))
+      .sort((a, b) => (bySignal ? FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] : 0)
+        || (b.opp ? b.opp.score : -1) - (a.opp ? a.opp.score : -1) || a.card.m24 - b.card.m24);
   }
 
   function formatSpan(ms) {
@@ -8383,7 +8486,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         opp.positives.forEach(code => box.appendChild(el("div", "pt-flip-note pt-flip-plus-note", `✓ ${ft(`pos_${code}`)}`)));
         const src = opp.sources;
         const used = [
-          !src.fodder ? ft("src_noFodder") : src.fodder.kind === "history" ? ft("src_history", { span: formatSpan(src.fodder.spanMs) }) : ft("src_today", { hours: src.fodder.hours }),
+          src.futgg ? ft("src_futgg", { m24: flipPct(src.futgg.m24, 1), m6: src.futgg.m6 == null ? "?" : flipPct(src.futgg.m6, 1) })
+            : !src.fodder ? ft("src_noFodder") : src.fodder.kind === "history" ? ft("src_history", { span: formatSpan(src.fodder.spanMs) }) : ft("src_today", { hours: src.fodder.hours }),
           !src.futbin ? ft("src_noFutbin") : src.futbin.kind === "h72"
             ? ft("src_h72", { hours: Math.round(src.futbin.hours), sales: src.futbin.sales, days: src.futbin.days })
             : ft("src_basic", { window: src.futbin.window })
@@ -8399,6 +8503,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         pair(prices, ft("d_m24"), flipPct(item.m24, 1), item.m24 < 0 ? "pt-flip-minus" : "pt-flip-plus");
         pair(prices, ft("d_m6"), item.m6 == null ? ft("d_noData") : flipPct(item.m6, 1), item.m6 < 0 ? "pt-flip-minus" : item.m6 > 0 ? "pt-flip-plus" : "");
         pair(prices, ft("d_move"), calc.move ? ft(`m_${calc.move}`) : ft("m_none"), calc.move === "falling" ? "pt-flip-minus" : calc.move === "turning" ? "pt-flip-plus" : "");
+        if (opp && opp.normal) pair(prices, ft("d_normalFb"), money(opp.normal), "pt-flip-fbval");
         if (item.url) prices.appendChild(externalLink(ft("d_futggLink"), `https://www.fut.gg${item.url}`));
       } else {
       pair(prices, ft("d_low24"), money(item.low));
@@ -8486,7 +8591,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const momentum = state.source === "futgg";
       sourceSelect.value = momentum ? "futgg" : "fodder";
       sortSelect.value = state.sort === "signal" ? "signal" : "score";
-      sortSelect.style.display = state.platform === "pc" && !momentum ? "" : "none";
+      sortSelect.style.display = state.platform === "pc" || momentum ? "" : "none";
       alertButton.style.display = momentum ? "none" : ""; // the alert stays on the fodder.gg list
       alertButton.textContent = state.alert ? "🔔" : "🔕";
       alertButton.title = `${ft(state.alert ? "alertOn" : "alertOff")}. ${ft("alertTitle")}`;
@@ -8503,7 +8608,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const data = flipData && flipData.token === state.token ? flipData : null;
       const deal = row => !state.onlyDeals || row.calc.status === "buy" || row.calc.status === "near";
       if (momentum) {
-        shown = momentumRows(state).filter(deal); // biggest 24 h dip first, no score (that needs fodder.gg history)
+        shown = rankMomentum(momentumRows(state).filter(deal), state.sort === "signal"); // score from FUTBIN 72 h
       } else {
         // Score per row (PC), highest first; "green first" (and console, no score) keeps the old order.
         shown = rankFlipOpportunities(flipRows(data, state).filter(deal), state.platform);

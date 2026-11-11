@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.54.1
+// @version      2.55.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6605,7 +6605,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (state.minPct === 2) state.minPct = 5;
       state.minPct5 = true;
     }
-    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "nl" }, state || {});
+    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "nl", autoFutbin: true }, state || {});
   }
   function saveFlip(state) {
     flipLangCache = null;
@@ -6831,6 +6831,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     fbAllFresh: ["FUTBIN: alles is al gecheckt (minder dan 45 min geleden)", "FUTBIN: everything was already checked (less than 45 min ago)"],
     fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
     fbDone: ["FUTBIN: {n} kaart(en) gecheckt", "FUTBIN: {n} card(s) checked"],
+    fbAutoDone: ["FUTBIN auto (top 20): {n} kaart(en) bijgewerkt", "FUTBIN auto (top 20): {n} card(s) updated"],
+    autoFutbin: ["📊 Top {n} auto checken", "📊 Auto-check top {n}"],
+    autoFutbinTitle: ["Na elke verversing van de sheet zoekt hij voor de beste {n} kaarten met winst (op score) vanzelf de echte FUTBIN-verkopen op. Alleen kaarten zonder check of met een check ouder dan 45 min; één per paar seconden. Werkt alleen op de pc met de web-app open.", "After every sheet refresh it looks up the real FUTBIN sales for the best {n} cards with profit (by score) by itself. Only cards without a check or with one older than 45 min; one every few seconds. Works only on the pc with the web app open."],
     fbMissing: [" · niet gevonden: {list}", " · not found: {list}"],
     hitLine: ["🟢 {name}: nu {now} · koop ≤ {buy} · verkoop {sell} (+{profit})", "🟢 {name}: now {now} · buy ≤ {buy} · sell {sell} (+{profit})"],
     hitSales: [" · FUTBIN {n} verkopen/24u", " · FUTBIN {n} sales/24h"],
@@ -6925,7 +6928,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         flipData = { ...parseFodderWatch(html), token: state.token, fetchedAt: Date.now() };
         try { localStorage.setItem(FLIP_DATA_KEY, JSON.stringify(flipData)); } catch (_) { /* memory only */ }
         recordFlipHistory(flipData);
-        checkFlipHits().catch(error => console.warn("Price Watch: flip-melding mislukt.", error));
+        checkFlipHits().catch(error => console.warn("Price Watch: flip-melding mislukt.", error))
+          .then(() => futbinAutoTop())
+          .catch(error => console.warn("Price Watch: FUTBIN auto-check mislukt.", error));
         return true;
       })
       .catch(error => {
@@ -7813,11 +7818,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // Check cards one by one (cached ones skipped); stops on the first FUTBIN error (blocked/rate limit).
-  async function futbinCheckCards(cards, platform) {
+  async function futbinCheckCards(cards, platform, quiet) {
     if (futbinState.busy) return;
     const todo = cards.filter(card => futbinNeedsCheck(card, platform)).slice(0, FUTBIN_BATCH_MAX);
     if (!todo.length) {
-      showToast(ft("fbAllFresh"), true);
+      if (!quiet) showToast(ft("fbAllFresh"), true);
       return;
     }
     Object.assign(futbinState, { busy: true, done: 0, total: todo.length, error: "", stop: false });
@@ -7839,7 +7844,25 @@ function priceWatchMain(SCRIPT_VERSION) {
       listeners.forEach(listener => listener());
     }
     if (futbinState.error) showToast(ft("fbStopped", { error: futbinState.error }), false);
-    else showToast(ft("fbDone", { n: futbinState.done }) + (missing.length ? ft("fbMissing", { list: missing.join(", ") }) : ""), !missing.length);
+    else showToast(ft(quiet ? "fbAutoDone" : "fbDone", { n: futbinState.done }) + (missing.length ? ft("fbMissing", { list: missing.join(", ") }) : ""), !missing.length);
+  }
+
+  // Auto: after every fetched sheet (pc with FUT Genie only) check the best FUTBIN_AUTO_TOP cards that pay
+  // (by score, the order you see) whose FUTBIN data is missing or older than 45 min. Same pace and limits
+  // as the 📊 button (one card per few seconds, cached 45 min), so a 15-min refresh mostly asks nothing.
+  const FUTBIN_AUTO_TOP = 20;
+  let futbinAutoPause = 0;
+  async function futbinAutoTop() {
+    const state = getFlip();
+    if (!state.autoFutbin || !genie() || futbinState.busy || !flipData || flipData.token !== state.token) return;
+    const cards = rankFlipOpportunities(flipRows(flipData, state), state.platform)
+      .filter(row => row.calc.status !== "skip")
+      .slice(0, FUTBIN_AUTO_TOP)
+      .map(row => row.card);
+    if (!cards.length || Date.now() < futbinAutoPause) return;
+    await futbinCheckCards(cards, state.platform, true);
+    // FUTBIN refused (blocked / rate limit): leave it alone for an hour instead of retrying every refresh.
+    if (futbinState.error) futbinAutoPause = Date.now() + 60 * 60 * 1000;
   }
 
   let flipOnShow = () => {};
@@ -7925,7 +7948,16 @@ function priceWatchMain(SCRIPT_VERSION) {
     maxPrice.input.classList.add("pt-flip-max");
     const linkLabel = el("span", "pt-muted");
     const settingsRow = el("div", "pt-stock-list-buttons");
-    settingsRow.append(linkLabel, link, maxPrice.box, minPct.box);
+    const autoBox = el("label", "pt-goal");
+    const autoCheck = el("input");
+    autoCheck.type = "checkbox";
+    const autoText = el("span", "pt-muted");
+    autoBox.append(autoCheck, autoText);
+    autoCheck.addEventListener("change", () => {
+      update(state => { state.autoFutbin = autoCheck.checked; });
+      if (autoCheck.checked) futbinAutoTop();
+    });
+    settingsRow.append(linkLabel, link, maxPrice.box, minPct.box, autoBox);
     settings.appendChild(settingsRow);
     card.appendChild(settings);
 
@@ -7978,6 +8010,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       maxPrice.label.textContent = ft("maxPrice");
       maxPrice.input.title = ft("maxPriceTitle");
       minPct.label.textContent = ft("minPct");
+      autoText.textContent = ft("autoFutbin", { n: FUTBIN_AUTO_TOP });
+      autoBox.title = ft("autoFutbinTitle", { n: FUTBIN_AUTO_TOP });
       minPct.input.title = ft("minPctTitle");
       HEADERS.forEach(([key], i) => { if (key) headCells[i].textContent = ft(key); });
       headTick.title = ft("sel_headTitle");
@@ -8238,6 +8272,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (document.activeElement !== maxPrice.input) maxPrice.input.value = state.maxPrice ? priceFormat.format(state.maxPrice) : "";
       if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
       onlyDeals.checked = !!state.onlyDeals;
+      autoCheck.checked = !!state.autoFutbin;
       sortSelect.value = state.sort === "signal" ? "signal" : "score";
       sortSelect.style.display = state.platform === "pc" ? "" : "none";
       alertButton.textContent = state.alert ? "🔔" : "🔕";

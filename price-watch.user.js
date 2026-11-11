@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.52.1
+// @version      2.53.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3661,8 +3661,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!lists.length) return null;
     const running = run && lists.find(list => list.id === run.listId);
     const ordered = running ? [running, ...lists.filter(list => list !== running)] : lists;
+    const ids = new Set([id, item.resourceId].filter(Boolean));
     for (const list of ordered) {
-      const player = list.players.find(entry => entry.definitionId === id);
+      const player = list.players.find(entry => ids.has(entry.definitionId));
       if (player) return { list, player, max: playerMax(list, player), sell: massBidSell(player) };
     }
     return null;
@@ -3922,7 +3923,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       line.append(
         el("div", "pt-mb-panel-main", `🎯 ${advice.text}${advice.left != null ? ` · nog ${formatLeft(advice.left)}` : ""}`),
         el("div", "pt-mb-panel-sub", (advice.kind === "over" ? "Niet bieden: boven je max bod. " : wait ? "Wacht tot de laatste 30 seconden. " : advice.hot ? "Laatste 30 seconden: nu bieden. " : "") +
-          `Verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.player.sell ? " (jouw BIN)" : " (FUT.GG)"} · max = BIN − ${massBidPct(info.list)}%` +
+          (info.list.massBid.flip
+            ? ft("mb_flipLine", { sell: info.sell ? priceFormat.format(info.sell) : "—" })
+            : `Verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.player.sell ? " (jouw BIN)" : " (FUT.GG)"} · max = BIN − ${massBidPct(info.list)}%`) +
           (advice.bid && info.sell ? ` · bij ${priceFormat.format(advice.bid)}: ${formatSigned(flipNet(info.sell, advice.bid))} na 5%` : ""))
       );
     };
@@ -5863,6 +5866,14 @@ function priceWatchMain(SCRIPT_VERSION) {
           (rule.max ? `winst vanaf verkoop ≥ ${priceFormat.format(roundUpToStep(rule.max / (1 - EA_TAX)))} · ` : "") +
           `${list.name} · ${run.index + 1}/${rules.length}`)
       );
+    } else if (rule.player && list.flipSheet) {
+      const bids = list.mode === "bid";
+      const sell = rule.player.flipSell || 0;
+      info.append(
+        el("div", "pt-run-title pt-run-big", ft(bids ? "run_bidTitle" : "run_binTitle", { name: rule.player.name, max: rule.max ? priceFormat.format(rule.max) : "—" })),
+        el("div", "pt-run-sub", ft("run_sub", { sell: sell ? priceFormat.format(sell) : "—", profit: sell && rule.max ? formatSigned(flipNet(sell, rule.max)) : "—", list: list.name, i: run.index + 1, n: rules.length }))
+      );
+      if (bids) info.appendChild(el("div", "pt-run-sub pt-mb-steps", ft("run_bidHint")));
     } else if (rule.player && list.massBid) {
       const sell = massBidSell(rule.player);
       const watch = watchListCount
@@ -5925,7 +5936,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     marketBox.querySelector(".pt-run-buy").style.display = rule.market ? "" : "none";
     const sellBox = runBar.querySelector(".pt-run-sell");
     const massBidRule = !!(rule.player && list.massBid);
-    sellBox.style.display = (rule.filter || massBidRule) && !runLoading ? "" : "none";
+    // Flip bid run: the max bid is your Flip buy price, so no "BIN markt" field (that would re-derive it).
+    sellBox.style.display = (rule.filter || (massBidRule && !list.flipSheet)) && !runLoading ? "" : "none";
     sellBox.lastChild.style.display = rule.sell || (massBidRule && rule.player.sell) ? "" : "none";
     sellBox.querySelector("input").placeholder = massBidRule ? "BIN markt" : "verkoop";
     sellBox.querySelector("input").title = massBidRule
@@ -6565,6 +6577,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   const FLIP_DATA_KEY = "pt_flip_data_v1"; // last fetched report { at, fetchedAt, console, pc }
   const FLIP_REFRESH_MS = 10 * 60 * 1000;
   const FLIP_RUN_ID = "flip-sheet";
+  // 🔨 Check bids: the ticked cards as a bid list (max bid = buy price). It is a mass-bid list
+  // (massBid.flip), so EA's search results, Transfer Targets and the bid panel show per card what you
+  // may bid at most ("✅ bied X (max Y)", "❌ > max", "🟢 jij hoogste", "🏆 gewonnen").
+  const FLIP_BID_ID = "flip-bids";
 
   function getFlip() {
     let state = null;
@@ -6645,6 +6661,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     run: ["🔄 Run maken ({n})", "🔄 Start run ({n})"],
     runTitle: ["Maakt een run van de aangevinkte kaarten: per kaart het marktfilter met max. prijs = koopprijs. Zoeken en kopen doe je zelf.", "Makes a run of the ticked cards: a market filter per card with max price = buy price. You search and buy yourself."],
     players: ["+ Spelers ({n})", "+ Players ({n})"],
+    bids: ["🔨 Check bids ({n})", "🔨 Check bids ({n})"],
+    bidsTitle: ["Loop de aangevinkte kaarten één voor één af om te bieden: per kaart het marktfilter met max. bod = je koopprijs. De balk staat bovenin met de max. bod, en in de zoekresultaten en Transfer Targets staat bij elke kaart hoeveel je nog mag bieden. Bieden doe je zelf.", "Go through the ticked cards one by one to bid: a market filter per card with max bid = your buy price. The bar sits on top with the max bid, and search results and Transfer Targets show per card how much you may still bid. You place the bids yourself."],
+    bidRunStarted: ["Bied-run met {n} kaart(en) gestart · max. bod = koopprijs", "Bid run with {n} card(s) started · max bid = buy price"],
+    run_bidTitle: ["🔨 {name} · max bod {max}", "🔨 {name} · max bid {max}"],
+    run_binTitle: ["{name} · max BIN {max}", "{name} · max BIN {max}"],
+    run_sub: ["verkoop {sell} → {profit} na 5% · {list} · {i}/{n}", "sell {sell} → {profit} after 5% · {list} · {i}/{n}"],
+    run_bidHint: ["Zoek → bied tot je max op veilingen die bijna aflopen. In Transfer Targets staat bij elke kaart je max.", "Search → bid up to your max on auctions ending soon. Transfer Targets shows your max on every card."],
+    mb_flipLine: ["Verkoop {sell} (Flip) · max = je Flip-koopprijs", "Sell {sell} (Flip) · max = your Flip buy price"],
     playersTitle: ["Zet de aangevinkte kaarten op de Spelers-tab, met de koopprijs als doel", "Puts the ticked cards on the Players tab, with the buy price as target"],
     settingsTitle: ["Instellingen: fodder.gg-link, max. prijs, min. winst", "Settings: fodder.gg link, max price, min profit"],
     helpTitle: ["Uitleg", "Help"],
@@ -7840,13 +7864,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       futbinCheckCards(cards, state.platform);
     });
     const runButton = button("", "pt-cycle-btn");
+    const bidButton = button("", "pt-cycle-btn");
     const watchButton = button("");
     const settingsButton = button("⚙");
     const helpButton = button("?");
     const langButton = button("", "pt-flip-lang");
     langButton.addEventListener("click", () => update(state => { state.lang = state.lang === "en" ? "nl" : "en"; }));
     const controls = el("div", "pt-stock-list-buttons");
-    controls.append(platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, runButton, watchButton, settingsButton, helpButton, langButton);
+    controls.append(platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, runButton, bidButton, watchButton, settingsButton, helpButton, langButton);
     toolbar.append(heading, controls);
     card.appendChild(toolbar);
 
@@ -7903,6 +7928,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       refresh.title = ft("refreshTitle");
       futbinButton.title = ft("futbinTitle");
       runButton.title = ft("runTitle");
+      bidButton.title = ft("bidsTitle");
       watchButton.title = ft("playersTitle");
       settingsButton.title = ft("settingsTitle");
       helpButton.title = ft("helpTitle");
@@ -7958,33 +7984,46 @@ function priceWatchMain(SCRIPT_VERSION) {
     refresh.addEventListener("click", () => loadFlipSheet(true));
 
     const selectedRows = () => shown.filter(isTicked);
-    runButton.addEventListener("click", async () => {
+    // Run maken (max BIN = buy price) or 🔨 Check bids (max bid = buy price, bar on top, badges per card).
+    const startFlipRun = async (bids, trigger) => {
       const rows = selectedRows();
       if (!rows.length) return showToast(ft("tickFirst"), false);
-      runButton.disabled = true;
+      trigger.disabled = true;
       try {
         const players = await flipPlayers(rows);
         const state = getFlip();
+        const id = bids ? FLIP_BID_ID : FLIP_RUN_ID;
         const stock = getStock();
-        const index = stock.findIndex(item => item.id === FLIP_RUN_ID);
+        const index = stock.findIndex(item => item.id === id);
         if (index >= 0) stock.splice(index, 1);
-        stock.unshift({
-          id: FLIP_RUN_ID,
+        const list = {
+          id,
           type: "players",
-          name: `Flip sheet ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
+          name: `${bids ? "🔨 Flip bids" : "Flip sheet"} ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
           createdAt: Date.now(),
           profit: null,
           windows: [],
           players,
-          done: {}
-        });
+          done: {},
+          flipSheet: true
+        };
+        if (bids) {
+          list.mode = "bid";
+          list.massBid = { pct: 0, flip: true };
+          players.forEach(player => { player.sell = player.flipSell || 0; });
+          try { localStorage.setItem("pt_run_bar_pos", "top"); } catch (_) { /* this session only */ }
+        }
+        stock.unshift(list);
         saveStock();
-        startRun(FLIP_RUN_ID);
-        showToast(ft("runStarted", { n: players.length }), true);
+        await startRun(id);
+        if (bids && runBar) runBar.classList.add("pt-run-top");
+        showToast(ft(bids ? "bidRunStarted" : "runStarted", { n: players.length }), true);
       } finally {
-        runButton.disabled = false;
+        trigger.disabled = false;
       }
-    });
+    };
+    runButton.addEventListener("click", () => startFlipRun(false, runButton));
+    bidButton.addEventListener("click", () => startFlipRun(true, bidButton));
     watchButton.addEventListener("click", async () => {
       const rows = selectedRows();
       if (!rows.length) return showToast(ft("tickFirst"), false);
@@ -8249,6 +8288,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     function updateCount() {
       const count = selectedRows().length;
       runButton.textContent = ft("run", { n: count });
+      bidButton.textContent = ft("bids", { n: count });
       watchButton.textContent = ft("players", { n: count });
     }
 
@@ -10759,6 +10799,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-run-info { min-width: 0; margin-right: 6px; }
 .pt-run-title { font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pt-run-sub { font-size: 12px; color: #8d9aae; white-space: nowrap; }
+.pt-run-title.pt-run-big { font-size: 16px; }
 .pt-run-market { display: flex; gap: 4px; align-items: center; flex: 0 0 auto; }
 .pt-run-market .pt-target-input { width: 70px; }
 @media (max-width: 700px) { .pt-run-bar { flex-wrap: wrap; } .pt-run-info { flex: 1 1 100%; } }

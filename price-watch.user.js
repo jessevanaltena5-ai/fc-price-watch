@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.56.0
+// @version      2.56.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6855,10 +6855,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     mEmptyFetch: ["FUT.GG gaf geen kaarten terug", "FUT.GG returned no cards"],
     mTrendTitle: ["Bovenste regel = 6 uur: rood = zakt nog (≤ −2%), groen = draait (24 uur ≤ −3% en 6 uur ≥ 0), het koopmoment. Onderste regel = 24 uur.", "Top line = 6 hours: red = still falling (≤ −2%), green = turning (24 h ≤ −3% and 6 h ≥ 0), the moment to buy. Bottom line = 24 hours."],
     help_momentum: ["FUT.GG momentum", "FUT.GG momentum"],
-    help_momentumText: ["Kies bovenaan de bron. FUT.GG momentum toont de special cards met de grootste daling in 24 uur (t.o.v. hetzelfde uur gisteren, dus echte dips en niet het nachtdal). 6 uur zegt of hij nog zakt (⏬) of draait (↩). Pas na de FUTBIN-check is er een koop- en verkoopprijs; de beste 20 dips worden automatisch gecheckt.", "Choose the source at the top. FUT.GG momentum shows the special cards with the biggest drop in 24 hours (vs the same hour yesterday, so real dips, not the night low). 6 hours tells whether it is still falling (⏬) or turning (↩). Only after the FUTBIN check is there a buy and sell price; the best 20 dips are checked automatically."],
-    fbAutoDone: ["FUTBIN auto (top 20): {n} kaart(en) bijgewerkt", "FUTBIN auto (top 20): {n} card(s) updated"],
-    autoFutbin: ["📊 Top {n} auto checken", "📊 Auto-check top {n}"],
-    autoFutbinTitle: ["Na elke verversing van de sheet zoekt hij voor de beste {n} kaarten met winst (op score) vanzelf de echte FUTBIN-verkopen op. Alleen kaarten zonder check of met een check ouder dan 45 min; één per paar seconden. Werkt alleen op de pc met de web-app open.", "After every sheet refresh it looks up the real FUTBIN sales for the best {n} cards with profit (by score) by itself. Only cards without a check or with one older than 45 min; one every few seconds. Works only on the pc with the web app open."],
+    help_momentumText: ["Kies bovenaan de bron. FUT.GG momentum toont de special cards met de grootste daling in 24 uur (t.o.v. hetzelfde uur gisteren, dus echte dips en niet het nachtdal). 6 uur zegt of hij nog zakt (⏬) of draait (↩). Pas na de FUTBIN-check is er een koop- en verkoopprijs; elke ronde worden er 40 automatisch gecheckt (eerst ↩ draait, ⏬ zakt nog als laatste).", "Choose the source at the top. FUT.GG momentum shows the special cards with the biggest drop in 24 hours (vs the same hour yesterday, so real dips, not the night low). 6 hours tells whether it is still falling (⏬) or turning (↩). Only after the FUTBIN check is there a buy and sell price; each round 40 are checked automatically (↩ turning first, ⏬ still falling last)."],
+    fbAutoDone: ["FUTBIN auto: {n} kaart(en) bijgewerkt", "FUTBIN auto: {n} card(s) updated"],
+    autoFutbin: ["📊 Auto checken (fodder top {n} · FUT.GG {m})", "📊 Auto-check (fodder top {n} · FUT.GG {m})"],
+    autoFutbinTitle: ["Na elke verversing van de sheet zoekt hij voor de beste {n} kaarten met winst (op score) vanzelf de echte FUTBIN-verkopen op. Alleen kaarten zonder check of met een check ouder dan 45 min; één per paar seconden. Werkt alleen op de pc met de web-app open. FUT.GG momentum: {m} per ronde met rustige pauzes (5-8 s), eerst ↩ draait, dan andere dips, ⏬ zakt nog als laatste.", "After every sheet refresh it looks up the real FUTBIN sales for the best {n} cards with profit (by score) by itself. Only cards without a check or with one older than 45 min; one every few seconds. Works only on the pc with the web app open. FUT.GG momentum: {m} per round with calm pauses (5-8 s), ↩ turning first, then other dips, ⏬ still falling last."],
     fbMissing: [" · niet gevonden: {list}", " · not found: {list}"],
     hitLine: ["🟢 {name}: nu {now} · koop ≤ {buy} · verkoop {sell} (+{profit})", "🟢 {name}: now {now} · buy ≤ {buy} · sell {sell} (+{profit})"],
     hitSales: [" · FUTBIN {n} verkopen/24u", " · FUTBIN {n} sales/24h"],
@@ -7843,9 +7843,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // Check cards one by one (cached ones skipped); stops on the first FUTBIN error (blocked/rate limit).
-  async function futbinCheckCards(cards, platform, quiet) {
+  // options: { max } = how many at most (default 30), { calm } = longer pauses (5-8 s) for big auto rounds.
+  async function futbinCheckCards(cards, platform, quiet, options = {}) {
     if (futbinState.busy) return;
-    const todo = cards.filter(card => futbinNeedsCheck(card, platform)).slice(0, FUTBIN_BATCH_MAX);
+    const todo = cards.filter(card => futbinNeedsCheck(card, platform)).slice(0, options.max || FUTBIN_BATCH_MAX);
     if (!todo.length) {
       if (!quiet) showToast(ft("fbAllFresh"), true);
       return;
@@ -7860,7 +7861,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (result && result.notFound) missing.push(card.name);
         futbinState.done++;
         listeners.forEach(listener => listener());
-        await new Promise(resolve => window.setTimeout(resolve, 2500 + Math.random() * 1500));
+        await new Promise(resolve => window.setTimeout(resolve, options.calm ? 5000 + Math.random() * 3000 : 2500 + Math.random() * 1500));
       }
     } catch (error) {
       futbinState.error = error && error.message ? error.message : String(error);
@@ -7876,6 +7877,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   // (by score, the order you see) whose FUTBIN data is missing or older than 45 min. Same pace and limits
   // as the 📊 button (one card per few seconds, cached 45 min), so a 15-min refresh mostly asks nothing.
   const FUTBIN_AUTO_TOP = 20;
+  // FUT.GG momentum: 40 per round with calm pauses (about 6-10 min, well inside the 15-min refresh), in
+  // order: turning first (what you can act on), then dips without a label, still-falling cards last.
+  const MOMENTUM_AUTO_TOP = 40;
+  const MOMENTUM_AUTO_ORDER = { turning: 0, none: 1, falling: 2 };
   let futbinAutoPause = 0;
   async function futbinAutoTop(source) {
     const state = getFlip();
@@ -7883,8 +7888,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     let cards;
     if (source === "futgg") {
       // FUT.GG momentum: the biggest 24h dips (within your max price) - FUTBIN then says if it's a real deal.
-      cards = momentumRows(state).filter(row => row.card.m24 != null && row.card.m24 < 0 && row.calc.status !== "skip")
-        .slice(0, FUTBIN_AUTO_TOP).map(row => row.card);
+      cards = momentumRows(state).filter(row => row.card.m24 != null && row.card.m24 < 0 && row.calc.status !== "skip"
+          && futbinNeedsCheck(row.card, state.platform))
+        .sort((a, b) => MOMENTUM_AUTO_ORDER[a.calc.move || "none"] - MOMENTUM_AUTO_ORDER[b.calc.move || "none"] || a.card.m24 - b.card.m24)
+        .slice(0, MOMENTUM_AUTO_TOP).map(row => row.card);
     } else {
       if (!flipData || flipData.token !== state.token) return;
       cards = rankFlipOpportunities(flipRows(flipData, state), state.platform)
@@ -7893,7 +7900,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         .map(row => row.card);
     }
     if (!cards.length || Date.now() < futbinAutoPause) return;
-    await futbinCheckCards(cards, state.platform, true);
+    await futbinCheckCards(cards, state.platform, true, source === "futgg" ? { max: MOMENTUM_AUTO_TOP, calm: true } : {});
     // FUTBIN refused (blocked / rate limit): leave it alone for an hour instead of retrying every refresh.
     if (futbinState.error) futbinAutoPause = Date.now() + 60 * 60 * 1000;
   }
@@ -8185,8 +8192,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       maxPrice.label.textContent = ft("maxPrice");
       maxPrice.input.title = ft("maxPriceTitle");
       minPct.label.textContent = ft("minPct");
-      autoText.textContent = ft("autoFutbin", { n: FUTBIN_AUTO_TOP });
-      autoBox.title = ft("autoFutbinTitle", { n: FUTBIN_AUTO_TOP });
+      autoText.textContent = ft("autoFutbin", { n: FUTBIN_AUTO_TOP, m: MOMENTUM_AUTO_TOP });
+      autoBox.title = ft("autoFutbinTitle", { n: FUTBIN_AUTO_TOP, m: MOMENTUM_AUTO_TOP });
       minPct.input.title = ft("minPctTitle");
       HEADERS.forEach(([key], i) => { if (key) headCells[i].textContent = ft(key); });
       headTick.title = ft("sel_headTitle");

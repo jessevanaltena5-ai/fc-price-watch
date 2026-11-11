@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.54.0
+// @version      2.54.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -3855,7 +3855,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
     if (!root) return;
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
-    root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest");
+    root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow");
     const info = massBidInfo(item);
     if (!info || !auctionOf(item)) return;
     const badge = el("div", "pt-mb-badge");
@@ -3874,9 +3874,24 @@ function priceWatchMain(SCRIPT_VERSION) {
     row.classList.toggle("pt-mb-over", !!(advice && advice.kind === "over"));
     row.classList.toggle("pt-mb-ok", !!(advice && advice.kind === "ok"));
     row.classList.toggle("pt-mb-highest", !!(advice && advice.kind === "highest"));
+    // FC27's grid shows cards as small tiles: there the badge is a compact strip with its own
+    // background at the bottom of the tile, so it never runs over the card picture or EA's text.
+    const width = row.offsetWidth;
+    const tile = width > 0 && width < 340;
+    if (tile && badge.parentNode !== row) row.appendChild(badge);
+    row.classList.toggle("pt-mb-tilerow", tile);
     badge.textContent = "";
     if (!advice) return;
-    badge.className = `pt-mb-badge pt-mb-${advice.kind}`;
+    badge.className = `pt-mb-badge pt-mb-${advice.kind}${tile ? " pt-mb-tile" : ""}`;
+    if (tile) {
+      const short = advice.kind === "over" ? `❌ ${priceFormat.format(advice.bid)} > max ${priceFormat.format(badge.__ptInfo.max || 0)}`
+        : advice.kind === "ok" ? `✅ bied ${priceFormat.format(advice.bid)} · max ${priceFormat.format(badge.__ptInfo.max)}`
+          : advice.text.replace("jij hoogste ", "hoogste ").replace("gewonnen voor ", "").replace(" · verkoop ", " → ");
+      badge.title = advice.text;
+      badge.append(el("div", "pt-mb-tile-main", short));
+      if (advice.left != null) badge.append(el("div", "pt-mb-left", advice.left <= 0 ? "loopt af" : `nog ${formatLeft(advice.left)}`));
+      return;
+    }
     badge.append(el("span", "", `🎯 ${advice.text}`));
     if (advice.left != null) {
       const endAt = auctionEnds.get((auctionOf(badge.__ptItem) || {}).tradeId);
@@ -10633,7 +10648,15 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-mb-badge.pt-mb-won { color: #ffd76a; }
 .pt-mb-badge.pt-mb-lost { color: #9aa6b8; }
 .pt-mb-left { color: #ffd76a; }
-.listFUTItem.pt-mb-over, li.pt-mb-over { opacity: .55; }
+.listFUTItem.pt-mb-over:not(.pt-mb-tilerow), li.pt-mb-over:not(.pt-mb-tilerow) { opacity: .55; }
+.pt-mb-tilerow { position: relative; }
+.pt-mb-tilerow.pt-mb-over > :not(.pt-mb-badge) { opacity: .4; }
+.pt-mb-badge.pt-mb-tile { position: absolute; left: 4px; right: 4px; bottom: 4px; z-index: 5; margin: 0; padding: 4px 6px; border-radius: 6px;
+  background: rgba(8, 12, 20, .94); font-size: 11px; line-height: 1.35; white-space: nowrap; text-align: center; pointer-events: none; }
+.pt-mb-tile .pt-mb-tile-main { overflow: hidden; text-overflow: ellipsis; }
+.pt-mb-tile.pt-mb-over { border: 1px solid #ff7b7b; }
+.pt-mb-tile.pt-mb-ok { border: 1px solid #6be38f; }
+.pt-mb-tile.pt-mb-highest { border: 1px solid #7fc8ff; }
 .pt-session-bar { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 100000; display: flex; gap: 10px; align-items: center; padding: 10px 14px; background: #b86b00; color: #fff; font: 600 14px/1.3 sans-serif; border-radius: 0 0 10px 10px; box-shadow: 0 4px 16px rgba(0,0,0,.5); max-width: 92vw; }
 .pt-session-bar.pt-session-blocked { background: #b3261e; }
 .pt-session-bar button { border: 0; border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer; background: #fff; color: #222; }

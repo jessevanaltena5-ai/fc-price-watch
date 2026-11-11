@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.61.0
+// @version      2.63.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -475,6 +475,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const FUTGG_REFRESH_MS = 60 * 1000; // Check the external FUT.GG manifest each minute; this does not call EA market search.
   let futggPrices = Object.create(null);
   let futggPricesAt = 0;
+  let futggPlatform = "pc"; // platform of the loaded FUT.GG price feed
   let futggManifestAt = 0;
   let futggLoading = null;
   let futggFeedKey = "";
@@ -527,15 +528,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         futggManifestAt = Date.now();
         const version = manifest && manifest._version;
         const indexHash = manifest && manifest["player-prices-index"];
-        const pcHash = manifest && manifest["player-prices-pc-dyn"];
-        if (version == null || !indexHash || !pcHash) throw new Error("FUT.GG-manifest mist prijsindex of PC-feed");
-        const feedKey = `${version}:${indexHash}:${pcHash}`;
+        // the price feed of your platform: PC, or PS5 for console (FUT.GG has no separate Xbox feed)
+        const feedPlatform = userPlatform() === "console" ? "console" : "pc";
+        const pcHash = manifest && manifest[feedPlatform === "console" ? "player-prices-ps5-dyn" : "player-prices-pc-dyn"];
+        if (version == null || !indexHash || !pcHash) throw new Error("FUT.GG-manifest mist prijsindex of prijsfeed");
+        const feedKey = `${version}:${indexHash}:${pcHash}:${feedPlatform}`;
         if (!force && feedKey === futggFeedKey && futggPricesAt) return true;
         const base = `https://r2.fut.gg/${FUTGG_GAME_YEAR}`;
         futggStage = "PC-prijsfeed en index ophalen";
         const [index, feed] = await Promise.all([
           futggRequestJson(`${base}/player-prices-index.v${version}.${indexHash}.json`),
-          futggRequestJson(`${base}/player-prices-pc-dyn.v${version}.${pcHash}.json`)
+          futggRequestJson(`${base}/player-prices-${feedPlatform === "console" ? "ps5" : "pc"}-dyn.v${version}.${pcHash}.json`)
         ]);
         futggStage = "feed en index controleren";
         if (!Array.isArray(index.d) || !Array.isArray(feed.p) || feed.p.length !== index.d.length + 1) {
@@ -552,6 +555,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
         futggPrices = next;
         futggPricesAt = Date.now();
+        futggPlatform = feedPlatform;
         futggStage = "succesvol bijgewerkt";
         futggLastError = "geen";
         futggFeedKey = feedKey;
@@ -578,6 +582,19 @@ function priceWatchMain(SCRIPT_VERSION) {
   function genie() {
     const g = window.FutGenie;
     return g && typeof g.fetchBulkPrices === "function" ? g : null;
+  }
+
+  // Standalone: "this is the pc" no longer depends on FUT Genie. A computer does the work (auto checks,
+  // history, ntfy, gist sync, transfer list and club watch); a phone or tablet reads what the pc shares.
+  // Override per browser in localStorage pt_device_v1 = "pc" | "phone". FUT Genie present = always pc.
+  const DEVICE_KEY = "pt_device_v1";
+  function pcDevice() {
+    let forced = "";
+    try { forced = localStorage.getItem(DEVICE_KEY) || ""; } catch (_) { /* default */ }
+    if (forced === "pc") return true;
+    if (forced === "phone") return false;
+    if (genie()) return true;
+    return !IS_PHONE && !/Android|iPhone|iPad|iPod|Mobile|Silk|Kindle/i.test(navigator.userAgent || "");
   }
 
   // Without FUT Genie (e.g. on the phone), prices come from the last transfer: { defId: [price, fetchedAt] }.
@@ -833,7 +850,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Phone: are the prices from the pc recent enough to count as live?
   function relayFresh() {
-    return !genie() && Date.now() - (getRelay().pricesAt || 0) < RELAY_FRESH_MS;
+    return !pcDevice() && Date.now() - (getRelay().pricesAt || 0) < RELAY_FRESH_MS;
   }
 
   // The list as it goes into the gist, to see whether it changed since the last sync.
@@ -843,14 +860,14 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Devices without FUT Genie read prices; on a big screen only once FUT Genie had time to load.
   function relayReader(force) {
-    return !genie() && (force || IS_PHONE || Date.now() - startedAt >= 20000);
+    return !pcDevice() && (force || IS_PHONE || Date.now() - startedAt >= 20000);
   }
 
   // Pc: fresh FUT Genie prices for the list, then into the gist. "l" tells the phone which of its own
   // lists the pc has taken over, so the phone doesn't fall back to the pc's older list in the meantime.
   async function pushRelay(force) {
     const relay = getRelay();
-    if (!genie() || relayBusy || !relay.hasToken || !relay.gistId) return;
+    if (!pcDevice() || relayBusy || !relay.hasToken || !relay.gistId) return;
     if (!force && Date.now() - (relay.sentAt || 0) < RELAY_PUSH_MS) return;
     relayBusy = true;
     try {
@@ -871,7 +888,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Pc: did the phone send a new list? Then it replaces the list here and goes out with prices right away.
   async function checkPhoneList(force) {
     const relay = getRelay();
-    if (!genie() || relayBusy || !relay.hasToken || !relay.gistId) return;
+    if (!pcDevice() || relayBusy || !relay.hasToken || !relay.gistId) return;
     if (!force && Date.now() - (relay.phoneCheckedAt || 0) < RELAY_LIST_CHECK_MS) return;
     relayBusy = true;
     let changed = false;
@@ -1326,7 +1343,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   function fetchGeniePrices(ids) {
     const g = genie();
     const unique = [...new Set(ids.filter(Boolean))];
-    if (!g || !unique.length) return Promise.resolve(false);
+    if (!unique.length) return Promise.resolve(false);
+    if (!g) return Promise.resolve(refreshFutggPrices(false)).then(() => Object.keys(futggPrices).length > 0).catch(() => false);
 
     const startedAt = Date.now();
     try {
@@ -1349,9 +1367,14 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function refreshGeniePrices(force) {
-    if (!genie()) {
+    if (!pcDevice()) {
       // Phone: the refresh button sends a changed list (with token) and reads the prices your pc put in the gist.
       if (force) pushPhoneList(false).then(() => pullRelay(true));
+      return;
+    }
+    if (!genie()) {
+      // Pc without FUT Genie: the FUT.GG feed has every card; just make sure it is current.
+      refreshFutggPrices(!!force);
       return;
     }
     if (genieLoading) {
@@ -1603,7 +1626,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         ? `Aan: zakt een speler na een prijsupdate tot zijn doel, dan stuurt deze pc een melding naar topic "${current}".`
         : "Uit. Kies een lange, willekeurige topic-naam (iedereen die hem kent kan meelezen) en klik op Opslaan.") +
         " Op je iPhone: installeer de app ntfy, tik op + en abonneer je op precies dezelfde topic." +
-        (genie() ? "" : " Let op: alleen een pc met FUT Genie verstuurt meldingen.");
+        (pcDevice() ? "" : " Let op: alleen je pc (computer) verstuurt meldingen.");
     };
     const randomTopic = () => `pw-${Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => "abcdefghijkmnpqrstuvwxyz23456789"[byte % 32]).join("")}`;
     const call = (type, data, done) => {
@@ -1684,7 +1707,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     const renderLive = () => {
       const relay = getRelay();
-      const pc = !!genie();
+      const pc = pcDevice();
       if (document.activeElement !== gist) gist.value = relay.gistId || "";
       token.style.display = relay.hasToken ? "none" : "";
       saveToken.style.display = relay.hasToken ? "none" : "";
@@ -1719,7 +1742,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         await relayCall("setToken", { token: token.value.trim(), gistId: getRelay().gistId });
         token.value = "";
         saveRelay({ hasToken: true, error: "" });
-        if (genie()) pushRelay(true);
+        if (pcDevice()) pushRelay(true);
       } catch (error) {
         saveRelay({ error: error.message });
       }
@@ -1729,7 +1752,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       await relayCall("clearToken", {}).catch(() => {});
       saveRelay({ hasToken: false, error: "" });
     });
-    sendNow.addEventListener("click", () => (genie() ? pushRelay(true) : pushPhoneList(true)));
+    sendNow.addEventListener("click", () => (pcDevice() ? pushRelay(true) : pushPhoneList(true)));
     pullNow.addEventListener("click", () => pullRelay(true));
     tokenQr.addEventListener("click", async () => {
       if (tokenQrBox.firstChild) {
@@ -1875,7 +1898,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const text = newlyHit.map(({ entry, price }) => `${entry.name}: ${priceFormat.format(price)} (doel ${priceFormat.format(entry.target)})`);
     showToast(`🎯 Op doel: ${text.join(" · ")}`, true);
     // Push to the phone (ntfy) only from the pc with FUT Genie, so a phone with the app open doesn't send it twice.
-    if (genie()) relayCall("notify", { title: newlyHit.length > 1 ? `${newlyHit.length} spelers op doel` : "Speler op doel", text: text.join("\n") })
+    if (pcDevice()) relayCall("notify", { title: newlyHit.length > 1 ? `${newlyHit.length} spelers op doel` : "Speler op doel", text: text.join("\n") })
       .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
   }
   // Seed once the first prices are in; after that every update (Genie on the pc, the gist on the phone) counts.
@@ -2195,7 +2218,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             : genieEntry._transferred
             ? `FUT Genie (PC), overgezet · prijs van ${formatDayTime(Number(genieEntry._fetchedAt) || Date.now())}`
             : `FUT Genie (PC), opgehaald om ${formatTime(Number(genieEntry._fetchedAt) || Date.now())}`
-          : genie() ? "Nog geen FUT Genie-prijs voor deze kaart" : "FUT Genie is niet geladen en er is geen overgezette prijs";
+          : genie() ? "Nog geen FUT Genie-prijs voor deze kaart" : pcDevice() ? "Nog geen FUT.GG-prijs voor deze kaart" : "Nog geen prijs van je pc ontvangen";
 
         const state = distanceState(entry.target, price);
         row.__ptPercent = state.percent;
@@ -2248,14 +2271,14 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       // Phone: the refresh button reads the gist (prices from your pc).
       const relay = getRelay();
-      const live = genie() || relayFresh();
-      refresh.disabled = genie() ? genieLoading : relayBusy;
+      const live = pcDevice() || relayFresh();
+      refresh.disabled = pcDevice() ? genieLoading : relayBusy;
       const priceHeader = headRow.querySelector(".pt-col-price");
       priceHeader.textContent = live ? "Genie (PC)" : "Prijs";
       priceHeader.title = live ? "" : "Groen = laagste BIN die je zelf zocht (🏷️), wit = van je pc";
       const hits = list.filter(entry => (rowsById.get(entry.definitionId).row.__ptPercent ?? Infinity) <= 0).length;
       const summary = `${list.length} speler(s)` + (hits ? ` · ${hits} op of onder doel` : "");
-      if (genie()) {
+      if (pcDevice()) {
         status.textContent = futggPricesAt
           ? `${summary} · FUT.GG PC-feed bijgewerkt om ${formatTime(futggPricesAt)} · manifest elke minuut gecontroleerd` + (genieLoading ? " · FUT Genie ook actief" : "")
           : genieLoading
@@ -2638,7 +2661,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     // Sales go into the log even when you looked yourself (not the first time: unknown when they sold).
     if (seen) recordTransferStatus(items, sold.map(sale => ({ n: sale.name, p: sale.price, b: sale.bought, at: Date.now() })));
     else recordTransferStatus(items, []);
-    if ((sold.length || expired) && seen && genie()) window.setTimeout(() => pushRelay(true), 3000); // phone sees it soon
+    if ((sold.length || expired) && seen && pcDevice()) window.setTimeout(() => pushRelay(true), 3000); // phone sees it soon
     if (!seen || (!sold.length && !expired)) return { sold: sold.length, expired, sent: !seen ? "eerste keer: alleen onthouden" : "" };
     const parts = [];
     if (sold.length) {
@@ -2664,7 +2687,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   let transferLoadFailures = 0;
 
   function noteLoggedOut() {
-    if (!genie() || readJson(LOGGED_OUT_KEY, 0)) return;
+    if (!pcDevice() || readJson(LOGGED_OUT_KEY, 0)) return;
     writeJson(LOGGED_OUT_KEY, Date.now());
     showToast("⚠️ Uitgelogd bij EA: je transferlijst wordt niet meer gevolgd tot je opnieuw inlogt.", false);
     relayCall("notify", { title: "Pc uitgelogd bij EA", text: "⚠️ Je pc kan je transferlijst niet meer ophalen (uitgelogd, bijv. omdat je op je telefoon of in de FUT Genie-app inlogde). Verkopen worden niet gemeld tot je op de pc opnieuw inlogt." })
@@ -2681,7 +2704,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     transferLoadFailures = 0;
     if (!readJson(LOGGED_OUT_KEY, 0)) return;
     writeJson(LOGGED_OUT_KEY, 0);
-    if (genie()) relayCall("notify", { title: "Pc weer ingelogd", text: "✅ Je pc volgt je transferlijst weer; wat in de tussentijd verkocht is komt in de volgende melding." }).catch(() => {});
+    if (pcDevice()) relayCall("notify", { title: "Pc weer ingelogd", text: "✅ Je pc volgt je transferlijst weer; wat in de tussentijd verkocht is komt in de volgende melding." }).catch(() => {});
   }
 
   function scheduleListingPoll(delay, why) {
@@ -3038,7 +3061,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   async function scanClubRise() {
-    if (!genie() || clubRiseBusy || typeof services === "undefined" || !services.Club) return;
+    if (!pcDevice() || clubRiseBusy || typeof services === "undefined" || !services.Club) return;
     clubRiseBusy = "club lezen…";
     listeners.forEach(listener => listener());
     try {
@@ -3063,7 +3086,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   async function checkClubRise(force) {
     const state = getClubRise();
-    if (!genie() || !state.on || clubRiseBusy || !state.cards.length) return;
+    if (!pcDevice() || !state.on || clubRiseBusy || !state.cards.length) return;
     if (!force && Date.now() - state.checkedAt < CLUB_RISE_CHECK_MS) return;
     clubRiseBusy = "prijzen…";
     listeners.forEach(listener => listener());
@@ -3114,7 +3137,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Pc: its own state. Phone: the pc's state from the gist, with a change sent from here on top until the pc has it.
   function clubRiseView() {
-    if (genie()) {
+    if (pcDevice()) {
       const state = getClubRise();
       return { ...state, count: state.cards.length, top: topRisers(state), busy: !!clubRiseBusy, busyText: clubRiseBusy };
     }
@@ -3126,7 +3149,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function changeClubRise(patch) {
-    if (genie()) {
+    if (pcDevice()) {
       const { scanAt, ...settings } = patch;
       saveClubRise({ ...settings, settingsAt: Date.now() });
       if (scanAt || (settings.on && !getClubRise().cards.length)) scanClubRise();
@@ -3146,7 +3169,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   let phoneSettingsCheckedAt = 0;
   async function checkPhoneSettings() {
     const relay = getRelay();
-    if (!genie() || !relay.hasToken || !relay.gistId || Date.now() - phoneSettingsCheckedAt < RELAY_LIST_CHECK_MS) return;
+    if (!pcDevice() || !relay.hasToken || !relay.gistId || Date.now() - phoneSettingsCheckedAt < RELAY_LIST_CHECK_MS) return;
     phoneSettingsCheckedAt = Date.now();
     let sent;
     try {
@@ -3164,7 +3187,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   let clubRiseStarted = false;
   function startClubRise() {
-    if (clubRiseStarted || !genie()) return;
+    if (clubRiseStarted || !pcDevice()) return;
     clubRiseStarted = true;
     const step = () => {
       const state = getClubRise();
@@ -3192,7 +3215,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     statusBlock.append(el("h3", "pt-tl-title", "📋 Transferlijst"), statusLine, salesLine, salesList);
     // Test: fetch the list now, result to your phone via ntfy (only a pc with FUT Genie sends ntfy).
     const checkLog = el("div", "pt-tl-sales");
-    if (genie()) {
+    if (pcDevice()) {
       const testButton = el("button", "pt-watch-refresh", "🧪 Test: lijst nu ophalen + ntfy");
       testButton.type = "button";
       const testInfo = el("div", "pt-tl-line pt-muted");
@@ -3412,10 +3435,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       const rise = clubRiseView();
       const relay = getRelay();
       // Phone: set it here, the pc (FUT Genie) does the work; needs the token to send.
-      riseBlock.style.display = genie() || (relay.hasToken && relay.gistId) ? "" : "none";
+      riseBlock.style.display = pcDevice() || (relay.hasToken && relay.gistId) ? "" : "none";
       riseScan.disabled = rise.busy;
       if (!riseBlock.contains(document.activeElement)) fillRiseInputs();
-      const via = genie() ? "" : rise.pcAt ? ` · stand van je pc ${formatDayTime(rise.pcAt)}` : " · nog niets van je pc ontvangen";
+      const via = pcDevice() ? "" : rise.pcAt ? ` · stand van je pc ${formatDayTime(rise.pcAt)}` : " · nog niets van je pc ontvangen";
       riseLine.textContent = (rise.pending ? "⏳ Verstuurd, je pc neemt het binnen een minuut over (web app op je pc moet open zijn). " : "") + (!rise.on
         ? "Uit. Zet aan om een melding (ook op je telefoon) te krijgen als een verhandelbare kaart in je club flink stijgt t.o.v. je aankoopprijs."
         : (rise.busyText ? `Bezig: ${rise.busyText} · ` : "") + (rise.count
@@ -3989,7 +4012,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   function userPlatform() {
     try {
       const platform = genie() && genie().getBulkPricePlatform();
-      return platform === "pc" ? "pc" : platform ? "console" : "pc";
+      if (platform) return platform === "pc" ? "pc" : "console";
+    } catch { /* below */ }
+    try {
+      const saved = JSON.parse(localStorage.getItem("pt_flip_v1") || "null");
+      return saved && saved.platform === "console" ? "console" : "pc";
     } catch {
       return "pc";
     }
@@ -6068,7 +6095,12 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   function fodderMarketPrice(rating) {
     const entry = fodderMarket && fodderMarket.prices[`${rating}-0`];
-    return entry && entry.min > 0 ? entry : null;
+    if (entry && entry.min > 0) return entry;
+    // Standalone: lowest / median / average FUT.GG price of all regular cards of this rating.
+    const prices = fodderCandidates(rating).filter(card => card.id <= 0xFFFFFF)
+      .map(card => (geniePrice(card.id) || {}).price || 0).filter(price => price > 0).sort((a, b) => a - b);
+    if (!prices.length) return null;
+    return { min: prices[0], med: prices[prices.length >> 1], avg: Math.round(prices.reduce((sum, price) => sum + price, 0) / prices.length), n: prices.length, futgg: true };
   }
 
   // --- Cheapest players per rating (like FUTBIN's "cheapest by rating"), from FUT Genie prices ---
@@ -6085,7 +6117,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // FUT.GG's own "cheapest by rating" list (the page www.fut.gg/cheapest-by-rating, PC). Covers ratings
   // 81–93, 11 players each, incl. specials; FUT.GG caches it only a few seconds, so it is fresher than
   // the per-card feed. Fetched when the Fodder screen opens (max every 30 s) and on "Opnieuw".
-  const FUTGG_CHEAPEST_URL = "https://www.fut.gg/api/fut/market/27/cheapest-by-rating/v2/overview/?platform=pc";
+  const FUTGG_CHEAPEST_URL_BASE = "https://www.fut.gg/api/fut/market/27/cheapest-by-rating/v2/overview/?platform=";
   const FUTGG_CHEAPEST_FRESH_MS = 5 * 60 * 1000;
   let futggCheapest = null; // { at, byRating: { 87: [{ entry, price, special, rarity }] } }
   let futggCheapestLoading = null;
@@ -6095,7 +6127,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (futggCheapestLoading) return futggCheapestLoading;
     if (!force && Date.now() - futggCheapestTriedAt < 30 * 1000) return Promise.resolve(false);
     futggCheapestTriedAt = Date.now();
-    futggCheapestLoading = futggRequestJson(`${FUTGG_CHEAPEST_URL}&_=${Date.now()}`).then(json => {
+    futggCheapestLoading = futggRequestJson(`${FUTGG_CHEAPEST_URL_BASE}${userPlatform() === "console" ? "ps" : "pc"}&_=${Date.now()}`).then(json => {
       const data = json && json.data;
       if (!data || typeof data !== "object") throw new Error("FUT.GG cheapest-by-rating: geen data");
       const byRating = {};
@@ -6179,7 +6211,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   // One bulk FUT Genie request for every regular player in the rating range; refreshed every 5 minutes.
   function loadFodderCheapest(force) {
     loadFutggCheapest(force);
-    if (!genie() || fodderCheapestLoading) return;
+    if (!genie()) { if (force) refreshFutggPrices(true); return; } // standalone: the FUT.GG feed has every card
+    if (fodderCheapestLoading) return;
     if (!force && Date.now() - fodderCheapestAt < GENIE_REFRESH_MS) return;
     const ids = fodderRatings().flatMap(rating => fodderCandidates(rating).map(entry => entry.id));
     if (!ids.length) return;
@@ -6449,11 +6482,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       from.value = state.from;
       to.value = state.to;
       mode.value = state.mode === "bin" ? "bin" : "bid";
-      refresh.disabled = fodderMarketLoading || !genie();
+      refresh.disabled = fodderMarketLoading;
       inventory.disabled = !!fodderInventoryProgress;
       inventory.textContent = fodderInventoryProgress ? `📦 ${fodderInventoryProgress}` : "📦 Voorraad bijwerken";
       status.textContent = !genie()
-        ? "Spelersprijzen van FUT.GG of je pc. Mediaan per rating alleen met FUT Genie."
+        ? `FUT.GG-prijzen (${futggPlatform === "console" ? "console" : "PC"}) per rating: laagste, mediaan en gemiddelde van alle gewone kaarten${futggPricesAt ? ` · ${formatTime(futggPricesAt)}` : ""}`
         : fodderMarketLoading ? "Fodderprijzen ophalen bij FUT Genie…"
           : fodderMarket
             ? `FUT Genie-marktprijzen (PC) per rating, gewone kaarten · bijgewerkt ${fodderMarket.lastUpdated ? formatDayTime(new Date(fodderMarket.lastUpdated).getTime()) : "onbekend"}`
@@ -7203,7 +7236,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // (list, low/avg/high, hourly trend, sheet buy/sell) stays fodder.gg, and the stored 72 h history keeps
   // fodder.gg's own "now" (recordFlipHistory reads the raw sheet). Not in the index / console: fodder.gg.
   function fodderNow(card, platform) {
-    const live = platform === "pc" ? Number(futggPrices[String(card.id)]) : 0;
+    const live = futggPlatform === (platform === "pc" ? "pc" : "console") ? Number(futggPrices[String(card.id)]) : 0;
     return live > 0 ? { ...card, now: live, nowSrc: "index", fodderNow: card.now } : { ...card, nowSrc: "fodder", fodderNow: card.now };
   }
 
@@ -7245,7 +7278,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (chimeAudio) playChime();
     showToast(lines.join(" · "), true);
     // Push from the pc only (FUT Genie there), so a phone with the app open doesn't send it twice.
-    if (genie()) relayCall("notify", { title: fresh.length > 1 ? ft("hitTitleMany", { n: fresh.length }) : ft("hitTitleOne"), text: lines.join("\n") })
+    if (pcDevice()) relayCall("notify", { title: fresh.length > 1 ? ft("hitTitleMany", { n: fresh.length }) : ft("hitTitleOne"), text: lines.join("\n") })
       .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
   }
 
@@ -7367,7 +7400,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // One snapshot of the PC sheet. Returns true when one was added.
   function recordFlipHistory(data, now = Date.now()) {
-    if (!genie() || !data || !Array.isArray(data.pc)) return false; // pc = the only writer, PC prices only
+    if (!pcDevice() || !data || !Array.isArray(data.pc)) return false; // pc = the only writer, PC prices only
     const cards = data.pc.filter(card => card.id > 0 && card.now > 0);
     if (!cards.length) return false;
     const at = Math.round(Math.min(data.at || data.fetchedAt || now, now) / 60000) * 60000;
@@ -7407,7 +7440,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     return encodeFlipHistory(history);
   }
   function syncFlipHistory(raw) {
-    if (genie()) return false; // the pc never takes history from the gist
+    if (pcDevice()) return false; // the pc never takes history from the gist
     const incoming = decodeFlipHistory(raw);
     const current = getFlipHistory();
     if (!incoming || (current && current.updatedAt >= incoming.updatedAt)) return false;
@@ -7417,7 +7450,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Pc: keep the sheet fresh in the background for the history (every 15 min, fodder.gg only, never EA).
   function flipHistoryTick() {
-    if (!genie() || !getFlip().token || flipLoading) return;
+    if (!pcDevice() || !getFlip().token || flipLoading) return;
     if (flipData && flipData.token === getFlip().token && Date.now() - flipData.fetchedAt < HISTORY_STEP_MS) return;
     loadFlipSheet(false);
   }
@@ -8057,7 +8090,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const futbinAutoWaiting = new Set(); // sources of auto rounds that wait for the running round
   async function futbinAutoTop(source) {
     const state = getFlip();
-    if (!state.autoFutbin || !genie()) return;
+    if (!state.autoFutbin || !pcDevice()) return;
     if (futbinState.busy) { futbinAutoWaiting.add(source); return; } // runs right after the current round
     let cards;
     if (source === "futgg") {
@@ -8183,7 +8216,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   window.setInterval(() => {
     try {
       const state = getFlip();
-      if (!state.autoFutbin || !genie()) return;
+      if (!state.autoFutbin || !pcDevice()) return;
       if (state.token) loadFlipSheet(false);
       loadMomentum(false);
     } catch (error) {
@@ -8226,7 +8259,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // minute), exact card id only, so it moves between the 15-min list fetches. Console (no feed loaded)
   // and cards missing from the feed keep the price of the momentum list.
   function momentumNow(card, platform) {
-    const live = platform === "pc" ? Number(futggPrices[String(card.id)]) : 0;
+    const live = futggPlatform === (platform === "pc" ? "pc" : "console") ? Number(futggPrices[String(card.id)]) : 0;
     return live > 0 ? { ...card, now: live, nowSrc: "index", listNow: card.now } : { ...card, nowSrc: "list", listNow: card.now };
   }
 
@@ -8915,8 +8948,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const history = getFlipHistory();
       const historyText = state.platform !== "pc" ? ""
         : history && history.times.length
-          ? ft("histStatus", { n: history.times.length, span: formatSpan(history.times[history.times.length - 1] - history.times[0]), time: formatTime(history.times[history.times.length - 1]), remote: genie() ? "" : ft("histRemote") })
-          : ft(genie() ? "histBuilding" : "histNone");
+          ? ft("histStatus", { n: history.times.length, span: formatSpan(history.times[history.times.length - 1] - history.times[0]), time: formatTime(history.times[history.times.length - 1]), remote: pcDevice() ? "" : ft("histRemote") })
+          : ft(pcDevice() ? "histBuilding" : "histNone");
       status.textContent = !state.token
         ? ft("statusNoLink")
         : flipLoading
@@ -9083,7 +9116,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         loadFodderCheapest(false);
       }
     };
-    [["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["flip", "Flip"], ["transfers", "Transfers"]].forEach(([key, label]) => {
+    [["flip", "Flip"], ["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["transfers", "Transfers"]].forEach(([key, label]) => {
       const button = el("button", "pt-tab", label);
       button.type = "button";
       button.addEventListener("click", () => show(key));
@@ -9091,13 +9124,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       bar.appendChild(button);
     });
     root.insertBefore(bar, root.firstChild);
-    let initial = "watch";
+    let initial = "flip";
     try {
-      initial = localStorage.getItem(TAB_KEY) || "watch";
+      initial = localStorage.getItem(TAB_KEY) || "flip";
     } catch (_) {
       // Default tab.
     }
-    show(sections[initial] ? initial : "watch");
+    show(sections[initial] ? initial : "flip");
     return show;
   }
 
@@ -11133,6 +11166,154 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Styles
   // ---------------------------------------------------------------------------
 
+  // --- Hotkeys (like FUT Genie): right-click a button → "Toets toewijzen" → press a key ------------------
+  // The key then clicks that button whenever it is on screen: ONE press = ONE click (held keys / auto
+  // repeat are ignored, never in a text field). It only presses what you could press yourself; nothing
+  // runs on its own. A button is recognised by its text (prices and other numbers left out, so "Buy Now
+  // for 2,000" stays the same button) plus its EA style classes.
+  const HOTKEY_KEY = "pt_hotkeys_v1";
+  const HOTKEY_TARGETS = "button, .btn-standard, .ut-tab-bar-item, .ut-navigation-button-control, [role='button']";
+  function getHotkeys() {
+    try { const list = JSON.parse(localStorage.getItem(HOTKEY_KEY) || "[]"); return Array.isArray(list) ? list : []; } catch (_) { return []; }
+  }
+  function saveHotkeys(list) {
+    try { localStorage.setItem(HOTKEY_KEY, JSON.stringify(list)); } catch (_) { /* this session only */ }
+  }
+  const hotkeyLabel = node => String(node.textContent || node.getAttribute("aria-label") || node.title || "")
+    .replace(/[\d.,]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+  const HOTKEY_CLASS_SKIP = /^(pt-hk-|pt-fx-on|pt-fx-live|selected|active|focus|hover|disabled|pressed)/;
+  const hotkeyClasses = node => [...node.classList].filter(name => !HOTKEY_CLASS_SKIP.test(name)).sort();
+  function hotkeyCombo(event) {
+    const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+    return [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && key.length > 1 && "Shift", key].filter(Boolean).join("+");
+  }
+  const HOTKEY_NAMES = { ArrowLeft: "←", ArrowRight: "→", ArrowUp: "↑", ArrowDown: "↓", " ": "Spatie", Backspace: "⌫" };
+  const hotkeyShow = combo => combo.split("+").map(part => HOTKEY_NAMES[part] || part).join("+");
+  const hotkeyVisible = node => {
+    if (!node.isConnected || node.disabled || node.classList.contains("disabled")) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 2 || rect.height < 2) return false;
+    const style = window.getComputedStyle(node);
+    return style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity) > 0.05;
+  };
+  // The button on screen now for a binding: same text and (most of) the same classes; a button in an open
+  // dialog wins (e.g. "Ok" of the buy confirmation), then the first one on the page.
+  function hotkeyFind(binding) {
+    const candidates = [...document.querySelectorAll(HOTKEY_TARGETS)]
+      .filter(node => !node.closest(".pt-hk-menu, .pt-hk-panel") && hotkeyLabel(node) === binding.label && hotkeyVisible(node));
+    const fit = node => { const have = hotkeyClasses(node); return binding.classes.filter(name => have.includes(name)).length; };
+    candidates.sort((a, b) => fit(b) - fit(a));
+    const best = candidates.filter(node => fit(node) === (candidates.length ? fit(candidates[0]) : 0));
+    return best.find(node => node.closest(".ea-dialog-view, .view-modal-container, .ui-dialog-type-message, .ut-popup")) || best[0] || null;
+  }
+  function hotkeyPress(node) {
+    const rect = node.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    try { node.dispatchEvent(new PointerEvent("pointerdown", at)); } catch (_) { /* older browser */ }
+    node.dispatchEvent(new MouseEvent("mousedown", at));
+    try { node.dispatchEvent(new PointerEvent("pointerup", at)); } catch (_) { /* older browser */ }
+    node.dispatchEvent(new MouseEvent("mouseup", at));
+    node.dispatchEvent(new MouseEvent("click", at));
+    node.classList.add("pt-hk-flash");
+    window.setTimeout(() => node.classList.remove("pt-hk-flash"), 250);
+  }
+
+  let hotkeyCapture = null; // { label, classes, name } while waiting for the key to assign
+  let hotkeyMenu = null;
+  function closeHotkeyMenu() {
+    if (hotkeyMenu) hotkeyMenu.remove();
+    hotkeyMenu = null;
+  }
+  function openHotkeyPanel() {
+    document.querySelectorAll(".pt-hk-panel").forEach(node => node.remove());
+    const panel = el("div", "pt-hk-panel");
+    const draw = () => {
+      panel.textContent = "";
+      const head = el("div", "pt-hk-head");
+      head.append(el("b", "", "⌨ Sneltoetsen"), el("span", "pt-hk-sub", "Rechtsklik op een knop → Toets toewijzen"));
+      const close = el("button", "pt-hk-x", "✕");
+      close.type = "button";
+      close.addEventListener("click", () => panel.remove());
+      head.appendChild(close);
+      panel.appendChild(head);
+      const list = getHotkeys();
+      if (!list.length) panel.appendChild(el("div", "pt-hk-empty", "Nog geen sneltoetsen."));
+      list.forEach((binding, i) => {
+        const line = el("div", "pt-hk-line");
+        const remove = el("button", "pt-hk-x", "✕");
+        remove.type = "button";
+        remove.title = "Verwijderen";
+        remove.addEventListener("click", () => { const next = getHotkeys(); next.splice(i, 1); saveHotkeys(next); draw(); });
+        line.append(el("kbd", "", hotkeyShow(binding.combo)), el("span", "", binding.name || binding.label), remove);
+        panel.appendChild(line);
+      });
+    };
+    draw();
+    document.body.appendChild(panel);
+  }
+  document.addEventListener("contextmenu", event => {
+    const target = event.target instanceof Element ? event.target.closest(HOTKEY_TARGETS) : null;
+    if (!target || target.closest(".pt-hk-menu, .pt-hk-panel")) return;
+    const label = hotkeyLabel(target);
+    if (!label) return;
+    event.preventDefault();
+    closeHotkeyMenu();
+    const classes = hotkeyClasses(target);
+    const name = String(target.textContent || target.title || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    const bound = getHotkeys().filter(binding => binding.label === label);
+    hotkeyMenu = el("div", "pt-hk-menu");
+    hotkeyMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 230)}px`;
+    hotkeyMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 140)}px`;
+    const item = (text, action) => {
+      const node = el("button", "pt-hk-item", text);
+      node.type = "button";
+      node.addEventListener("click", () => { closeHotkeyMenu(); action(); });
+      hotkeyMenu.appendChild(node);
+    };
+    hotkeyMenu.appendChild(el("div", "pt-hk-title", name || label));
+    item(bound.length ? `⌨ Andere toets (nu ${bound.map(b => hotkeyShow(b.combo)).join(", ")})` : "⌨ Toets toewijzen", () => {
+      hotkeyCapture = { label, classes, name };
+      showToast(`Druk nu op de toets voor "${name || label}" (Esc = annuleren)`, true);
+    });
+    if (bound.length) item("✕ Toets verwijderen", () => { saveHotkeys(getHotkeys().filter(binding => binding.label !== label)); showToast("Sneltoets verwijderd", true); });
+    item("☰ Alle sneltoetsen…", openHotkeyPanel);
+    document.body.appendChild(hotkeyMenu);
+  }, true);
+  document.addEventListener("mousedown", event => {
+    if (hotkeyMenu && !(event.target instanceof Element && event.target.closest(".pt-hk-menu"))) closeHotkeyMenu();
+  }, true);
+  // Capture phase on window: runs before EA's own handlers, and a key you assigned here is not passed on
+  // (so FUT Genie, if it has the same key, does not click a second time).
+  window.addEventListener("keydown", event => {
+    if (["Shift", "Control", "Alt", "Meta"].includes(event.key)) return;
+    if (hotkeyCapture) {
+      event.preventDefault();
+      event.stopPropagation();
+      const capture = hotkeyCapture;
+      hotkeyCapture = null;
+      if (event.key === "Escape") return void showToast("Toewijzen geannuleerd", false);
+      const combo = hotkeyCombo(event);
+      // one key = one button: the key leaves any other button, this button keeps only the new key
+      const next = getHotkeys().filter(binding => binding.combo !== combo && binding.label !== capture.label);
+      next.push({ combo, label: capture.label, classes: capture.classes, name: capture.name });
+      saveHotkeys(next);
+      showToast(`"${capture.name || capture.label}" = ${hotkeyShow(combo)}${genie() ? " · deze toets gaat nu voor op FUT Genie" : ""}`, true);
+      return;
+    }
+    if (event.repeat || event.metaKey) return; // held key: never a second click
+    const focus = document.activeElement;
+    if (focus && (focus.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focus.tagName))) return;
+    if (hotkeyMenu && event.key === "Escape") return void closeHotkeyMenu();
+    const combo = hotkeyCombo(event);
+    const binding = getHotkeys().find(item => item.combo === combo);
+    if (!binding) return;
+    const button = hotkeyFind(binding);
+    event.preventDefault();
+    event.stopPropagation();
+    if (!button) return void showToast(`${hotkeyShow(combo)}: "${binding.name || binding.label}" staat niet op dit scherm`, false);
+    hotkeyPress(button);
+  }, true);
+
   const CSS = `
 /* Page: dark card on top of EA's bright background, never wider than the viewport. */
 .pt-watch-view {
@@ -11736,6 +11917,21 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-card .pt-flip-box > button + button { margin-top: 8px; }
 .pt-flip-card .pt-fx-chart { margin: 2px 0 8px; }
 @media (max-width: 1100px) { .pt-flip-card .pt-fx-overview { grid-template-columns: 1fr; } }
+/* ---- hotkeys ---- */
+.pt-hk-menu { position: fixed; z-index: 100000; min-width: 210px; padding: 6px; border-radius: 12px; background: #0e1626; border: 1px solid rgba(148, 178, 230, .22); box-shadow: 0 18px 50px rgba(0, 0, 0, .55); font-family: inherit; }
+.pt-hk-title { padding: 6px 10px 8px; font-size: 11px; letter-spacing: .8px; text-transform: uppercase; color: #8392ab; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+button.pt-hk-item { appearance: none; display: block; width: 100%; text-align: left; padding: 8px 10px; border: 0; border-radius: 8px; background: none; color: #e8eef9; font: 600 13px inherit; font-family: inherit; cursor: pointer; text-transform: none; }
+button.pt-hk-item:hover { background: rgba(76, 180, 255, .14); }
+.pt-hk-panel { position: fixed; z-index: 100000; right: 18px; bottom: 18px; width: 320px; max-height: 60vh; overflow: auto; padding: 12px; border-radius: 14px; background: #0e1626; border: 1px solid rgba(148, 178, 230, .22); box-shadow: 0 18px 50px rgba(0, 0, 0, .55); color: #e8eef9; font-size: 13px; }
+.pt-hk-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.pt-hk-sub { flex: 1; font-size: 11.5px; color: #8392ab; }
+.pt-hk-line { display: flex; align-items: center; gap: 10px; padding: 6px 2px; border-top: 1px solid rgba(148, 178, 230, .1); }
+.pt-hk-line span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-hk-line kbd { min-width: 28px; padding: 2px 7px; border-radius: 6px; border: 1px solid rgba(148, 178, 230, .3); background: rgba(0, 0, 0, .3); font: 700 12px inherit; font-family: inherit; text-align: center; }
+.pt-hk-empty { color: #8392ab; padding: 6px 2px; }
+button.pt-hk-x { appearance: none; border: 0; background: none; color: #8392ab; cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 6px; }
+button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
+.pt-hk-flash { outline: 2px solid #4cb4ff !important; outline-offset: 2px; }
 .pt-flip-panel { margin: 4px 0 10px; padding: 10px 12px; background: #121a25; border: 1px solid rgba(255, 255, 255, .07); border-radius: 8px; }
 .pt-flip-help { display: grid; gap: 6px; font-size: 13px; color: #c9d3e0; }
 .pt-flip-help-line { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }
@@ -12105,7 +12301,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function tick() {
     // Pc with FUT Genie: prices to the gist (and target pushes) also while EA isn't logged in, e.g. after a
     // refresh once you're playing the game. Genie gets its prices from its own server, not from EA.
-    if (!relayStarted && genie()) {
+    if (!relayStarted && pcDevice()) {
       addStyles();
       startRelay();
     }

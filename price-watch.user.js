@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.50.0
+// @version      2.51.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6668,6 +6668,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     h_profit: ["Winst", "Profit"],
     h_trend: ["Trend", "Trend"],
     rowTitle: ["Klik voor details", "Click for details"],
+    searchTitle: ["Zet deze kaart klaar op de transfermarkt: juiste versie{holo}, max. prijs = je koopprijs ({buy}). Shift+klik = zonder max. prijs. Op Zoeken drukken doe je zelf.", "Prepare this card on the transfer market: right version{holo}, max price = your buy price ({buy}). Shift+click = no max price. You press Search yourself."],
+    searchHolo: [", alleen holo", ", holo only"],
+    searchFailed: ["Transfermarkt openen mislukt: {error}", "Could not open the transfer market: {error}"],
     checked: ["📊 gecheckt", "📊 checked"],
     gapTitle: ["nu {pct} t.o.v. je koopprijs", "now {pct} vs your buy price"],
     badgeTitle: ["Score {score}: {level}. Klik op de rij om te zien waarom.", "Score {score}: {level}. Click the row to see why."],
@@ -7009,6 +7012,26 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (card.holo) player.holo = true;
       return player;
     }).sort((a, b) => b.fixedMax - a.fixedMax);
+  }
+
+  // 🔍 One flip card on the transfer market: the same filter a run prepares (version via quality Special +
+  // rarity, holo-only for holo cards, max BIN = buy price; withoutMax = no price limit). Only fills the
+  // filter screen; you press Search yourself.
+  async function openFlipSearch(card, calc, withoutMax) {
+    const [player] = await flipPlayers([{ card, calc }]);
+    const baseId = card.id & 0xFFFFFF;
+    const criteria = baseCriteria();
+    criteria.maskedDefId = baseId;
+    if (player.special) {
+      const special = SearchLevel.SPECIAL || SearchLevel.SP;
+      if (special) criteria.level = special;
+      if (player.rarity != null) criteria.rarities = [player.rarity];
+    } else {
+      criteria.level = card.rating >= 75 ? SearchLevel.GOLD : card.rating >= 65 ? SearchLevel.SILVER : SearchLevel.BRONZE;
+    }
+    if (!withoutMax && calc.buy > 0) criteria.maxBuy = calc.buy;
+    if (card.holo) criteria.__futgenieHoloOnly = true;
+    openFilters(criteria, repositories.Item.getStaticDataByDefId(baseId));
   }
 
   // Rows for the current link/platform with your max price and min profit (shared by the table and the alert).
@@ -7966,7 +7989,18 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
 
         const nameCell = el("td", "pt-col-name");
-        nameCell.appendChild(el("div", "pt-cheapest-main", item.name));
+        const nameLine = el("div", "pt-flip-name-line");
+        const search = el("button", "pt-icon-btn pt-flip-search", "🔍");
+        search.type = "button";
+        search.title = ft("searchTitle", { holo: item.holo ? ft("searchHolo") : "", buy: money(calc.buy) });
+        search.addEventListener("click", event => {
+          openFlipSearch(item, calc, event.shiftKey).catch(error => {
+            console.error("Price Watch:", error);
+            showToast(ft("searchFailed", { error: error.message }), false);
+          });
+        });
+        nameLine.append(el("span", "pt-cheapest-main", item.name), search);
+        nameCell.appendChild(nameLine);
         const sub = el("div", "pt-flip-sub", `${item.rating} · ${item.rarity}${item.holo ? " · ✨" : ""}`);
         if (calc.futbin) sub.appendChild(el("span", "pt-flip-fb-mark", ` · ${ft("checked")}`));
         nameCell.appendChild(sub);
@@ -10626,6 +10660,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-kv-value { flex: 0 0 auto; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
 .pt-flip-bar-line { display: grid; grid-template-columns: minmax(0, 1fr) 80px 26px; align-items: center; gap: 8px; padding: 2px 0; }
 .pt-flip-lang { min-width: 64px; }
+.pt-flip-name-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pt-flip-name-line .pt-cheapest-main { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pt-flip-search { flex: 0 0 auto; }
 .pt-flip-bar { height: 6px; background: rgba(255, 255, 255, .08); border-radius: 3px; overflow: hidden; }
 .pt-flip-bar span { display: block; height: 100%; background: #63b3ff; border-radius: 3px; }
 .pt-flip-bar-value { text-align: right; font-variant-numeric: tabular-nums; color: #c9d3e0; }

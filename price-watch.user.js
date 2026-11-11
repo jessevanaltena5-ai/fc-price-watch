@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.58.0
+// @version      2.58.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6852,6 +6852,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     m_none: ["—", "—"],
     h6: ["6u", "6h"],
     d_mPrice: ["FUT.GG momentum", "FUT.GG momentum"],
+    d_nowSrc: ["Nu komt uit", "Now comes from"],
+    d_nowIndex: ["FUT.GG-prijsindex ({time})", "FUT.GG price index ({time})"],
+    d_nowList: ["momentum-lijst", "momentum list"],
+    mPricesAt: [" · prijzen {time}", " · prices {time}"],
     d_mNotChecked: ["Nog niet gecheckt. Pas met echte verkopen is er een koop- en verkoopprijs.", "Not checked yet. Only real sales give a buy and sell price."],
     d_m24: ["24 uur", "24 hours"],
     d_m6: ["6 uur", "6 hours"],
@@ -6859,7 +6863,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     d_futggLink: ["Open op FUT.GG ↗", "Open on FUT.GG ↗"],
     mLoading: ["FUT.GG momentum ophalen… {n} pagina's", "Fetching FUT.GG momentum… {n} pages"],
     mStatus: ["{platform} · FUT.GG momentum · {n} kaarten · 🟢 {buy}  🟡 {near}  🟠 {risk}  ❔ {unk} · bijgewerkt {time}", "{platform} · FUT.GG momentum · {n} cards · 🟢 {buy}  🟡 {near}  🟠 {risk}  ❔ {unk} · updated {time}"],
-    mStatusTitle: ["FUT.GG Momentum Trends (special cards), elke 15 min opnieuw zolang dit tabblad open is. Gesorteerd op de grootste daling in 24 uur. Koop/verkoop komen alleen uit echte FUTBIN-verkopen.", "FUT.GG Momentum Trends (special cards), every 15 min while this tab is open. Sorted by the biggest 24-hour drop. Buy/sell come only from real FUTBIN sales."],
+    mStatusTitle: ["FUT.GG Momentum Trends (special cards), elke 15 min opnieuw zolang dit tabblad open is. Nu = FUT.GG-prijsindex (elke minuut gecontroleerd, op console: de momentum-lijst). Gesorteerd op de grootste daling in 24 uur. Koop/verkoop komen alleen uit echte FUTBIN-verkopen.", "FUT.GG Momentum Trends (special cards), every 15 min while this tab is open. Now = FUT.GG price index (checked every minute; on console: the momentum list). Sorted by the biggest 24-hour drop. Buy/sell come only from real FUTBIN sales."],
     mEmpty: ["Nog geen FUT.GG-data: klik ↻.", "No FUT.GG data yet: click ↻."],
     mEmptyFetch: ["FUT.GG gaf geen kaarten terug", "FUT.GG returned no cards"],
     mTrendTitle: ["Bovenste regel = 6 uur: rood = zakt nog (≤ −2%), groen = draait (24 uur ≤ −3% en 6 uur ≥ 0), het koopmoment. Onderste regel = 24 uur.", "Top line = 6 hours: red = still falling (≤ −2%), green = turning (24 h ≤ −3% and 6 h ≥ 0), the moment to buy. Bottom line = 24 hours."],
@@ -8159,10 +8163,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     return { buy, sell, profit, pct, gap, warnings, status, risky, futbin, move };
   }
 
+  // "Now" of a momentum card: FUT.GG's price index (the same PC feed as the Spelers tab, checked every
+  // minute), exact card id only, so it moves between the 15-min list fetches. Console (no feed loaded)
+  // and cards missing from the feed keep the price of the momentum list.
+  function momentumNow(card, platform) {
+    const live = platform === "pc" ? Number(futggPrices[String(card.id)]) : 0;
+    return live > 0 ? { ...card, now: live, nowSrc: "index", listNow: card.now } : { ...card, nowSrc: "list", listNow: card.now };
+  }
+
   // Momentum rows for the current platform, biggest 24 h dip first, with your max price and min profit.
   function momentumRows(state) {
     const set = momentumData && momentumData[state.platform];
     return (set ? set.cards : [])
+      .map(card => momentumNow(card, state.platform))
       .map(card => ({ card, calc: momentumCalc(card, state.platform) }))
       .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
       .map(row => (row.calc.buy > 0 && row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row))
@@ -8523,6 +8536,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       pair(prices, ft("d_now"), money(item.now), "pt-flip-now");
       pair(prices, ft("d_status"), `${FLIP_ICON[calc.status]} ${ft(`sts_${calc.status}`)}`);
       if (item.src === "futgg") {
+        pair(prices, ft("d_nowSrc"), item.nowSrc === "index" ? ft("d_nowIndex", { time: formatTime(futggPricesAt) }) : ft("d_nowList"));
         pair(prices, ft("d_m24"), flipPct(item.m24, 1), item.m24 < 0 ? "pt-flip-minus" : "pt-flip-plus");
         pair(prices, ft("d_m6"), item.m6 == null ? ft("d_noData") : flipPct(item.m6, 1), item.m6 < 0 ? "pt-flip-minus" : item.m6 > 0 ? "pt-flip-plus" : "");
         pair(prices, ft("d_move"), calc.move ? ft(`m_${calc.move}`) : ft("m_none"), calc.move === "falling" ? "pt-flip-minus" : calc.move === "turning" ? "pt-flip-plus" : "");
@@ -8660,6 +8674,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           ? ft("mLoading", { n: momentumPages })
           : set
             ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) })
+              + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
               + (momentumError ? ft("statusError", { error: momentumError }) : "")
             : momentumError ? ft("statusFailed", { error: momentumError }) : ft("mEmpty");
         status.title = ft("mStatusTitle");

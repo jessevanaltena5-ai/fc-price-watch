@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.60.0
+// @version      2.61.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6841,6 +6841,32 @@ function priceWatchMain(SCRIPT_VERSION) {
     fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
     fbDone: ["FUTBIN: {n} kaart(en) gecheckt", "FUTBIN: {n} card(s) checked"],
     srcFodder: ["Bron: fodder.gg", "Source: fodder.gg"],
+    srcFutggShort: ["FUT.GG momentum", "FUT.GG momentum"],
+    filterPh: ["Zoek speler, of filter: score>70 · draait · <100k", "Find a player, or filter: score>70 · turning · <100k"],
+    filterTitle: ["Woorden zoeken in naam en kaarttype. Filters: score>70, score<50, <100k, >20k, draait, zakt, gecheckt, groen, holo. Alles moet kloppen.", "Words search name and card type. Filters: score>70, score<50, <100k, >20k, turning, falling, checked, green, holo. All must match."],
+    h_24: ["24u", "24h"],
+    h_6: ["6u", "6h"],
+    h_sales: ["Verkopen", "Sales"],
+    t_overview: ["Overzicht", "Overview"],
+    t_sales: ["Verkopen", "Sales"],
+    t_score: ["Score", "Score"],
+    t_prices: ["Prijzen", "Prices"],
+    t_warn: ["Let op ({n})", "Warnings ({n})"],
+    d_ladder: ["Prijsladder", "Price ladder"],
+    d_ladderFb: ["Echte verkopen (FUTBIN 72u): P10–P90, normaal = mediaan.", "Real sales (FUTBIN 72h): P10–P90, normal = median."],
+    d_ladderSheet: ["Uit de fodder.gg-sheet van vandaag (laag · gem. · hoog). Na een FUTBIN-check: echte verkopen.", "From today's fodder.gg sheet (low · avg · high). After a FUTBIN check: real sales."],
+    d_ladderNone: ["Pas na de FUTBIN-check zijn er koop- en verkoopprijzen.", "Only after the FUTBIN check are there buy and sell prices."],
+    d_lNormal: ["normaal", "normal"],
+    d_lBuy: ["koop", "buy"],
+    d_lSell: ["verkoop", "sell"],
+    d_lNow: ["nu", "now"],
+    d_lLow: ["laag", "low"],
+    d_lAvg: ["gem.", "avg"],
+    d_lHigh: ["hoog", "high"],
+    d_facts: ["Kort", "In short"],
+    d_todo: ["Doen", "Do"],
+    d_searchMax: ["🔍 Zoek · max {max}", "🔍 Search · max {max}"],
+    d_searchNoMax: ["🔍 Zoek in markt", "🔍 Search the market"],
     srcFutgg: ["Bron: FUT.GG momentum", "Source: FUT.GG momentum"],
     srcTitle: ["Wissel tussen je fodder.gg-lijst en FUT.GG Momentum Trends (special cards, grootste dip eerst). Ze blijven gescheiden: prijzen worden nooit gemengd.", "Switch between your fodder.gg list and FUT.GG Momentum Trends (special cards, biggest dip first). They stay apart: prices are never mixed."],
     st_unk: ["Nog geen FUTBIN-check: geen koop-/verkoopprijs (klik 📊 of wacht op de auto-check)", "No FUTBIN check yet: no buy/sell price (click 📊 or wait for the auto check)"],
@@ -8298,8 +8324,48 @@ function priceWatchMain(SCRIPT_VERSION) {
       selectMenu.value = "";
       if (key) applySelection(key);
     });
-    controls.append(sourceSelect, platform, sortSelect, dealsBox, refresh, alertButton, futbinButton, recheckButton, selectMenu, runButton, bidButton, watchButton, settingsButton, helpButton, langButton);
-    toolbar.append(heading, controls);
+    // Layout C ("pro table"): row 1 = what you look at (source, platform, filter) + FUTBIN progress and the
+    // two main actions; row 2 = status on the left, the other tools on the right. The <select>s stay as
+    // the state carriers (not in the page); the segmented buttons set them and fire their change event.
+    toolbar.className = "pt-fx-toolbar";
+    const seg = (values, onPick) => {
+      const box = el("div", "pt-fx-seg");
+      const buttons = values.map(value => {
+        const item = el("button", "pt-fx-seg-btn");
+        item.type = "button";
+        item.dataset.value = value;
+        item.addEventListener("click", () => onPick(value));
+        box.appendChild(item);
+        return item;
+      });
+      return { box, buttons };
+    };
+    const pick = (select, value) => {
+      if (select.value === value) return;
+      select.value = value;
+      select.dispatchEvent(new Event("change"));
+    };
+    const sourceSeg = seg(["fodder", "futgg"], value => pick(sourceSelect, value));
+    const platformSeg = seg(["pc", "console"], value => pick(platform, value));
+    const sortSeg = seg(["score", "signal"], value => pick(sortSelect, value));
+    const filterInput = el("input", "pt-fx-filter");
+    filterInput.type = "search";
+    filterInput.spellcheck = false;
+    filterInput.addEventListener("input", () => { filterText = filterInput.value; render(); });
+    futbinButton.className = "pt-fx-cover";
+    runButton.className = "pt-fx-btn pt-fx-primary";
+    bidButton.className = "pt-fx-btn";
+    [recheckButton, watchButton].forEach(item => { item.className = "pt-fx-btn pt-fx-btn-sm"; });
+    [refresh, alertButton, settingsButton, helpButton].forEach(item => { item.className = "pt-fx-icon"; });
+    langButton.className = "pt-fx-icon pt-fx-lang";
+    dealsBox.className = "pt-fx-toggle";
+    selectMenu.className = "pt-fx-select pt-flip-select";
+    const row1 = el("div", "pt-fx-row");
+    row1.append(el("span", "pt-fx-title", "Flip"), sourceSeg.box, platformSeg.box, filterInput, futbinButton, runButton, bidButton);
+    const row2 = el("div", "pt-fx-row pt-fx-row2");
+    status.className = "pt-watch-status pt-fx-status";
+    row2.append(sortSeg.box, dealsBox, selectMenu, recheckButton, watchButton, el("span", "pt-fx-spacer"), refresh, alertButton, settingsButton, helpButton, langButton);
+    toolbar.append(row1, row2, status);
     card.appendChild(toolbar);
 
     // ⚙ Settings (open by itself while there is no link yet).
@@ -8340,10 +8406,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     helpButton.addEventListener("click", () => { helpOpen = !helpOpen; render(); });
 
     const wrap = el("div", "pt-flip-wrap");
-    const table = el("table", "pt-watch-table pt-flip-table");
+    const table = el("table", "pt-watch-table pt-flip-table pt-fx-table");
     const head = el("tr");
     const HEADERS = [["", "pt-col-tick"], ["h_score", "pt-col-score"], ["h_player", "pt-col-name"], ["h_now", "pt-col-num"], ["h_buy", "pt-col-num"],
-      ["h_sell", "pt-col-num"], ["h_profit", "pt-col-num"], ["h_trend", "pt-col-spark"], ["", "pt-col-more"]];
+      ["h_sell", "pt-col-num"], ["h_profit", "pt-col-num"], ["h_24", "pt-col-num pt-col-pct"], ["h_6", "pt-col-num pt-col-pct"], ["h_sales", "pt-col-num pt-col-sales"], ["", "pt-col-more"]];
     const headCells = HEADERS.map(([, cls]) => head.appendChild(el("th", cls)));
     const headTick = el("input");
     headTick.type = "checkbox";
@@ -8361,6 +8427,16 @@ function priceWatchMain(SCRIPT_VERSION) {
     function applyTexts() {
       if (textsLang === flipLang()) return;
       textsLang = flipLang();
+      sourceSeg.buttons[0].textContent = "fodder.gg";
+      sourceSeg.buttons[1].textContent = ft("srcFutggShort");
+      sourceSeg.box.title = ft("srcTitle");
+      platformSeg.buttons[0].textContent = "PC";
+      platformSeg.buttons[1].textContent = "Console";
+      sortSeg.buttons[0].textContent = ft("sortScore");
+      sortSeg.buttons[1].textContent = ft("sortSignal");
+      sortSeg.box.title = ft("sortTitle");
+      filterInput.placeholder = ft("filterPh");
+      filterInput.title = ft("filterTitle");
       sourceSelect.options[0].textContent = ft("srcFodder");
       sourceSelect.options[1].textContent = ft("srcFutgg");
       sourceSelect.title = ft("srcTitle");
@@ -8376,7 +8452,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       watchButton.title = ft("playersTitle");
       settingsButton.title = ft("settingsTitle");
       helpButton.title = ft("helpTitle");
-      langButton.textContent = flipLang() === "en" ? "🌐 EN" : "🌐 NL";
+      langButton.textContent = flipLang() === "en" ? "EN" : "NL";
       langButton.title = ft("langTitle");
       linkLabel.textContent = ft("linkLabel");
       link.placeholder = ft("linkPlaceholder");
@@ -8428,6 +8504,30 @@ function priceWatchMain(SCRIPT_VERSION) {
       render();
     }
     let shown = [];
+    // Filter box: words match the name (accents ignored); also score>70, score<50, <100k, >20k, draait,
+    // zakt, gecheckt, groen (en: turning, falling, checked, green). All words must match.
+    let filterText = "";
+    const plainText = text => String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+    function matchesFilter(row) {
+      const words = plainText(filterText).split(/[\s·,;]+/).filter(Boolean);
+      const name = plainText(`${row.card.name} ${row.card.rarity} ${row.card.rating}`);
+      return words.every(word => {
+        let m = word.match(/^score([<>])=?(\d+)$/);
+        if (m) return row.opp ? (m[1] === ">" ? row.opp.score >= Number(m[2]) : row.opp.score <= Number(m[2])) : false;
+        m = word.match(/^([<>])=?(\d+(?:[.,]\d+)?)(k|m)?$/);
+        if (m) {
+          const limit = Number(m[2].replace(",", ".")) * (m[3] === "m" ? 1e6 : m[3] === "k" ? 1e3 : 1);
+          return m[1] === "<" ? row.card.now <= limit : row.card.now >= limit;
+        }
+        if (["draait", "turning", "↩"].includes(word)) return row.calc.move === "turning";
+        if (["zakt", "falling", "⏬"].includes(word)) return row.calc.move === "falling";
+        if (["gecheckt", "checked"].includes(word)) return !!row.calc.futbin;
+        if (["groen", "green", "🟢"].includes(word)) return row.calc.status === "buy";
+        if (["holo", "✨"].includes(word)) return !!row.card.holo;
+        return name.includes(word);
+      });
+    }
+    const detailTab = new Map(); // card id -> open tab in its details
 
     const update = mutate => {
       const state = getFlip();
@@ -8531,12 +8631,34 @@ function priceWatchMain(SCRIPT_VERSION) {
     const oppWarning = (code, opp) => ft(`ow_${code}`, { pct: opp.volatility != null ? `${Math.round(opp.volatility * 100)}%` : "" });
 
     // The opened details of one row.
+    // Price ladder: every known price of the card on one line (range = all of them), labels above and below.
+    function priceLadder(points) {
+      const known = points.filter(point => point.value > 0);
+      const box = el("div", "pt-fx-ladder");
+      if (known.length < 2) return box;
+      const low = Math.min(...known.map(point => point.value)) * 0.985;
+      const high = Math.max(...known.map(point => point.value)) * 1.015;
+      box.appendChild(el("div", "pt-fx-scale"));
+      known.forEach(point => {
+        const mark = el("div", `pt-fx-mark pt-fx-mark-${point.kind}${point.below ? " pt-fx-below" : ""}`);
+        mark.style.left = `${((point.value - low) / (high - low) * 100).toFixed(1)}%`;
+        mark.title = `${point.label}: ${money(point.value)}`;
+        const text = el("span", "pt-fx-mark-text");
+        text.append(el("small", "", point.label), el("b", "", flipShort(point.value)));
+        const tickLine = el("i");
+        if (point.below) mark.append(tickLine, text); else mark.append(text, tickLine);
+        box.appendChild(mark);
+      });
+      return box;
+    }
+
     function detailRow(row) {
       const { card: item, calc, opp } = row;
       const tr = el("tr", "pt-flip-detail");
       const td = el("td");
-      td.colSpan = 9;
+      td.colSpan = HEADERS.length;
       const grid = el("div", "pt-flip-detail-grid");
+      const panes = {}; // tab -> element
 
       if (opp) {
         const box = section(ft("d_score", { score: opp.score, level: ft(`lvl_${opp.level}`) }));
@@ -8562,7 +8684,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             : ft("src_basic", { window: src.futbin.window })
         ];
         box.appendChild(el("div", "pt-flip-note", ft("d_used", { list: used.join(" · ") })));
-        grid.appendChild(box);
+        panes.score = box;
       }
 
       const prices = section(ft(item.src === "futgg" ? "d_mPrice" : "d_price"));
@@ -8600,7 +8722,16 @@ function priceWatchMain(SCRIPT_VERSION) {
         pair(prices, ft("d_history"), ft("d_historyNone"));
       }
       }
-      grid.appendChild(prices);
+      // the price line (72 h history, else today's hourly points) now lives here, in the details
+      if (item.src !== "futgg") {
+        const hist = opp && opp.hist;
+        const chart = el("div", "pt-fx-chart");
+        chart.appendChild(hist && hist.points.length >= 2 ? flipHistoryChart(hist, item.now, opp.direction)
+          : flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
+        chart.title = hist && hist.points.length >= 2 ? ft("trendHistTitle", { span: formatSpan(hist.spanMs), median: money(hist.median), low: money(hist.low) }) : ft("trendTodayTitle");
+        prices.insertBefore(chart, prices.children[1] || null);
+      }
+      panes.prices = prices;
 
       const sales = section(ft("d_sales"));
       const fb = calc.futbin;
@@ -8645,15 +8776,81 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
       }
       sales.appendChild(externalLink(ft("d_searchLink"), `https://www.futbin.com/players?search=${encodeURIComponent(item.name)}`));
-      grid.appendChild(sales);
+      panes.sales = sales;
 
       const warnings = calc.warnings.concat(opp ? opp.warnings.map(code => oppWarning(code, opp)) : []);
       if (warnings.length) {
         const box = section(ft("d_warn"), "pt-flip-box-warn");
         warnings.forEach(text => box.appendChild(el("div", "pt-flip-warn-line", `⚠ ${text}`)));
-        grid.appendChild(box);
+        panes.warn = box;
       }
-      td.appendChild(grid);
+
+      // Overview: price ladder, the short facts, and what you can do now.
+      const overview = el("div", "pt-fx-overview");
+      const ladderBox = section(ft("d_ladder"));
+      // "normal" on the ladder = real sales (median of the FUTBIN 24 h windows) when checked, else the sheet.
+      const fbWindows = fb && fb.h72 ? fb.h72.windows.map(w => w.median).filter(value => value > 0) : [];
+      const normal = fb ? (fbWindows.length ? median(fbWindows) : fb.median) : opp && opp.hist ? opp.hist.median : item.avg;
+      const points = fb
+        ? [{ kind: "edge", label: "P10", value: fb.p10 }, { kind: "normal", label: ft("d_lNormal"), value: normal },
+          { kind: "edge", label: "P90", value: fb.p90 }, { kind: "buy", label: ft("d_lBuy"), value: calc.buy, below: true },
+          { kind: "sell", label: ft("d_lSell"), value: calc.sell, below: true }, { kind: "now", label: ft("d_lNow"), value: item.now, below: true }]
+        : item.src !== "futgg"
+          ? [{ kind: "edge", label: ft("d_lLow"), value: item.low }, { kind: "normal", label: ft("d_lAvg"), value: item.avg },
+            { kind: "edge", label: ft("d_lHigh"), value: item.high }, { kind: "buy", label: ft("d_lBuy"), value: calc.buy, below: true },
+            { kind: "sell", label: ft("d_lSell"), value: calc.sell, below: true }, { kind: "now", label: ft("d_lNow"), value: item.now, below: true }]
+          : [];
+      if (points.length) ladderBox.appendChild(priceLadder(points));
+      else ladderBox.appendChild(el("div", "pt-flip-note", ft("d_mNotChecked")));
+      ladderBox.appendChild(el("div", "pt-flip-note", ft(fb ? "d_ladderFb" : item.src === "futgg" ? "d_ladderNone" : "d_ladderSheet")));
+      const facts = section(ft("d_facts"));
+      const noPrice = !(calc.buy > 0);
+      pair(facts, ft("d_status"), `${FLIP_ICON[calc.status]} ${ft(`sts_${calc.status}`)}`);
+      pair(facts, ft("h_profit"), noPrice ? "—" : `${signed(calc.profit)} · ${calc.pct.toFixed(1)}%`, noPrice ? "" : calc.profit > 0 ? "pt-flip-plus" : "pt-flip-minus");
+      if (opp) pair(facts, ft("h_score"), `${opp.score} · ${ft(`lvl_${opp.level}`)}`);
+      if (fb && fb.h72 && fb.h72.state) pair(facts, ft("d_course"), ft(`course_${fb.h72.state}`), ["downLong", "down"].includes(fb.h72.state) ? "pt-flip-minus" : ["recovering", "up"].includes(fb.h72.state) ? "pt-flip-plus" : "");
+      pair(facts, ft("d_nowSrc"), item.nowSrc === "index" ? ft("d_nowIndex", { time: formatTime(futggPricesAt) }) : item.src === "futgg" ? ft("d_nowList") : ft("d_nowFodderOnly"));
+      pair(facts, "FUTBIN", fb ? ft("d_checkedAgo", { time: formatTime(fb.fetchedAt), min: Math.round((Date.now() - fb.fetchedAt) / 60000) }) : ft("sts_unk"));
+      const todo = section(ft("d_todo"));
+      const searchNow = el("button", "pt-fx-btn pt-fx-primary pt-fx-wide pt-flip-search", noPrice ? ft("d_searchNoMax") : ft("d_searchMax", { max: flipShort(calc.buy) }));
+      searchNow.type = "button";
+      searchNow.title = ft("searchTitle", { holo: item.holo ? ft("searchHolo") : "", buy: money(calc.buy) });
+      searchNow.addEventListener("click", event => {
+        openFlipSearch(item, calc, noPrice || event.shiftKey).catch(error => showToast(ft("searchFailed", { error: error.message }), false));
+      });
+      todo.appendChild(searchNow);
+      if (!futbinState.busy) {
+        const again = el("button", "pt-fx-btn pt-fx-wide", ft(fb ? "d_recheckButton" : "d_checkButton"));
+        again.type = "button";
+        again.title = ft(fb ? "d_recheckTitle" : "d_checkTitle");
+        again.addEventListener("click", () => futbinCheckCards([item], getFlip().platform, false, { force: !!fb }));
+        todo.appendChild(again);
+      }
+      const links = el("div", "pt-fx-links");
+      links.appendChild(externalLink("FUTBIN ↗", fb ? `https://www.futbin.com${fb.path}?platform=${futbinPlatform(getFlip().platform)}` : `https://www.futbin.com/players?search=${encodeURIComponent(item.name)}`));
+      if (item.url) links.appendChild(externalLink("FUT.GG ↗", `https://www.fut.gg${item.url}`));
+      todo.appendChild(links);
+      overview.append(ladderBox, facts, todo);
+
+      // Tabs: Overzicht · Verkopen · Score · Prijzen · Let op (n). The chosen tab is remembered per card.
+      const tabs = [["overview", ft("t_overview"), overview], ["sales", ft("t_sales"), panes.sales], ["score", ft("t_score"), panes.score],
+        ["prices", ft("t_prices"), panes.prices], ["warn", ft("t_warn", { n: warnings.length }), panes.warn]].filter(([, , pane]) => pane);
+      const active = tabs.some(([key]) => key === detailTab.get(item.id)) ? detailTab.get(item.id) : "overview";
+      const bar = el("div", "pt-fx-tabs");
+      tabs.forEach(([key, label, pane]) => {
+        const tab = el("button", `pt-fx-tab${key === active ? " pt-fx-on" : ""}${key === "warn" ? " pt-fx-tab-warn" : ""}`, label);
+        tab.type = "button";
+        tab.addEventListener("click", () => {
+          detailTab.set(item.id, key);
+          bar.querySelectorAll(".pt-fx-tab").forEach(other => other.classList.toggle("pt-fx-on", other === tab));
+          tabs.forEach(([, , other]) => { other.style.display = other === pane ? "" : "none"; });
+        });
+        bar.appendChild(tab);
+        pane.classList.add("pt-fx-pane");
+        pane.style.display = key === active ? "" : "none";
+        grid.appendChild(pane);
+      });
+      td.append(bar, grid);
       tr.appendChild(td);
       return tr;
     }
@@ -8671,18 +8868,21 @@ function priceWatchMain(SCRIPT_VERSION) {
       sourceSelect.value = momentum ? "futgg" : "fodder";
       sortSelect.value = state.sort === "signal" ? "signal" : "score";
       sortSelect.style.display = state.platform === "pc" || momentum ? "" : "none";
+      sourceSeg.buttons.forEach(item => item.classList.toggle("pt-fx-on", item.dataset.value === sourceSelect.value));
+      platformSeg.buttons.forEach(item => item.classList.toggle("pt-fx-on", item.dataset.value === state.platform));
+      sortSeg.buttons.forEach(item => item.classList.toggle("pt-fx-on", item.dataset.value === sortSelect.value));
+      sortSeg.box.style.display = sortSelect.style.display;
+      dealsBox.classList.toggle("pt-fx-on", !!state.onlyDeals);
       alertButton.style.display = momentum ? "none" : ""; // the alert stays on the fodder.gg list
       alertButton.textContent = state.alert ? "🔔" : "🔕";
+      alertButton.classList.toggle("pt-fx-live", !!state.alert);
       alertButton.title = `${ft(state.alert ? "alertOn" : "alertOff")}. ${ft("alertTitle")}`;
       alertButton.classList.toggle("pt-flip-alert-on", !!state.alert);
-      const paused = state.autoFutbin && Date.now() < futbinAutoPause;
-      futbinButton.textContent = futbinState.busy ? ft("futbinBusy", { done: futbinState.done, total: futbinState.total })
-        : ft("futbinButton") + (paused ? ft("fbPausedMark", { time: formatTime(futbinAutoPause) }) : "");
-      futbinButton.title = ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
+
       settings.style.display = settingsOpen || (!state.token && !momentum) ? "" : "none";
-      settingsButton.classList.toggle("pt-flip-alert-on", settingsOpen);
+      settingsButton.classList.toggle("pt-fx-live", settingsOpen);
       help.style.display = helpOpen ? "" : "none";
-      helpButton.classList.toggle("pt-flip-alert-on", helpOpen);
+      helpButton.classList.toggle("pt-fx-live", helpOpen);
 
       const data = flipData && flipData.token === state.token ? flipData : null;
       const deal = row => !state.onlyDeals || row.calc.status === "buy" || row.calc.status === "near";
@@ -8693,6 +8893,23 @@ function priceWatchMain(SCRIPT_VERSION) {
         shown = rankFlipOpportunities(flipRows(data, state).filter(deal), state.platform);
         if (state.sort === "signal" || state.platform !== "pc") shown.sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
       }
+      const listSize = shown.length;
+      const checkedCount = shown.filter(row => row.calc.futbin).length;
+      if (filterText.trim()) shown = shown.filter(matchesFilter);
+
+      // FUTBIN chip: progress of the list (checked / all) and a click = check the real sales now.
+      const paused = state.autoFutbin && Date.now() < futbinAutoPause;
+      futbinButton.textContent = "";
+      futbinButton.classList.toggle("pt-fx-busy", futbinState.busy);
+      futbinButton.appendChild(el("span", "pt-fx-cover-label", futbinState.busy
+        ? ft("futbinBusy", { done: futbinState.done, total: futbinState.total })
+        : `FUTBIN ${checkedCount}/${listSize}${paused ? ft("fbPausedMark", { time: formatTime(futbinAutoPause) }) : ""}`));
+      const track = el("span", "pt-fx-track");
+      const fill = el("i");
+      fill.style.width = `${listSize ? Math.round((futbinState.busy ? futbinState.done / Math.max(1, futbinState.total) : checkedCount / listSize) * 100) : 0}%`;
+      track.appendChild(fill);
+      futbinButton.appendChild(track);
+      futbinButton.title = ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
 
       const count = key => shown.filter(row => row.calc.status === key).length;
       const history = getFlipHistory();
@@ -8707,7 +8924,6 @@ function priceWatchMain(SCRIPT_VERSION) {
           : data
             ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) })
               + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
-              + ft("fbCoverage", { n: shown.filter(row => row.calc.futbin).length, total: shown.length })
               + (flipError ? ft("statusError", { error: flipError }) : "")
             : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
       status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
@@ -8718,7 +8934,6 @@ function priceWatchMain(SCRIPT_VERSION) {
           : set
             ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) })
               + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
-              + ft("fbCoverage", { n: shown.filter(row => row.calc.futbin).length, total: shown.length })
               + (momentumError ? ft("statusError", { error: momentumError }) : "")
             : momentumError ? ft("statusFailed", { error: momentumError }) : ft("mEmpty");
         status.title = ft("mStatusTitle");
@@ -8743,19 +8958,39 @@ function priceWatchMain(SCRIPT_VERSION) {
         tick.addEventListener("change", () => { ticked.set(item.id, tick.checked); updateCount(); });
         tickCell.appendChild(tick);
 
+        // Score: number + bar (colour = level); no score: the signal in words. The row's left edge shows the
+        // signal colour (🟢 / 🟡 / 🟠).
         const scoreCell = el("td", "pt-col-score");
-        const dot = el("span", "pt-flip-dot", FLIP_ICON[calc.status]);
-        dot.title = ft(`st_${calc.status}`) + (calc.status !== "skip" ? ` · ${ft("gapTitle", { pct: pctOf(calc.gap) })}` : "");
-        scoreCell.appendChild(dot);
+        scoreCell.title = ft(`st_${calc.status}`) + (calc.buy > 0 && calc.status !== "skip" ? ` · ${ft("gapTitle", { pct: pctOf(calc.gap) })}` : "");
         if (opp) {
-          const badge = el("span", `pt-opp pt-opp-${opp.level}`, String(opp.score));
-          badge.title = ft("badgeTitle", { score: opp.score, level: ft(`lvl_${opp.level}`) });
-          scoreCell.appendChild(badge);
+          const scoreBox = el("span", `pt-fx-score pt-fx-lvl-${opp.level}`);
+          const bar = el("span", "pt-fx-scorebar");
+          const fill = el("i");
+          fill.style.width = `${opp.score}%`;
+          bar.appendChild(fill);
+          scoreBox.append(el("b", "pt-opp", String(opp.score)), bar);
+          scoreBox.title = ft("badgeTitle", { score: opp.score, level: ft(`lvl_${opp.level}`) });
+          scoreCell.appendChild(scoreBox);
+        } else {
+          scoreCell.appendChild(el("span", "pt-fx-noscore", `${FLIP_ICON[calc.status]} ${ft(`sts_${calc.status}`)}`));
         }
 
         const nameCell = el("td", "pt-col-name");
-        const nameLine = el("div", "pt-flip-name-line");
-        const search = el("button", "pt-icon-btn pt-flip-search", "🔍");
+        const nameLine = el("div", "pt-fx-name");
+        nameLine.append(el("b", "pt-cheapest-main", item.name), el("span", "pt-fx-meta", `${item.rating} · ${item.rarity}`));
+        if (item.holo) nameLine.appendChild(el("span", "pt-fx-pill", "✨"));
+        if (calc.move) {
+          const move = el("span", `pt-fx-pill ${calc.move === "falling" ? "pt-fx-pill-bad" : "pt-fx-pill-good"}`, calc.move === "falling" ? "⏬" : "↩");
+          move.title = ft(`m_${calc.move}`);
+          nameLine.appendChild(move);
+        }
+        const warnList = calc.warnings.filter(text => text !== ft("w_mNoFutbin"));
+        if (warnList.length && ["buy", "near", "risk"].includes(calc.status)) {
+          const warn = el("span", "pt-fx-pill pt-fx-pill-warn", `⚠${warnList.length > 1 ? ` ${warnList.length}` : ""}`);
+          warn.title = warnList.join("\n");
+          nameLine.appendChild(warn);
+        }
+        const search = el("button", "pt-fx-search pt-flip-search", "🔍");
         search.type = "button";
         search.title = ft("searchTitle", { holo: item.holo ? ft("searchHolo") : "", buy: money(calc.buy) });
         search.addEventListener("click", event => {
@@ -8764,46 +8999,34 @@ function priceWatchMain(SCRIPT_VERSION) {
             showToast(ft("searchFailed", { error: error.message }), false);
           });
         });
-        nameLine.append(el("span", "pt-cheapest-main", item.name), search);
+        nameLine.appendChild(search);
         nameCell.appendChild(nameLine);
-        const sub = el("div", "pt-flip-sub", `${item.rating} · ${item.rarity}${item.holo ? " · ✨" : ""}`);
-        if (calc.move) sub.appendChild(el("span", calc.move === "falling" ? "pt-flip-minus" : "pt-flip-plus", ` · ${ft(`m_${calc.move}`)}`));
-        if (calc.futbin) sub.appendChild(el("span", "pt-flip-fb-mark", ` · ${ft("checked")}`));
-        nameCell.appendChild(sub);
-        // One short warning, only where it matters (cards you could buy now); the rest is in the details.
-        if (calc.warnings.length && ["buy", "near", "risk"].includes(calc.status)) {
-          const warn = el("div", "pt-flip-warn", `⚠ ${calc.warnings[0]}${calc.warnings.length > 1 ? `  +${calc.warnings.length - 1}` : ""}`);
-          warn.title = calc.warnings.join("\n");
-          nameCell.appendChild(warn);
-        }
 
         const num = (text, className) => el("td", "pt-col-num" + (className ? ` ${className}` : ""), text);
+        const pctCell = (value, title) => {
+          const cell = num(value == null || !Number.isFinite(value) ? "—" : flipPct(value * 100, 1),
+            `pt-col-pct ${value == null || !Number.isFinite(value) ? "pt-muted" : value <= -0.02 ? "pt-flip-minus" : value >= 0.02 ? "pt-flip-plus" : "pt-muted"}`);
+          if (title) cell.title = title;
+          return cell;
+        };
         const noPrice = !(calc.buy > 0);
+        const nowCell = num(money(item.now), `pt-flip-now${calc.status === "buy" ? " pt-fx-at" : ""}`);
+        nowCell.title = item.nowSrc === "index" ? ft("d_nowIndex", { time: formatTime(futggPricesAt) }) : item.src === "futgg" ? ft("d_nowList") : ft("d_nowFodderOnly");
         const profitCell = num(noPrice ? "—" : signed(calc.profit), noPrice ? "pt-muted" : calc.profit > 0 ? "pt-flip-plus" : "pt-flip-minus");
-        if (!noPrice) profitCell.appendChild(el("div", "pt-flip-pct", `${calc.pct.toFixed(1)}%`));
-        profitCell.title = ft("profitTitle", { buy: money(calc.buy), sell: money(calc.sell) });
+        profitCell.title = noPrice ? "" : `${ft("profitTitle", { buy: money(calc.buy), sell: money(calc.sell) })} · ${calc.pct.toFixed(1)}%`;
+        // 24 h and 6 h: FUT.GG momentum, or fodder.gg (24 h change / history, 6 h from the hourly points).
+        const change24 = item.src === "futgg" ? item.m24 / 100 : opp ? opp.change24 : item.change / 100;
+        const hours = item.trend || [];
+        const change6 = item.src === "futgg" ? (item.m6 == null ? null : item.m6 / 100)
+          : hours.length >= 7 && hours[hours.length - 7] > 0 ? hours[hours.length - 1] / hours[hours.length - 7] - 1 : null;
+        const salesCell = num(calc.futbin ? String(calc.futbin.sales24) : "—", calc.futbin ? "pt-col-sales" : "pt-col-sales pt-muted");
+        if (calc.futbin) salesCell.title = ft("d_soldValue", { n: calc.futbin.sales24, pct: `${Math.round(calc.futbin.sellThrough * 100)}%` });
 
-        const trendCell = el("td", "pt-col-spark");
-        const hist = opp && opp.hist;
-        const change = opp ? opp.change24 : (item.src === "futgg" ? item.m24 : item.change) / 100;
-        if (item.src === "futgg") {
-          // FUT.GG: no hourly line; the 6 h change shows whether it is still falling or turning.
-          trendCell.appendChild(el("div", "pt-flip-trend " + (item.m6 == null ? "pt-muted" : item.m6 <= -2 ? "pt-flip-minus" : item.m6 >= 0 ? "pt-flip-plus" : "pt-muted"),
-            `${item.m6 == null ? "?" : flipPct(item.m6, 1)} ${ft("h6")}`));
-          trendCell.title = ft("mTrendTitle");
-        } else if (hist && hist.points.length >= 2) {
-          trendCell.appendChild(flipHistoryChart(hist, item.now, opp.direction));
-          trendCell.title = ft("trendHistTitle", { span: formatSpan(hist.spanMs), median: money(hist.median), low: money(hist.low) });
-        } else {
-          trendCell.appendChild(flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
-          trendCell.title = ft("trendTodayTitle");
-        }
-        trendCell.appendChild(el("div", "pt-flip-trend " + (change <= -0.05 ? "pt-flip-minus" : change >= 0.03 ? "pt-flip-plus" : "pt-muted"),
-          `${change <= -0.05 ? "↘" : change >= 0.03 ? "↗" : "→"} ${pctOf(change)} ${ft("h24")}`));
-
-        tr.append(tickCell, scoreCell, nameCell, num(money(item.now), "pt-flip-now"),
-          num(noPrice ? "—" : money(calc.buy), "pt-flip-buy" + (calc.futbin ? " pt-flip-fbval" : "")),
-          num(noPrice ? "—" : money(calc.sell), calc.futbin ? "pt-flip-fbval" : ""), profitCell, trendCell, el("td", "pt-col-more", open ? "▾" : "▸"));
+        tr.append(tickCell, scoreCell, nameCell, nowCell,
+          num(noPrice ? "—" : money(calc.buy), "pt-flip-buy" + (noPrice ? " pt-muted" : "")),
+          num(noPrice ? "—" : money(calc.sell), noPrice ? "pt-muted" : ""), profitCell,
+          pctCell(change24, ft(item.src === "futgg" ? "mTrendTitle" : "trendTodayTitle")), pctCell(change6, item.src === "futgg" ? ft("mTrendTitle") : ""),
+          salesCell, (() => { const more = el("td", "pt-col-more"); more.appendChild(el("span", "pt-fx-chev", "›")); return more; })());
         tbody.appendChild(tr);
         if (open) tbody.appendChild(detailRow(row));
       });
@@ -11408,6 +11631,111 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-view .pt-flip-link { width: 320px; }
 .pt-watch-view .pt-flip-max { width: 90px; }
 .pt-flip-alert-on { border-color: #27d98b; color: #fff; background: #1d4f3a; }
+/* ---- Flip tab, layout C (pro table) ---- */
+.pt-watch-view .pt-flip-card { background: linear-gradient(180deg, rgba(19, 29, 49, .94), rgba(11, 18, 31, .97)); border: 1px solid rgba(148, 178, 230, .18); border-radius: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, .40), inset 0 1px 0 rgba(255, 255, 255, .04); padding: 14px 14px 10px; }
+.pt-flip-card .pt-fx-toolbar { display: grid; gap: 10px; margin-bottom: 10px; }
+.pt-flip-card .pt-fx-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.pt-flip-card .pt-fx-row2 { gap: 8px; }
+.pt-flip-card .pt-fx-spacer { flex: 1; }
+.pt-flip-card .pt-fx-title { font-size: 22px; font-weight: 800; letter-spacing: .3px; color: #e8eef9; margin-right: 2px; }
+.pt-flip-card .pt-fx-status { font-size: 12px; color: #8392ab; margin: 0; padding-left: 2px; }
+.pt-flip-card .pt-fx-seg { display: inline-flex; padding: 3px; gap: 2px; background: rgba(0, 0, 0, .28); border: 1px solid rgba(148, 178, 230, .12); border-radius: 10px; }
+.pt-flip-card button.pt-fx-seg-btn { appearance: none; border: 0; background: none; color: #8392ab; font: 600 13px/1 inherit; font-family: inherit; padding: 7px 12px; border-radius: 7px; cursor: pointer; text-transform: none; min-height: 0; height: auto; }
+.pt-flip-card button.pt-fx-seg-btn:hover { color: #e8eef9; }
+.pt-flip-card button.pt-fx-seg-btn.pt-fx-on { color: #e8eef9; background: #182339; box-shadow: inset 0 1px 0 rgba(255, 255, 255, .06), 0 2px 8px rgba(0, 0, 0, .3); }
+.pt-flip-card input.pt-fx-filter { flex: 1; min-width: 220px; height: 34px; padding: 0 12px; border-radius: 10px; border: 1px solid rgba(148, 178, 230, .12); background: rgba(0, 0, 0, .3); color: #e8eef9; font: 13px inherit; font-family: inherit; outline: none; }
+.pt-flip-card input.pt-fx-filter:focus { border-color: rgba(76, 180, 255, .55); }
+.pt-flip-card input.pt-fx-filter::placeholder { color: #56637b; }
+.pt-flip-card button.pt-fx-cover { appearance: none; display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .14); background: rgba(255, 255, 255, .02); color: #8392ab; font: 600 12.5px inherit; font-family: inherit; cursor: pointer; white-space: nowrap; text-transform: none; }
+.pt-flip-card button.pt-fx-cover:hover { border-color: rgba(76, 180, 255, .5); color: #e8eef9; }
+.pt-flip-card .pt-fx-cover.pt-fx-busy { color: #e8eef9; border-color: rgba(76, 180, 255, .45); }
+.pt-flip-card .pt-fx-track { width: 80px; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; display: inline-block; }
+.pt-flip-card .pt-fx-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4cb4ff, #2fe39a); }
+.pt-flip-card button.pt-fx-btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid rgba(148, 178, 230, .2); background: rgba(255, 255, 255, .03); color: #e8eef9; font: 600 13px inherit; font-family: inherit; cursor: pointer; white-space: nowrap; text-transform: none; }
+.pt-flip-card button.pt-fx-btn:hover:not(:disabled) { border-color: #4cb4ff; }
+.pt-flip-card button.pt-fx-btn:disabled { opacity: .5; cursor: default; }
+.pt-flip-card button.pt-fx-primary { background: linear-gradient(180deg, #58bcff, #2f97e6); border-color: transparent; color: #04111f; }
+.pt-flip-card button.pt-fx-btn-sm { height: 30px; padding: 0 11px; font-size: 12.5px; }
+.pt-flip-card button.pt-fx-wide { width: 100%; }
+.pt-flip-card button.pt-fx-icon { appearance: none; width: 30px; height: 30px; padding: 0; display: inline-grid; place-items: center; border-radius: 8px; border: 1px solid rgba(148, 178, 230, .12); background: rgba(255, 255, 255, .02); color: #8392ab; font: 600 13px inherit; font-family: inherit; cursor: pointer; }
+.pt-flip-card button.pt-fx-icon:hover, .pt-flip-card button.pt-fx-icon.pt-fx-live { color: #e8eef9; border-color: rgba(76, 180, 255, .45); }
+.pt-flip-card button.pt-fx-lang { width: auto; padding: 0 9px; }
+.pt-flip-card label.pt-fx-toggle { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .12); color: #8392ab; font-size: 12.5px; cursor: pointer; }
+.pt-flip-card label.pt-fx-toggle.pt-fx-on { color: #e8eef9; border-color: rgba(76, 180, 255, .45); background: rgba(76, 180, 255, .12); }
+.pt-flip-card label.pt-fx-toggle input { accent-color: #4cb4ff; margin: 0; }
+.pt-flip-card select.pt-fx-select { height: 30px; padding: 0 8px; border-radius: 8px; border: 1px solid rgba(148, 178, 230, .12); background: rgba(0, 0, 0, .3); color: #8392ab; font: 12.5px inherit; font-family: inherit; }
+.pt-flip-card .pt-fx-table { min-width: 900px; font-size: 13px; border-collapse: separate; border-spacing: 0; }
+.pt-flip-card .pt-fx-table th { font-size: 10.5px; letter-spacing: 1px; text-transform: uppercase; color: #56637b; font-weight: 700; padding: 8px 10px; border-bottom: 1px solid rgba(148, 178, 230, .10); background: rgba(7, 12, 22, .45); }
+.pt-flip-card .pt-fx-table td { padding: 7px 10px; height: auto; border-bottom: 1px solid rgba(148, 178, 230, .08); vertical-align: middle; }
+.pt-flip-card .pt-fx-table input[type="checkbox"] { accent-color: #4cb4ff; }
+.pt-flip-card .pt-fx-table .pt-col-tick { width: 32px; }
+.pt-flip-card .pt-fx-table .pt-col-score { width: 104px; white-space: nowrap; overflow: visible; }
+.pt-flip-card .pt-fx-table .pt-col-name { width: auto; }
+.pt-flip-card .pt-fx-table .pt-col-num { width: 82px; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pt-flip-card .pt-fx-table .pt-col-pct { width: 58px; }
+.pt-flip-card .pt-fx-table .pt-col-sales { width: 70px; }
+.pt-flip-card .pt-fx-table .pt-col-more { width: 24px; text-align: center; color: #56637b; font-size: 16px; }
+.pt-flip-card .pt-fx-chev { display: inline-block; transition: transform .15s; }
+.pt-flip-card .pt-flip-row.pt-flip-open .pt-fx-chev { transform: rotate(90deg); color: #4cb4ff; }
+@media (prefers-reduced-motion: reduce) { .pt-flip-card .pt-fx-chev { transition: none; } }
+.pt-flip-card .pt-flip-row:hover td { background: rgba(255, 255, 255, .025); }
+.pt-flip-card .pt-flip-row.pt-flip-open td { background: rgba(76, 180, 255, .07); border-bottom-color: transparent; }
+.pt-flip-card .pt-flip-row-buy td:first-child { box-shadow: inset 3px 0 0 #2fe39a; }
+.pt-flip-card .pt-flip-row-near td:first-child { box-shadow: inset 3px 0 0 #f5c451; }
+.pt-flip-card .pt-flip-row-risk td:first-child { box-shadow: inset 3px 0 0 #ff9f5a; }
+.pt-flip-card .pt-flip-row-buy td { background: rgba(47, 227, 154, .045); }
+.pt-flip-card .pt-fx-score { display: inline-flex; align-items: center; gap: 7px; }
+.pt-flip-card .pt-fx-score b.pt-opp { all: unset; font-weight: 800; font-size: 13.5px; min-width: 20px; text-align: right; font-variant-numeric: tabular-nums; color: #e8eef9; }
+.pt-flip-card .pt-fx-scorebar { width: 54px; height: 6px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; display: inline-block; }
+.pt-flip-card .pt-fx-scorebar i { display: block; height: 100%; border-radius: inherit; background: #6d7a91; }
+.pt-flip-card .pt-fx-lvl-high .pt-fx-scorebar i { background: #2fe39a; }
+.pt-flip-card .pt-fx-lvl-mid .pt-fx-scorebar i { background: #f5c451; }
+.pt-flip-card .pt-fx-noscore { font-size: 12px; color: #56637b; }
+.pt-flip-card .pt-fx-name { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: nowrap; white-space: nowrap; }
+.pt-flip-card .pt-fx-name b { overflow: hidden; text-overflow: ellipsis; }
+.pt-flip-card .pt-fx-name .pt-fx-meta { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.pt-flip-card .pt-fx-name b { color: #e8eef9; font-weight: 700; }
+.pt-flip-card .pt-fx-meta { color: #8392ab; font-size: 12.5px; }
+.pt-flip-card .pt-fx-pill { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .18); color: #8392ab; }
+.pt-flip-card .pt-fx-pill-good { color: #2fe39a; border-color: rgba(47, 227, 154, .4); background: rgba(47, 227, 154, .12); }
+.pt-flip-card .pt-fx-pill-bad { color: #ff6b7d; border-color: rgba(255, 107, 125, .4); background: rgba(255, 107, 125, .1); }
+.pt-flip-card .pt-fx-pill-warn { color: #ff9f5a; border-color: rgba(255, 159, 90, .35); }
+.pt-flip-card button.pt-fx-search { appearance: none; width: 24px; height: 22px; padding: 0; border-radius: 6px; border: 1px solid rgba(148, 178, 230, .12); background: none; font-size: 11px; cursor: pointer; opacity: .7; }
+.pt-flip-card button.pt-fx-search:hover { opacity: 1; border-color: #4cb4ff; }
+.pt-flip-card .pt-flip-now { color: #e8eef9; font-weight: 700; }
+.pt-flip-card .pt-fx-at { color: #2fe39a; }
+.pt-flip-card .pt-flip-buy { color: #4cb4ff; font-weight: 700; }
+.pt-flip-card .pt-flip-plus { color: #2fe39a; }
+.pt-flip-card .pt-flip-minus { color: #ff6b7d; }
+.pt-flip-card .pt-flip-detail td { padding: 4px 10px 14px; background: rgba(76, 180, 255, .07); border-bottom: 1px solid rgba(148, 178, 230, .1); }
+.pt-flip-card .pt-fx-tabs { display: flex; gap: 4px; margin: 2px 0 10px; flex-wrap: wrap; }
+.pt-flip-card button.pt-fx-tab { appearance: none; font: 600 12px inherit; font-family: inherit; padding: 6px 11px; border-radius: 8px; color: #8392ab; border: 1px solid transparent; background: none; cursor: pointer; text-transform: none; }
+.pt-flip-card button.pt-fx-tab:hover { color: #e8eef9; }
+.pt-flip-card button.pt-fx-tab.pt-fx-on { color: #e8eef9; background: #182339; border-color: rgba(148, 178, 230, .14); }
+.pt-flip-card button.pt-fx-tab-warn { color: #ff9f5a; }
+.pt-flip-card .pt-flip-detail-grid { display: block; }
+.pt-flip-card .pt-fx-overview { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 12px; }
+.pt-flip-card .pt-flip-box { background: rgba(7, 12, 22, .65); border: 1px solid rgba(148, 178, 230, .1); border-radius: 12px; padding: 12px 14px; }
+.pt-flip-card .pt-flip-box-title { font-size: 10.5px; letter-spacing: 1.1px; text-transform: uppercase; color: #8392ab; font-weight: 700; margin-bottom: 8px; }
+.pt-flip-card .pt-fx-pane.pt-flip-box { max-width: 640px; }
+.pt-flip-card .pt-fx-ladder { position: relative; height: 82px; margin: 4px 18px 6px; }
+.pt-flip-card .pt-fx-scale { position: absolute; left: 0; right: 0; top: 37px; height: 8px; border-radius: 999px; background: linear-gradient(90deg, rgba(47, 227, 154, .55), rgba(76, 180, 255, .35) 45%, rgba(245, 196, 81, .45)); }
+.pt-flip-card .pt-fx-mark { position: absolute; top: 0; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; white-space: nowrap; }
+.pt-flip-card .pt-fx-mark.pt-fx-below { top: 33px; }
+.pt-flip-card .pt-fx-mark i { display: block; width: 2px; height: 14px; background: #8392ab; }
+.pt-flip-card .pt-fx-mark-text { display: flex; flex-direction: column; align-items: center; line-height: 1.15; }
+.pt-flip-card .pt-fx-mark-text small { font-size: 10.5px; color: #8392ab; }
+.pt-flip-card .pt-fx-mark-text b { font-size: 12.5px; color: #e8eef9; }
+.pt-flip-card .pt-fx-mark-buy i, .pt-flip-card .pt-fx-mark-buy b { background: #4cb4ff; color: #4cb4ff; }
+.pt-flip-card .pt-fx-mark-buy b { background: none; }
+.pt-flip-card .pt-fx-mark-sell i { background: #2fe39a; }
+.pt-flip-card .pt-fx-mark-sell b { color: #2fe39a; }
+.pt-flip-card .pt-fx-mark-now i { width: 3px; height: 20px; background: #e8eef9; border-radius: 2px; margin-top: -4px; }
+.pt-flip-card .pt-fx-mark-now b { color: #e8eef9; }
+.pt-flip-card .pt-fx-links { display: flex; gap: 14px; margin-top: 8px; }
+.pt-flip-card .pt-flip-box > button + button { margin-top: 8px; }
+.pt-flip-card .pt-fx-chart { margin: 2px 0 8px; }
+@media (max-width: 1100px) { .pt-flip-card .pt-fx-overview { grid-template-columns: 1fr; } }
 .pt-flip-panel { margin: 4px 0 10px; padding: 10px 12px; background: #121a25; border: 1px solid rgba(255, 255, 255, .07); border-radius: 8px; }
 .pt-flip-help { display: grid; gap: 6px; font-size: 13px; color: #c9d3e0; }
 .pt-flip-help-line { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }

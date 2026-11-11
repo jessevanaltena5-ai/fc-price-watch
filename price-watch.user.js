@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.66.0
+// @version      2.67.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -24,6 +24,24 @@
 
 function priceWatchMain(SCRIPT_VERSION) {
   "use strict";
+
+  // UI language: English by default, Dutch with the NL/EN button (saved with the Flip settings, pt_flip_v1.lang).
+  // L(dutch, english) picks the text; texts built once when a screen opens follow after reopening it.
+  let uiLangCache = null;
+  function uiLang() {
+    if (uiLangCache == null) {
+      try {
+        const saved = JSON.parse(localStorage.getItem("pt_flip_v1") || "null");
+        uiLangCache = saved && saved.lang === "nl" ? "nl" : "en";
+      } catch (_) {
+        uiLangCache = "en";
+      }
+    }
+    return uiLangCache;
+  }
+  function L(nl, en) {
+    return uiLang() === "nl" ? nl : en;
+  }
 
   const APP_GUARD = "__fcPriceWatch";
   if (window[APP_GUARD]) return;
@@ -57,8 +75,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     return list.slice(-count).map(entry => {
       const time = new Date(entry.t).toLocaleString("nl-NL", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
-      if (entry.kind === "http") return `${time}  ${entry.method} ${entry.path} → ${entry.status || "geen antwoord"} (${entry.ms} ms)${entry.text ? `  ${entry.text}` : ""}`;
-      if (entry.kind === "melding") return `${time}  EA-melding: ${entry.text}`;
+      if (entry.kind === "http") return `${time}  ${entry.method} ${entry.path} → ${entry.status || L("geen antwoord", "no response")} (${entry.ms} ms)${entry.text ? `  ${entry.text}` : ""}`;
+      if (entry.kind === "melding") return L(`${time}  EA-melding: ${entry.text}`, `${time}  EA notice: ${entry.text}`);
       return `${time}  ${entry.text || entry.kind}`;
     });
   }
@@ -119,21 +137,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     const bid = /\/bid$/.test(path);
     if (status === 401) {
       session401At = Date.now();
-      eaLog({ kind: "sessie", text: "⚠ EA: sessie verlopen/overgenomen (401) — ergens anders ingelogd? (telefoon-app, game, ander tabblad)" });
+      eaLog({ kind: "sessie", text: L("⚠ EA: sessie verlopen/overgenomen (401) — ergens anders ingelogd? (telefoon-app, game, ander tabblad)", "⚠ EA: session expired/taken over (401) — logged in somewhere else? (phone app, game, another tab)") });
     }
     if (/\/ut\/auth/.test(path) && status >= 200 && status < 300) {
       sessionAuths++;
       sessionAuthAt = Date.now();
       if (sessionAuths > 1 || Date.now() - session401At < 60 * 1000) {
-        eaLog({ kind: "sessie", text: `EA logde opnieuw in zonder herladen (${sessionAuths - 1}× deze keer)` });
-        setSessionState("unsure", "⚠ EA heeft je sessie stil vernieuwd. Bieden kan nu geweigerd worden (461). Herlaad nu, vóór je laatste-seconden-bod.");
+        eaLog({ kind: "sessie", text: L(`EA logde opnieuw in zonder herladen (${sessionAuths - 1}× deze keer)`, `EA logged in again without a reload (${sessionAuths - 1}× this time)`) });
+        setSessionState("unsure", L("⚠ EA heeft je sessie stil vernieuwd. Bieden kan nu geweigerd worden (461). Herlaad nu, vóór je laatste-seconden-bod.", "⚠ EA silently renewed your session. Bidding may now be rejected (461). Reload now, before your last-seconds bid."));
       }
     }
     if (bid && status === 461) {
-      setSessionState("blocked", "⛔ EA weigert biedingen in deze sessie (461). Opnieuw bieden heeft geen zin: herlaad nu.");
+      setSessionState("blocked", L("⛔ EA weigert biedingen in deze sessie (461). Opnieuw bieden heeft geen zin: herlaad nu.", "⛔ EA is rejecting bids in this session (461). Bidding again is pointless: reload now."));
     } else if (bid && status >= 200 && status < 300 && sessionState !== "ok") {
       setSessionState("ok");
-      showToastSafe("✅ Bod gelukt: bieden werkt weer in deze sessie.");
+      showToastSafe(L("✅ Bod gelukt: bieden werkt weer in deze sessie.", "✅ Bid succeeded: bidding works again in this session."));
     }
   }
 
@@ -333,7 +351,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try {
       localStorage.setItem(WATCH_KEY, JSON.stringify(getWatch()));
     } catch (error) {
-      console.warn("Price Watch: lijst kon niet worden opgeslagen.", error);
+      console.warn(L("Price Watch: lijst kon niet worden opgeslagen.", "Price Watch: list could not be saved."), error);
     }
     listeners.forEach(listener => listener());
   }
@@ -457,7 +475,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     if (added) saveWatch();
     localStorage.setItem(MIGRATED_KEY, "1");
-    if (added) console.info(`Price Watch: ${added} speler(s) overgenomen uit Paletools.`);
+    if (added) console.info(L(`Price Watch: ${added} speler(s) overgenomen uit Paletools.`, `Price Watch: ${added} player(s) imported from Paletools.`));
   }
 
   // ---------------------------------------------------------------------------
@@ -479,8 +497,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   let futggManifestAt = 0;
   let futggLoading = null;
   let futggFeedKey = "";
-  let futggLastError = "Nog geen fout geregistreerd";
-  let futggStage = "nog niet gestart";
+  let futggLastError = L("Nog geen fout geregistreerd", "No error recorded yet");
+  let futggStage = L("nog niet gestart", "not started yet");
 
   let futggRequestCounter = 0;
   function futggRequestJson(url, raw = false) {
@@ -499,8 +517,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (!data || data.id !== requestId || settled) return;
         settled = true;
         cleanup();
-        if (!data.ok) return reject(new Error(data.error || "Onbekende fout bij FUT.GG-aanvraag"));
-        if (data.status < 200 || data.status >= 300) return reject(new Error(`HTTP ${data.status} bij FUT.GG`));
+        if (!data.ok) return reject(new Error(data.error || L("Onbekende fout bij FUT.GG-aanvraag", "Unknown error in FUT.GG request")));
+        if (data.status < 200 || data.status >= 300) return reject(new Error(L(`HTTP ${data.status} bij FUT.GG`, `HTTP ${data.status} from FUT.GG`)));
         if (raw) return resolve(String(data.responseText || ""));
         try { resolve(JSON.parse(data.responseText)); }
         catch (error) { reject(new Error(`Ongeldige FUT.GG JSON: ${error.message}`)); }
@@ -509,7 +527,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (settled) return;
         settled = true;
         cleanup();
-        reject(new Error("Timeout: geen antwoord van Tampermonkey-verzoekbrug"));
+        reject(new Error(L("Timeout: geen antwoord van Tampermonkey-verzoekbrug", "Timeout: no response from Tampermonkey request bridge")));
       }, 25000);
       document.addEventListener("pt-futgg-response", onResponse);
       document.dispatchEvent(new CustomEvent("pt-futgg-request", { detail: JSON.stringify({ id: requestId, url }) }));
@@ -521,7 +539,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!force && Date.now() - futggManifestAt < FUTGG_REFRESH_MS) return false;
     futggLoading = (async () => {
       try {
-        futggStage = "manifest ophalen";
+        futggStage = L("manifest ophalen", "fetching manifest");
         futggLastError = "";
         // Cache-buster only for the small manifest; its entries point to immutable, hash-versioned JSON files.
         const manifest = await futggRequestJson(`${FUTGG_MANIFEST_URL}?_=${Date.now()}`);
@@ -531,22 +549,22 @@ function priceWatchMain(SCRIPT_VERSION) {
         // the price feed of your platform: PC, or PS5 for console (FUT.GG has no separate Xbox feed)
         const feedPlatform = userPlatform() === "console" ? "console" : "pc";
         const pcHash = manifest && manifest[feedPlatform === "console" ? "player-prices-ps5-dyn" : "player-prices-pc-dyn"];
-        if (version == null || !indexHash || !pcHash) throw new Error("FUT.GG-manifest mist prijsindex of prijsfeed");
+        if (version == null || !indexHash || !pcHash) throw new Error(L("FUT.GG-manifest mist prijsindex of prijsfeed", "FUT.GG manifest is missing price index or price feed"));
         const feedKey = `${version}:${indexHash}:${pcHash}:${feedPlatform}`;
         if (!force && feedKey === futggFeedKey && futggPricesAt) return true;
         const base = `https://r2.fut.gg/${FUTGG_GAME_YEAR}`;
-        futggStage = "PC-prijsfeed en index ophalen";
+        futggStage = L("PC-prijsfeed en index ophalen", "fetching PC price feed and index");
         const [index, feed] = await Promise.all([
           futggRequestJson(`${base}/player-prices-index.v${version}.${indexHash}.json`),
           futggRequestJson(`${base}/player-prices-${feedPlatform === "console" ? "ps5" : "pc"}-dyn.v${version}.${pcHash}.json`)
         ]);
-        futggStage = "feed en index controleren";
+        futggStage = L("feed en index controleren", "checking feed and index");
         if (!Array.isArray(index.d) || !Array.isArray(feed.p) || feed.p.length !== index.d.length + 1) {
-          throw new Error("FUT.GG prijsfeed en index hebben verschillende lengtes");
+          throw new Error(L("FUT.GG prijsfeed en index hebben verschillende lengtes", "FUT.GG price feed and index have different lengths"));
         }
         const next = Object.create(null);
         let id = Number(index.id0);
-        if (!Number.isFinite(id)) throw new Error("FUT.GG-index heeft geen geldige start-ID");
+        if (!Number.isFinite(id)) throw new Error(L("FUT.GG-index heeft geen geldige start-ID", "FUT.GG index has no valid start ID"));
         if (Number(feed.p[0]) > 0) next[String(id)] = Number(feed.p[0]);
         for (let i = 0; i < index.d.length; i++) {
           id += Number(index.d[i]);
@@ -556,16 +574,16 @@ function priceWatchMain(SCRIPT_VERSION) {
         futggPrices = next;
         futggPricesAt = Date.now();
         futggPlatform = feedPlatform;
-        futggStage = "succesvol bijgewerkt";
-        futggLastError = "geen";
+        futggStage = L("succesvol bijgewerkt", "updated successfully");
+        futggLastError = L("geen", "none");
         futggFeedKey = feedKey;
-        console.info(`Price Watch: FUT.GG PC-feed bijgewerkt (${Object.keys(next).length} prijzen).`);
+        console.info(L(`Price Watch: FUT.GG PC-feed bijgewerkt (${Object.keys(next).length} prijzen).`, `Price Watch: FUT.GG PC feed updated (${Object.keys(next).length} prices).`));
         logFutggPriceDiagnostics();
         listeners.forEach(listener => listener());
         return true;
       } catch (error) {
         futggLastError = error && error.message ? error.message : String(error);
-        console.warn("Price Watch: FUT.GG PC-prijzen ophalen mislukt; bestaande prijsbron blijft actief.", error);
+        console.warn(L("Price Watch: FUT.GG PC-prijzen ophalen mislukt; bestaande prijsbron blijft actief.", "Price Watch: fetching FUT.GG PC prices failed; existing price source stays active."), error);
         logFutggPriceDiagnostics();
         return false;
       } finally {
@@ -673,19 +691,19 @@ function priceWatchMain(SCRIPT_VERSION) {
         const matches = uniqueIds.filter(id => Number(futggPrices[String(id)]) > 0)
           .map(id => ({ id, price: Number(futggPrices[String(id)]) }));
         const selected = geniePrice(entry.definitionId, entry.resourceId);
-        let selectedSource = "geen prijs gevonden";
+        let selectedSource = L("geen prijs gevonden", "no price found");
         if (selected && selected._futgg) selectedSource = `FUT.GG (ID ${selected._futggId})`;
         else if (selected && selected._fetchedAt && selected._remote) selectedSource = "remote/cache";
         else if (selected && selected._market) selectedSource = "markt-cache";
-        else if (selected && selected._transferred) selectedSource = "overgezette prijs";
-        else if (selected && selected.price > 0) selectedSource = "FUT Genie/cache of fallback (niet FUT.GG)";
+        else if (selected && selected._transferred) selectedSource = L("overgezette prijs", "transferred price");
+        else if (selected && selected.price > 0) selectedSource = L("FUT Genie/cache of fallback (niet FUT.GG)", "FUT Genie/cache or fallback (not FUT.GG)");
         return {
           player: entry.name,
           rating: entry.rating || "",
           definitionId: defId,
           resourceId: resourceId || "not stored",
           feedMatches: matches.map(match => `${match.id}=${match.price}`).join("; ") || "NO MATCH",
-          selectedPrice: selected ? selected.price : "geen prijs",
+          selectedPrice: selected ? selected.price : L("geen prijs", "no price"),
           selectedSource
         };
       });
@@ -693,8 +711,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const displayRows = relevant.length ? relevant : rows.slice(0, 8);
       const lines = displayRows.map(row => `${row.player} (${row.rating}) | defId=${row.definitionId} | resourceId=${row.resourceId} | feed=${row.feedMatches} | Price Watch=${row.selectedPrice} | bron=${row.selectedSource}`);
       const eaLines = eaLogLines(60);
-      lines.push("", "EA-log (biedingen, mislukte EA-verzoeken, EA-meldingen, herladen; nieuwste onderaan):", ...(eaLines.length ? eaLines : ["(nog leeg)"]));
-      const report = `FUT.GG PC-feed diagnose (v2.36.1)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`;
+      lines.push("", L("EA-log (biedingen, mislukte EA-verzoeken, EA-meldingen, herladen; nieuwste onderaan):", "EA log (bids, failed EA requests, EA notices, reloads; newest at the bottom):"), ...(eaLines.length ? eaLines : [L("(nog leeg)", "(empty so far)")]));
+      const report = L(`FUT.GG PC-feed diagnose (v2.36.1)\nFeed bijgewerkt: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "nee"}\nLaatste stap: ${futggStage}\nLaatste fout: ${futggLastError || "geen"}\nFeed-aantal prijzen: ${Object.keys(futggPrices).length}\nManifest gecontroleerd: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "nee"}\n\n${lines.join("\n")}`, `FUT.GG PC feed diagnostics (v2.36.1)\nFeed updated: ${futggPricesAt ? new Date(futggPricesAt).toLocaleString() : "no"}\nLast step: ${futggStage}\nLast error: ${futggLastError || "none"}\nFeed price count: ${Object.keys(futggPrices).length}\nManifest checked: ${futggManifestAt ? new Date(futggManifestAt).toLocaleString() : "no"}\n\n${lines.join("\n")}`);
       console.info("FUT.GG DIAGNOSTIC", rows, { futggPricesAt, futggFeedKey, futggStage, futggLastError, priceCount: Object.keys(futggPrices).length });
       if (typeof window !== "undefined") {
         // Keep diagnostics hidden unless explicitly opened with Ctrl+Shift+D.
@@ -720,7 +738,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             panel.appendChild(body);
             const copy = document.createElement("button"); copy.textContent = "Diagnose kopiëren";
             copy.style.cssText = "margin-top:10px;background:#2563eb;color:white;border:0;border-radius:5px;padding:7px 10px;cursor:pointer";
-            copy.addEventListener("click", () => { const text = body.textContent; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copy.textContent = "Gekopieerd"; }).catch(() => window.prompt("Kopieer diagnose:", text)); else window.prompt("Kopieer diagnose:", text); });
+            copy.addEventListener("click", () => { const text = body.textContent; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => { copy.textContent = L("Gekopieerd", "Copied"); }).catch(() => window.prompt(L("Kopieer diagnose:", "Copy diagnostics:"), text)); else window.prompt(L("Kopieer diagnose:", "Copy diagnostics:"), text); });
             panel.appendChild(copy); document.body.appendChild(panel);
           }
           const body = panel.querySelector("#pt-futgg-diagnostic-report");
@@ -814,9 +832,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const show = () => {
       if (message.ok) {
         saveRelay({ hasToken: true, gistId: message.gistId || getRelay().gistId, listJson: "", error: "" });
-        showToast("Price Watch: token van je pc opgeslagen. Wis de link nog uit de geschiedenis van Safari.", true);
+        showToast(L("Price Watch: token van je pc opgeslagen. Wis de link nog uit de geschiedenis van Safari.", "Price Watch: token from your PC saved. Now clear the link from your Safari history."), true);
       } else {
-        showToast(`Price Watch: token niet opgeslagen – ${message.error}`, false);
+        showToast(L(`Price Watch: token niet opgeslagen – ${message.error}`, `Price Watch: token not saved – ${message.error}`), false);
       }
     };
     if (document.body) show();
@@ -834,7 +852,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!pending) return;
     relayPending.delete(message.id);
     if (message.ok) pending.resolve(message.result);
-    else pending.reject(new Error(message.error || "onbekende fout"));
+    else pending.reject(new Error(message.error || L("onbekende fout", "unknown error")));
   });
 
   function relayCall(type, data) {
@@ -843,7 +861,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       relayPending.set(id, { resolve, reject });
       document.dispatchEvent(new CustomEvent("pt-relay-request", { detail: JSON.stringify({ id, type, ...data }) }));
       window.setTimeout(() => {
-        if (relayPending.delete(id)) reject(new Error("geen antwoord van Tampermonkey"));
+        if (relayPending.delete(id)) reject(new Error(L("geen antwoord van Tampermonkey", "no response from Tampermonkey")));
       }, 30000);
     });
   }
@@ -897,7 +915,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (data && Array.isArray(data.w) && data.t > (relay.phoneListAt || 0)) {
         if (JSON.stringify(data.w) !== listJsonNow()) {
           const result = applyTransfer({ t: data.t, w: data.w, p: {} });
-          showToast(`Price Watch: lijst van je telefoon overgenomen (${result.players} spelers).`, true);
+          showToast(L(`Price Watch: lijst van je telefoon overgenomen (${result.players} spelers).`, `Price Watch: list imported from your phone (${result.players} players).`), true);
         }
         saveRelay({ phoneListAt: data.t });
         changed = true;
@@ -941,7 +959,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     listeners.forEach(listener => listener());
     try {
       const data = JSON.parse(await relayCall("pull", { gistId: relay.gistId, file: RELAY_FILE }));
-      if (!data || !Array.isArray(data.w)) throw new Error("nog geen prijzen van je pc in de gist");
+      if (!data || !Array.isArray(data.w)) throw new Error(L("nog geen prijzen van je pc in de gist", "no prices from your PC in the gist yet"));
       const pcListJson = JSON.stringify(data.w);
       // Not while a list change from here is still waiting to be sent or to be taken over by the pc.
       const localEdit = relay.hasToken && relay.listJson && listJsonNow() !== relay.listJson;
@@ -1031,7 +1049,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (minutes < 60) return `ongeveer ${minutes} min.`;
     const hours = Math.floor(minutes / 60);
     const rest = minutes % 60;
-    return rest ? `ongeveer ${hours} uur en ${rest} min.` : `ongeveer ${hours} uur`;
+    return rest ? L(`ongeveer ${hours} uur en ${rest} min.`, `about ${hours} h ${rest} min.`) : L(`ongeveer ${hours} uur`, `about ${hours} h`);
   }
 
   // When the rolling window is full, calculate when enough old entries expire for one slot to open.
@@ -1049,12 +1067,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       const info = readJson(MARKET_SCAN_BACKOFF_INFO_KEY, {}) || {};
       if (info.kind === "rateLimit") {
         const status = info.status ? ` (HTTP ${info.status})` : "";
-        return `EA gaf een rate-limit-/Too Many Actions-signaal${status}. BIN-scans zijn uit voorzorg gepauzeerd; probeer over ongeveer ${minutes} min. opnieuw. Dit is een echte EA-reactie. De override kan deze pauze niet passeren.`;
+        return L(`EA gaf een rate-limit-/Too Many Actions-signaal${status}. BIN-scans zijn uit voorzorg gepauzeerd; probeer over ongeveer ${minutes} min. opnieuw. Dit is een echte EA-reactie. De override kan deze pauze niet passeren.`, `EA returned a rate-limit/Too Many Actions signal${status}. BIN scans are paused as a precaution; try again in about ${minutes} min. This is a real EA response. The override cannot bypass this pause.`);
       }
       if (info.kind === "timeout") {
-        return `EA heeft niet op tijd geantwoord. Price Watch pauzeert BIN-scans uit voorzorg nog ${minutes} min. Dit bewijst op zichzelf niet dat EA je heeft geblokkeerd.`;
+        return L(`EA heeft niet op tijd geantwoord. Price Watch pauzeert BIN-scans uit voorzorg nog ${minutes} min. Dit bewijst op zichzelf niet dat EA je heeft geblokkeerd.`, `EA did not respond in time. Price Watch is pausing BIN scans as a precaution for another ${minutes} min. This alone does not prove EA has blocked you.`);
       }
-      return `EA gaf geen bruikbaar antwoord. Price Watch pauzeert BIN-scans uit voorzorg nog ${minutes} min. Dit is niet automatisch een softban.`;
+      return L(`EA gaf geen bruikbaar antwoord. Price Watch pauzeert BIN-scans uit voorzorg nog ${minutes} min. Dit is niet automatisch een softban.`, `EA returned no usable response. Price Watch is pausing BIN scans as a precaution for another ${minutes} min. This is not automatically a softban.`);
     }
 
     const entries = getMarketScanLog();
@@ -1065,15 +1083,15 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     if (!continuingScan && lastCard && now - lastCard < MARKET_CARD_COOLDOWN_MS) {
       const until = lastCard + MARKET_CARD_COOLDOWN_MS;
-      return `Deze kaart is al door Price Watch gecontroleerd. Je kunt haar over ${waitLabel(until)} opnieuw scannen (15 min. kaartcooldown).`;
+      return L(`Deze kaart is al door Price Watch gecontroleerd. Je kunt haar over ${waitLabel(until)} opnieuw scannen (15 min. kaartcooldown).`, `This card was already checked by Price Watch. You can scan it again in ${waitLabel(until)} (15 min card cooldown).`);
     }
     if (recent.length >= MARKET_SCAN_MAX_10M) {
       const until = nextSearchSlot(recent, MARKET_SCAN_MAX_10M, 10 * 60 * 1000);
-      return `Price Watch-rem: ${recent.length}/${MARKET_SCAN_MAX_10M} eigen BIN-zoekacties gestart in 10 min. Een volgende scan kan over ${waitLabel(until)}. Dit is een lokale limiet, geen blokkademelding van EA.`;
+      return L(`Price Watch-rem: ${recent.length}/${MARKET_SCAN_MAX_10M} eigen BIN-zoekacties gestart in 10 min. Een volgende scan kan over ${waitLabel(until)}. Dit is een lokale limiet, geen blokkademelding van EA.`, `Price Watch brake: ${recent.length}/${MARKET_SCAN_MAX_10M} own BIN searches started in 10 min. The next scan is possible in ${waitLabel(until)}. This is a local limit, not a block notice from EA.`);
     }
     if (hourly.length >= MARKET_SCAN_MAX_HOUR) {
       const until = nextSearchSlot(hourly, MARKET_SCAN_MAX_HOUR, 60 * 60 * 1000);
-      return `Price Watch-rem: ${hourly.length}/${MARKET_SCAN_MAX_HOUR} eigen BIN-zoekacties gestart in 1 uur. Een volgende scan kan over ${waitLabel(until)}. Dit is een lokale limiet, geen blokkademelding van EA.`;
+      return L(`Price Watch-rem: ${hourly.length}/${MARKET_SCAN_MAX_HOUR} eigen BIN-zoekacties gestart in 1 uur. Een volgende scan kan over ${waitLabel(until)}. Dit is een lokale limiet, geen blokkademelding van EA.`, `Price Watch brake: ${hourly.length}/${MARKET_SCAN_MAX_HOUR} own BIN searches started in 1 hour. The next scan is possible in ${waitLabel(until)}. This is a local limit, not a block notice from EA.`);
     }
 
     const total = searchCounts();
@@ -1084,11 +1102,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     // same-card cooldown and any EA-error backoff are never bypassed.
     if (!overrideDeviceGuard && total.tenMinutes >= MARKET_TOTAL_GUARD_10M) {
       const until = nextSearchSlot(totalRecent, MARKET_TOTAL_GUARD_10M, 10 * 60 * 1000);
-      return `Lokale druktebeveiliging: ${total.tenMinutes}/${MARKET_TOTAL_GUARD_10M} transfermarktzoekacties gestart in 10 min. BIN-scan uitgesteld tot er ruimte is (over ${waitLabel(until)}). Dit is geen melding dat EA je heeft geblokkeerd.`;
+      return L(`Lokale druktebeveiliging: ${total.tenMinutes}/${MARKET_TOTAL_GUARD_10M} transfermarktzoekacties gestart in 10 min. BIN-scan uitgesteld tot er ruimte is (over ${waitLabel(until)}). Dit is geen melding dat EA je heeft geblokkeerd.`, `Local load protection: ${total.tenMinutes}/${MARKET_TOTAL_GUARD_10M} transfer market searches started in 10 min. BIN scan postponed until there is room (in ${waitLabel(until)}). This is not a notice that EA has blocked you.`);
     }
     if (!overrideDeviceGuard && total.hour >= MARKET_TOTAL_GUARD_HOUR) {
       const until = nextSearchSlot(totalHourly, MARKET_TOTAL_GUARD_HOUR, 60 * 60 * 1000);
-      return `Lokale druktebeveiliging: ${total.hour}/${MARKET_TOTAL_GUARD_HOUR} transfermarktzoekacties gestart in 1 uur. BIN-scan uitgesteld tot er ruimte is (over ${waitLabel(until)}). Dit is geen melding dat EA je heeft geblokkeerd.`;
+      return L(`Lokale druktebeveiliging: ${total.hour}/${MARKET_TOTAL_GUARD_HOUR} transfermarktzoekacties gestart in 1 uur. BIN-scan uitgesteld tot er ruimte is (over ${waitLabel(until)}). Dit is geen melding dat EA je heeft geblokkeerd.`, `Local load protection: ${total.hour}/${MARKET_TOTAL_GUARD_HOUR} transfer market searches started in 1 hour. BIN scan postponed until there is room (in ${waitLabel(until)}). This is not a notice that EA has blocked you.`);
     }
     return "";
   }
@@ -1103,24 +1121,24 @@ function priceWatchMain(SCRIPT_VERSION) {
     const armedAt = pendingMarketOverrides.get(key) || 0;
     if (!armedAt || now - armedAt > MARKET_OVERRIDE_ARM_MS) {
       pendingMarketOverrides.set(key, now);
-      throw new Error(`${reason} Klik binnen 30 seconden nogmaals op 'Laagste prijs' om één extra, beperkte scan bewust toe te staan.`);
+      throw new Error(L(`${reason} Klik binnen 30 seconden nogmaals op 'Laagste prijs' om één extra, beperkte scan bewust toe te staan.`, `${reason} Click 'Lowest price' again within 30 seconds to deliberately allow one extra, limited scan.`));
     }
 
     pendingMarketOverrides.delete(key);
     let accepted = false;
     try {
       accepted = window.confirm(
-        "Price Watch heeft een lokale druktebeveiliging geactiveerd omdat er kort geleden veel transfermarktzoekacties op dit apparaat zijn gestart. Dit is geen melding dat EA je account heeft geblokkeerd.\n\n" +
-        "Wil je bewust één beperkte BIN-scan toestaan?\n\n" +
-        `• Maximaal ${MARKET_MAX_SEARCHES} EA-zoekopdrachten voor deze scan\n` +
-        "• 12–18 seconden pauze tussen zoekopdrachten\n" +
-        "• Eigen scannerlimieten, kaartcooldown en pauze na een EA-fout blijven actief\n\n" +
-        "Ook met deze beperking kan EA marktactiviteit afremmen. Er bestaat geen door EA bevestigde veilige grens. Doorgaan?"
+        L("Price Watch heeft een lokale druktebeveiliging geactiveerd omdat er kort geleden veel transfermarktzoekacties op dit apparaat zijn gestart. Dit is geen melding dat EA je account heeft geblokkeerd.\n\n", "Price Watch has activated local load protection because many transfer market searches were started on this device a short while ago. This is not a notice that EA has blocked your account.\n\n") +
+        L("Wil je bewust één beperkte BIN-scan toestaan?\n\n", "Do you want to deliberately allow one limited BIN scan?\n\n") +
+        L(`• Maximaal ${MARKET_MAX_SEARCHES} EA-zoekopdrachten voor deze scan\n`, `• Maximum ${MARKET_MAX_SEARCHES} EA searches for this scan\n`) +
+        L("• 12–18 seconden pauze tussen zoekopdrachten\n", "• 12–18 seconds pause between searches\n") +
+        L("• Eigen scannerlimieten, kaartcooldown en pauze na een EA-fout blijven actief\n\n", "• Own scanner limits, card cooldown and pause after an EA error stay active\n\n") +
+        L("Ook met deze beperking kan EA marktactiviteit afremmen. Er bestaat geen door EA bevestigde veilige grens. Doorgaan?", "Even with this limit, EA may throttle market activity. There is no EA-confirmed safe threshold. Continue?")
       );
     } catch (_) {
       accepted = false;
     }
-    if (!accepted) throw new Error("Eenmalige override geannuleerd; er zijn geen extra zoekopdrachten gestart.");
+    if (!accepted) throw new Error(L("Eenmalige override geannuleerd; er zijn geen extra zoekopdrachten gestart.", "One-time override cancelled; no extra searches were started."));
     return true;
   }
 
@@ -1146,7 +1164,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const result = lastLowest[definitionId];
     if (!result || !result.counts.length) return "";
     return result.counts.map(({ price, count, exact }) => `${priceFormat.format(price)} ×${count}${exact ? "" : "+"}`).join(" · ") +
-      (result.certain ? "" : " (nog niet zeker de laagste)");
+      (result.certain ? "" : L(" (nog niet zeker de laagste)", " (not yet sure it is the lowest)"));
   }
 
   function getMarketPrices() {
@@ -1179,7 +1197,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         // Older builds cache less.
       }
       const observable = services.Item.searchTransferMarket(criteria, 1);
-      if (!observable || typeof observable.observe !== "function") throw new Error("EA-zoekfunctie niet beschikbaar");
+      if (!observable || typeof observable.observe !== "function") throw new Error(L("EA-zoekfunctie niet beschikbaar", "EA search function not available"));
       const context = {};
       const timeout = window.setTimeout(() => {
         try {
@@ -1187,7 +1205,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         } catch (_) {
           // Already done.
         }
-        const error = new Error("EA reageerde niet binnen 15 seconden (time-out).");
+        const error = new Error(L("EA reageerde niet binnen 15 seconden (time-out).", "EA did not respond within 15 seconds (timeout)."));
         error.marketSignal = "timeout";
         reject(error);
       }, 15000);
@@ -1205,8 +1223,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           ].filter(value => typeof value === "string").join(" ");
           const rateLimited = status === 429 || /too\s+many\s+actions|rate.?limit|soft.?ban|temporarily\s+blocked/i.test(detail);
           const error = new Error(rateLimited
-            ? `EA gaf een rate-limit-/Too Many Actions-signaal${status ? ` (HTTP ${status})` : ""}. Stop met scannen en probeer later opnieuw.`
-            : `EA gaf geen succesvolle reactie${status ? ` (HTTP ${status})` : ""}. Price Watch neemt uit voorzorg pauze.`);
+            ? L(`EA gaf een rate-limit-/Too Many Actions-signaal${status ? ` (HTTP ${status})` : ""}. Stop met scannen en probeer later opnieuw.`, `EA returned a rate-limit/Too Many Actions signal${status ? ` (HTTP ${status})` : ""}. Stop scanning and try again later.`)
+            : L(`EA gaf geen succesvolle reactie${status ? ` (HTTP ${status})` : ""}. Price Watch neemt uit voorzorg pauze.`, `EA returned no successful response${status ? ` (HTTP ${status})` : ""}. Price Watch is pausing as a precaution.`));
           error.marketSignal = rateLimited ? "rateLimit" : "eaError";
           error.status = status || null;
           reject(error);
@@ -1241,8 +1259,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   async function findLowestPrice(definitionId, onProgress) {
-    if (marketBusy) throw new Error("Er loopt al een zoekopdracht");
-    if (!definitionId) throw new Error("Speler-ID ontbreekt");
+    if (marketBusy) throw new Error(L("Er loopt al een zoekopdracht", "A search is already running"));
+    if (!definitionId) throw new Error(L("Speler-ID ontbreekt", "Player ID missing"));
     const initialBlock = marketScanBlockReason(definitionId);
     let overrideDeviceGuard = false;
     if (initialBlock) {
@@ -1350,7 +1368,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try {
       g.fetchBulkPrices(unique);
     } catch (error) {
-      console.warn("Price Watch: FUT Genie-prijzen ophalen mislukt.", error);
+      console.warn(L("Price Watch: FUT Genie-prijzen ophalen mislukt.", "Price Watch: fetching FUT Genie prices failed."), error);
       return Promise.resolve(false);
     }
     return new Promise(resolve => {
@@ -1405,7 +1423,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Transfer market: prepares the filters only, never runs a search
   // ---------------------------------------------------------------------------
 
-  const SEARCH_TITLE = "Transfermarkt voorbereiden: speler + rarity + max BIN = instapdoel (Shift+klik: zonder max BIN). Zoeken doe je zelf.";
+  const SEARCH_TITLE = L("Transfermarkt voorbereiden: speler + rarity + max BIN = instapdoel (Shift+klik: zonder max BIN). Zoeken doe je zelf.", "Preparing transfer market: player + rarity + max BIN = entry target (Shift+click: without max BIN). You do the search yourself.");
 
   // Opens the market *filters* screen with the given criteria. The user presses Search.
   function openFilters(criteria, playerData) {
@@ -1419,7 +1437,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const transfersTab = tabBar && tabBar.childViewControllers.find(child => child.tabBarItem && child.tabBarItem.getTag &&
       child.tabBarItem.getTag() === UTGameTabBarController.TabTag.TRANSFERS);
     const nav = [presented instanceof UTTabBarController ? current(presented) : presented, transfersTab, current(tabBar)].find(isNav);
-    if (!nav) throw new Error("Transfers-navigatie niet gevonden");
+    if (!nav) throw new Error(L("Transfers-navigatie niet gevonden", "Transfers navigation not found"));
 
     // Back to the Transfers hub first, so repeated use doesn't grow the navigation stack.
     const stack = nav.childViewControllers || [];
@@ -1487,7 +1505,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   function distanceState(target, current) {
     if (target === null || current === null) {
-      return { percent: null, text: "—", className: "pt-distance", title: target === null ? "Vul een PC-instapdoel in om de afstand te berekenen" : "Nog geen FUT Genie-prijs" };
+      return { percent: null, text: "—", className: "pt-distance", title: target === null ? L("Vul een PC-instapdoel in om de afstand te berekenen", "Enter a PC entry target to calculate the distance") : L("Nog geen FUT Genie-prijs", "No FUT Genie price yet") };
     }
 
     const delta = current - target;
@@ -1496,12 +1514,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     const text = `${sign}${priceFormat.format(delta)} (${sign}${percent.toFixed(1)}%)`;
 
     if (delta <= 0) {
-      return { percent, text, className: "pt-distance pt-hit", title: "Instapdoel bereikt: huidige prijs is op of onder je doelprijs" };
+      return { percent, text, className: "pt-distance pt-hit", title: L("Instapdoel bereikt: huidige prijs is op of onder je doelprijs", "Entry target reached: current price is at or below your target price") };
     }
     if (percent <= NEAR_PERCENT) {
-      return { percent, text, className: "pt-distance pt-near", title: `Bijna op je instapdoel: maximaal ${NEAR_PERCENT}% erboven` };
+      return { percent, text, className: "pt-distance pt-near", title: L(`Bijna op je instapdoel: maximaal ${NEAR_PERCENT}% erboven`, `Almost at your entry target: at most ${NEAR_PERCENT}% above`) };
     }
-    return { percent, text, className: "pt-distance pt-far", title: `Huidige prijs ligt meer dan ${NEAR_PERCENT}% boven je instapdoel` };
+    return { percent, text, className: "pt-distance pt-far", title: L(`Huidige prijs ligt meer dan ${NEAR_PERCENT}% boven je instapdoel`, `Current price is more than ${NEAR_PERCENT}% above your entry target`) };
   }
 
   // ---------------------------------------------------------------------------
@@ -1542,14 +1560,14 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   async function decodeTransfer(code) {
     const match = String(code || "").replace(/\s+/g, "").match(/PW1\.([zj])([\w-]+)/);
-    if (!match) throw new Error("Geen geldige overzetcode (die begint met PW1.)");
+    if (!match) throw new Error(L("Geen geldige overzetcode (die begint met PW1.)", "Not a valid transfer code (it starts with PW1.)"));
     let bytes = fromBase64Url(match[2]);
     if (match[1] === "z") {
-      if (typeof DecompressionStream !== "function") throw new Error("Deze browser kan de code niet uitpakken (update iOS)");
+      if (typeof DecompressionStream !== "function") throw new Error(L("Deze browser kan de code niet uitpakken (update iOS)", "This browser cannot unpack the code (update iOS)"));
       bytes = await pipeBytes(bytes, new DecompressionStream("deflate-raw"));
     }
     const data = JSON.parse(new TextDecoder().decode(bytes));
-    if (!data || !Array.isArray(data.w)) throw new Error("De code bevat geen Price Watch-lijst");
+    if (!data || !Array.isArray(data.w)) throw new Error(L("De code bevat geen Price Watch-lijst", "The code contains no Price Watch list"));
     return data;
   }
 
@@ -1597,7 +1615,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function transferSummary(result) {
-    return `${result.players} speler(s) overgezet, ${result.priced} met prijs (van ${formatDayTime(result.at)}).`;
+    return L(`${result.players} speler(s) overgezet, ${result.priced} met prijs (van ${formatDayTime(result.at)}).`, `${result.players} player(s) transferred, ${result.priced} with price (from ${formatDayTime(result.at)}).`);
   }
 
   // The QR library is only needed on the pc, when the transfer panel opens.
@@ -1618,13 +1636,13 @@ function priceWatchMain(SCRIPT_VERSION) {
   function buildPushPanel() {
     const panel = el("div", "pt-transfer");
     const part = el("div", "pt-transfer-part");
-    part.appendChild(el("div", "pt-transfer-title", "Pushmelding op je telefoon (ntfy)"));
+    part.appendChild(el("div", "pt-transfer-title", L("Pushmelding op je telefoon (ntfy)", "Push notification on your phone (ntfy)")));
     const info = el("div", "pt-muted");
     const topic = el("input", "pt-transfer-input");
     topic.type = "text";
     topic.autocomplete = "off";
-    topic.placeholder = "jouw topic, bijv. pw-k8f3x9q2m7";
-    const save = el("button", "pt-watch-refresh", "Opslaan");
+    topic.placeholder = L("jouw topic, bijv. pw-k8f3x9q2m7", "your topic, e.g. pw-k8f3x9q2m7");
+    const save = el("button", "pt-watch-refresh", L("Opslaan", "Save"));
     const test = el("button", "pt-watch-refresh", "Test sturen");
     const off = el("button", "pt-link-btn", "Uitzetten");
     const result = el("span", "pt-muted");
@@ -1637,26 +1655,26 @@ function priceWatchMain(SCRIPT_VERSION) {
       test.style.display = current ? "" : "none";
       off.style.display = current ? "" : "none";
       info.textContent = (current
-        ? `Aan: zakt een speler na een prijsupdate tot zijn doel, dan stuurt deze pc een melding naar topic "${current}".`
-        : "Uit. Kies een lange, willekeurige topic-naam (iedereen die hem kent kan meelezen) en klik op Opslaan.") +
-        " Op je iPhone: installeer de app ntfy, tik op + en abonneer je op precies dezelfde topic." +
-        (pcDevice() ? "" : " Let op: alleen je pc (computer) verstuurt meldingen.");
+        ? L(`Aan: zakt een speler na een prijsupdate tot zijn doel, dan stuurt deze pc een melding naar topic "${current}".`, `On: if a player drops to his target after a price update, this PC sends a notification to topic "${current}".`)
+        : L("Uit. Kies een lange, willekeurige topic-naam (iedereen die hem kent kan meelezen) en klik op Opslaan.", "Off. Choose a long, random topic name (anyone who knows it can read along) and click Save.")) +
+        L(" Op je iPhone: installeer de app ntfy, tik op + en abonneer je op precies dezelfde topic.", " On your iPhone: install the ntfy app, tap + and subscribe to exactly the same topic.") +
+        (pcDevice() ? "" : L(" Let op: alleen je pc (computer) verstuurt meldingen.", " Note: only your PC (computer) sends notifications."));
     };
     const randomTopic = () => `pw-${Array.from(crypto.getRandomValues(new Uint8Array(12)), byte => "abcdefghijkmnpqrstuvwxyz23456789"[byte % 32]).join("")}`;
     const call = (type, data, done) => {
       result.textContent = "…";
-      relayCall(type, data).then(value => { result.textContent = done(value) || ""; render(); }, error => { result.textContent = `Mislukt: ${error.message}`; });
+      relayCall(type, data).then(value => { result.textContent = done(value) || ""; render(); }, error => { result.textContent = L(`Mislukt: ${error.message}`, `Failed: ${error.message}`); });
     };
     save.addEventListener("click", () => call("setNtfy", { topic: topic.value.trim() }, value => { current = value.topic; return current ? "Opgeslagen." : "Uitgezet."; }));
     off.addEventListener("click", () => call("setNtfy", { topic: "" }, () => { current = ""; topic.value = randomTopic(); return "Uitgezet."; }));
-    test.addEventListener("click", () => call("notify", { title: "Price Watch test", text: "Zo ziet een melding eruit als een speler op doel zit." },
-      sent => (sent ? "Verstuurd – komt hij binnen op je telefoon?" : "Geen topic ingesteld.")));
+    test.addEventListener("click", () => call("notify", { title: "Price Watch test", text: L("Zo ziet een melding eruit als een speler op doel zit.", "This is what a notification looks like when a player is at target.") },
+      sent => (sent ? L("Verstuurd – komt hij binnen op je telefoon?", "Sent – did it arrive on your phone?") : L("Geen topic ingesteld.", "No topic set."))));
     panel.__ptOpen = () => {
       relayCall("ntfyStatus", {}).then(status => {
         current = status.topic || "";
         topic.value = current || randomTopic();
         render();
-      }, error => { info.textContent = `Tampermonkey antwoordt niet: ${error.message}`; });
+      }, error => { info.textContent = L(`Tampermonkey antwoordt niet: ${error.message}`, `Tampermonkey is not responding: ${error.message}`); });
     };
     return panel;
   }
@@ -1665,46 +1683,46 @@ function priceWatchMain(SCRIPT_VERSION) {
     const panel = el("div", "pt-transfer");
 
     const send = el("div", "pt-transfer-part");
-    send.appendChild(el("div", "pt-transfer-title", "Naar je telefoon"));
+    send.appendChild(el("div", "pt-transfer-title", L("Naar je telefoon", "To your phone")));
     const qrBox = el("div", "pt-transfer-qr");
     const sendInfo = el("div", "pt-muted");
-    const copy = el("button", "pt-watch-refresh", "📋 Kopieer code");
+    const copy = el("button", "pt-watch-refresh", L("📋 Kopieer code", "📋 Copy code"));
     copy.type = "button";
     send.append(qrBox, sendInfo, copy);
 
     const receive = el("div", "pt-transfer-part");
-    receive.appendChild(el("div", "pt-transfer-title", "Code plakken"));
+    receive.appendChild(el("div", "pt-transfer-title", L("Code plakken", "Paste code")));
     const area = el("textarea", "pt-transfer-input");
     area.placeholder = "PW1.…";
     area.rows = 3;
     const apply = el("button", "pt-watch-refresh", "Overnemen");
     apply.type = "button";
     const receiveInfo = el("div", "pt-muted",
-      "Vervangt de lijst op dit apparaat door die uit de code (doelen + FUT Genie-prijzen van dat moment).");
+      L("Vervangt de lijst op dit apparaat door die uit de code (doelen + FUT Genie-prijzen van dat moment).", "Replaces the list on this device with the one from the code (targets + FUT Genie prices from that moment)."));
     receive.append(area, apply, receiveInfo);
     panel.append(send, receive);
 
     // Live via your pc: the pc (with FUT Genie) writes list + prices to your gist, the phone reads it.
     const live = el("div", "pt-transfer-part");
-    live.appendChild(el("div", "pt-transfer-title", "Live via je pc (GitHub gist)"));
+    live.appendChild(el("div", "pt-transfer-title", L("Live via je pc (GitHub gist)", "Live via your PC (GitHub gist)")));
     const liveInfo = el("div", "pt-muted");
     const gist = el("input", "pt-transfer-input");
     gist.type = "text";
-    gist.placeholder = "Link of id van je geheime gist";
+    gist.placeholder = L("Link of id van je geheime gist", "Link or ID of your secret gist");
     const token = el("input", "pt-transfer-input");
     token.type = "password";
     token.autocomplete = "off";
-    token.placeholder = "GitHub-token (alleen recht: gist)";
-    const saveToken = el("button", "pt-watch-refresh", "Token opslaan");
+    token.placeholder = L("GitHub-token (alleen recht: gist)", "GitHub token (only permission: gist)");
+    const saveToken = el("button", "pt-watch-refresh", L("Token opslaan", "Save token"));
     saveToken.type = "button";
     const sendNow = el("button", "pt-watch-refresh", "↑ Nu versturen");
     sendNow.type = "button";
     const clearToken = el("button", "pt-watch-refresh", "Token wissen");
     clearToken.type = "button";
-    const pullNow = el("button", "pt-watch-refresh", "↓ Nu ophalen");
+    const pullNow = el("button", "pt-watch-refresh", L("↓ Nu ophalen", "↓ Fetch now"));
     pullNow.type = "button";
     // The token to the phone as a QR code. Tampermonkey's part draws it, so the token never reaches this page.
-    const tokenQr = el("button", "pt-watch-refresh", "📱 Token naar telefoon");
+    const tokenQr = el("button", "pt-watch-refresh", L("📱 Token naar telefoon", "📱 Token to phone"));
     tokenQr.type = "button";
     const tokenQrBox = el("div", "pt-transfer-qr");
     tokenQrBox.id = "pt-token-qr";
@@ -1714,7 +1732,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       window.clearTimeout(tokenQrTimer);
       tokenQrBox.textContent = "";
       tokenQrInfo.textContent = "";
-      tokenQr.textContent = "📱 Token naar telefoon";
+      tokenQr.textContent = L("📱 Token naar telefoon", "📱 Token to phone");
     };
     live.append(liveInfo, gist, token, saveToken, sendNow, clearToken, pullNow, tokenQr, tokenQrBox, tokenQrInfo);
     panel.prepend(live);
@@ -1725,30 +1743,30 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (document.activeElement !== gist) gist.value = relay.gistId || "";
       token.style.display = relay.hasToken ? "none" : "";
       saveToken.style.display = relay.hasToken ? "none" : "";
-      sendNow.textContent = pc ? "↑ Nu versturen" : "↑ Lijst naar pc";
+      sendNow.textContent = pc ? "↑ Nu versturen" : L("↑ Lijst naar pc", "↑ List to PC");
       sendNow.style.display = relay.hasToken ? "" : "none";
       clearToken.style.display = relay.hasToken ? "" : "none";
       pullNow.style.display = pc ? "none" : "";
       tokenQr.style.display = pc && relay.hasToken ? "" : "none";
       if (!(pc && relay.hasToken) && tokenQrBox.firstChild) hideTokenQr();
-      const error = relay.error ? ` Laatste fout: ${relay.error}` : "";
+      const error = relay.error ? L(` Laatste fout: ${relay.error}`, ` Last error: ${relay.error}`) : "";
       const phoneList = relay.hasToken
-        ? " Wijzig je hier de lijst, dan gaat die binnen een halve minuut naar je pc, die hem overneemt en er prijzen bij zoekt." +
-          (relay.listSentAt ? ` Laatst verstuurd: ${formatDayTime(relay.listSentAt)}.` : "")
-        : " Wil je hier een lijst maken voor je pc? Vul dan hier hetzelfde GitHub-token in.";
+        ? L(" Wijzig je hier de lijst, dan gaat die binnen een halve minuut naar je pc, die hem overneemt en er prijzen bij zoekt.", " If you change the list here, it goes to your PC within half a minute, which imports it and looks up prices for it.") +
+          (relay.listSentAt ? L(` Laatst verstuurd: ${formatDayTime(relay.listSentAt)}.`, ` Last sent: ${formatDayTime(relay.listSentAt)}.`) : "")
+        : L(" Wil je hier een lijst maken voor je pc? Vul dan hier hetzelfde GitHub-token in.", " Want to create a list here for your PC? Then enter the same GitHub token here.");
       liveInfo.textContent = pc
         ? relay.hasToken
-          ? "Deze pc zet elke 5 minuten je lijst + FUT Genie-prijzen in de gist (zolang de web app openstaat)" +
-            " en neemt elke minuut een nieuwe lijst van je telefoon over." +
+          ? L("Deze pc zet elke 5 minuten je lijst + FUT Genie-prijzen in de gist (zolang de web app openstaat)", "This PC puts your list + FUT Genie prices in the gist every 5 minutes (as long as the web app is open)") +
+            L(" en neemt elke minuut een nieuwe lijst van je telefoon over.", " and imports a new list from your phone every minute.") +
             (relay.sentAt ? ` Laatst: ${formatDayTime(relay.sentAt)}.` : "") + error
-          : "Vul een GitHub-token in (alleen het recht \"gist\"); die blijft in Tampermonkey op deze pc." + error
+          : L("Vul een GitHub-token in (alleen het recht \"gist\"); die blijft in Tampermonkey op deze pc.", "Enter a GitHub token (only the \"gist\" permission); it stays in Tampermonkey on this PC.") + error
         : (relay.pricesAt
-          ? `Prijzen van je pc: ${formatDayTime(relay.pricesAt)}${relayFresh() ? " (live)" : " – staat de web app op je pc open?"}.`
-          : "Wacht op prijzen van je pc. Zet daar eerst het token in.") + phoneList + error;
+          ? L(`Prijzen van je pc: ${formatDayTime(relay.pricesAt)}${relayFresh() ? " (live)" : " – staat de web app op je pc open?"}.`, `Prices from your PC: ${formatDayTime(relay.pricesAt)}${relayFresh() ? " (live)" : " – is the web app open on your PC?"}.`)
+          : L("Wacht op prijzen van je pc. Zet daar eerst het token in.", "Waiting for prices from your PC. Set the token there first.")) + phoneList + error;
     };
     gist.addEventListener("change", () => {
       const id = gistIdFrom(gist.value);
-      saveRelay({ gistId: id, listJson: "", error: id ? "" : "Geen geldige gist-link" });
+      saveRelay({ gistId: id, listJson: "", error: id ? "" : L("Geen geldige gist-link", "Not a valid gist link") });
     });
     saveToken.addEventListener("click", async () => {
       saveToken.disabled = true;
@@ -1776,13 +1794,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       tokenQr.disabled = true;
       try {
         await relayCall("tokenQr", { targetId: tokenQrBox.id, base: `${location.origin}${location.pathname}`, gistId: getRelay().gistId });
-        tokenQr.textContent = "Verberg QR-code";
-        tokenQrInfo.textContent = "Scan met de camera van je iPhone: Price Watch daar slaat het token op. " +
-          "Het token staat in deze link, wis hem daarna uit de geschiedenis van Safari. De code verdwijnt na 2 minuten.";
+        tokenQr.textContent = L("Verberg QR-code", "Hide QR code");
+        tokenQrInfo.textContent = L("Scan met de camera van je iPhone: Price Watch daar slaat het token op. ", "Scan with your iPhone camera: Price Watch there saves the token. ") +
+          L("Het token staat in deze link, wis hem daarna uit de geschiedenis van Safari. De code verdwijnt na 2 minuten.", "The token is in this link, so clear it from your Safari history afterwards. The code disappears after 2 minutes.");
         tokenQrTimer = window.setTimeout(hideTokenQr, 2 * 60 * 1000);
       } catch (error) {
         hideTokenQr();
-        tokenQrInfo.textContent = `Geen QR-code: ${error.message}`;
+        tokenQrInfo.textContent = L(`Geen QR-code: ${error.message}`, `No QR code: ${error.message}`);
       }
       tokenQr.disabled = false;
     });
@@ -1791,14 +1809,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     let code = "";
     copy.addEventListener("click", async () => {
       const ok = await copyText(code);
-      flashButton(copy, ok ? "✓ Gekopieerd" : "Kopiëren mislukt", ok, "", "📋 Kopieer code", "");
+      flashButton(copy, ok ? L("✓ Gekopieerd", "✓ Copied") : L("Kopiëren mislukt", "Copy failed"), ok, "", L("📋 Kopieer code", "📋 Copy code"), "");
     });
     apply.addEventListener("click", async () => {
       try {
         receiveInfo.textContent = transferSummary(applyTransfer(await decodeTransfer(area.value)));
         area.value = "";
       } catch (error) {
-        receiveInfo.textContent = `Overnemen mislukt: ${error.message}`;
+        receiveInfo.textContent = L(`Overnemen mislukt: ${error.message}`, `Import failed: ${error.message}`);
       }
     });
 
@@ -1809,16 +1827,16 @@ function priceWatchMain(SCRIPT_VERSION) {
       const url = `${location.origin}${location.pathname}#pw=${code}`;
       qrBox.textContent = "";
       try {
-        if (!(await loadQrLibrary())) throw new Error("QR-bibliotheek niet geladen");
+        if (!(await loadQrLibrary())) throw new Error(L("QR-bibliotheek niet geladen", "QR library not loaded"));
         const qr = window.qrcode(0, "L");
         qr.addData(url);
         qr.make();
         qrBox.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
       } catch (error) {
-        qrBox.appendChild(el("div", "pt-muted", `Geen QR-code (${error.message}). Gebruik "Kopieer code" en plak hem op je telefoon.`));
+        qrBox.appendChild(el("div", "pt-muted", L(`Geen QR-code (${error.message}). Gebruik "Kopieer code" en plak hem op je telefoon.`, `No QR code (${error.message}). Use "Copy code" and paste it on your phone.`)));
       }
-      sendInfo.textContent = `${data.w.length} speler(s), ${Object.keys(data.p).length} met prijs. ` +
-        "Scan met de camera van je iPhone: Safari opent de web app en neemt de lijst over. Prijzen zijn die van nu; zet opnieuw over voor verse prijzen.";
+      sendInfo.textContent = L(`${data.w.length} speler(s), ${Object.keys(data.p).length} met prijs. `, `${data.w.length} player(s), ${Object.keys(data.p).length} with price. `) +
+        L("Scan met de camera van je iPhone: Safari opent de web app en neemt de lijst over. Prijzen zijn die van nu; zet opnieuw over voor verse prijzen.", "Scan with your iPhone camera: Safari opens the web app and imports the list. Prices are as of now; transfer again for fresh prices.");
     };
     return panel;
   }
@@ -1835,7 +1853,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!code) return;
     decodeTransfer(code)
       .then(data => showToast(`Price Watch: ${transferSummary(applyTransfer(data))}`, true))
-      .catch(error => showToast(`Price Watch: overzetten mislukt – ${error.message}`, false));
+      .catch(error => showToast(L(`Price Watch: overzetten mislukt – ${error.message}`, `Price Watch: transfer failed – ${error.message}`), false));
   }
 
   function showToast(text, ok) {
@@ -1909,11 +1927,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     atTarget = hits;
     if (!seeded || !newlyHit.length) return;
     if (chimeOn()) playChime();
-    const text = newlyHit.map(({ entry, price }) => `${entry.name}: ${priceFormat.format(price)} (doel ${priceFormat.format(entry.target)})`);
-    showToast(`🎯 Op doel: ${text.join(" · ")}`, true);
+    const text = newlyHit.map(({ entry, price }) => L(`${entry.name}: ${priceFormat.format(price)} (doel ${priceFormat.format(entry.target)})`, `${entry.name}: ${priceFormat.format(price)} (target ${priceFormat.format(entry.target)})`));
+    showToast(L(`🎯 Op doel: ${text.join(" · ")}`, `🎯 At target: ${text.join(" · ")}`), true);
     // Push to the phone (ntfy) only from the pc with FUT Genie, so a phone with the app open doesn't send it twice.
-    if (pcDevice()) relayCall("notify", { title: newlyHit.length > 1 ? `${newlyHit.length} spelers op doel` : "Speler op doel", text: text.join("\n") })
-      .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+    if (pcDevice()) relayCall("notify", { title: newlyHit.length > 1 ? L(`${newlyHit.length} spelers op doel`, `${newlyHit.length} players at target`) : L("Speler op doel", "Player at target"), text: text.join("\n") })
+      .catch(error => console.warn(L("Price Watch: ntfy-melding mislukt.", "Price Watch: ntfy notification failed."), error));
   }
   // Seed once the first prices are in; after that every update (Genie on the pc, the gist on the phone) counts.
   listeners.add(() => {
@@ -1946,47 +1964,47 @@ function priceWatchMain(SCRIPT_VERSION) {
     const version = SCRIPT_VERSION;
     if (version) title.appendChild(el("span", "pt-watch-version", `v${version}`));
     heading.append(title, status);
-    const refresh = el("button", "pt-watch-refresh", "↻ Prijzen verversen");
+    const refresh = el("button", "pt-watch-refresh", L("↻ Prijzen verversen", "↻ Refresh prices"));
     refresh.type = "button";
     refresh.addEventListener("click", async () => {
       if (refresh.dataset.refreshing === "1") return;
       refresh.dataset.refreshing = "1";
       refresh.disabled = true;
-      refresh.textContent = "↻ Bezig met verversen…";
+      refresh.textContent = L("↻ Bezig met verversen…", "↻ Refreshing…");
       try {
         // Force a fresh FUT.GG manifest + PC feed download, and refresh FUT Genie too when available.
         const futggPromise = refreshFutggPrices(true);
         refreshGeniePrices(true);
         const futggOk = await futggPromise;
         const count = Object.keys(futggPrices).length;
-        const time = futggPricesAt ? new Date(futggPricesAt).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "onbekend";
+        const time = futggPricesAt ? new Date(futggPricesAt).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : L("onbekend", "unknown");
         if (futggOk && count) {
-          showToast(`✅ FUT.GG PC-prijzen opnieuw opgehaald: ${count.toLocaleString("nl-NL")} prijzen (${time}). ${genie() ? "FUT Genie-refresh ook gestart." : "Geen FUT Genie gevonden; telefoonprijzen worden via de relay bijgewerkt."}`, true);
+          showToast(L(`✅ FUT.GG PC-prijzen opnieuw opgehaald: ${count.toLocaleString("nl-NL")} prijzen (${time}). ${genie() ? "FUT Genie-refresh ook gestart." : "Geen FUT Genie gevonden; telefoonprijzen worden via de relay bijgewerkt."}`, `✅ FUT.GG PC prices fetched again: ${count.toLocaleString("nl-NL")} prices (${time}). ${genie() ? "FUT Genie refresh also started." : "No FUT Genie found; phone prices are updated via the relay."}`), true);
         } else {
-          showToast(`⚠️ FUT.GG verversen mislukt: ${futggLastError || "onbekende fout"}. ${genie() ? "FUT Genie-refresh is wel gestart." : ""}`, false);
+          showToast(L(`⚠️ FUT.GG verversen mislukt: ${futggLastError || "onbekende fout"}. ${genie() ? "FUT Genie-refresh is wel gestart." : ""}`, `⚠️ FUT.GG refresh failed: ${futggLastError || "unknown error"}. ${genie() ? "FUT Genie refresh was started." : ""}`), false);
         }
       } catch (error) {
-        showToast(`Prijzen verversen mislukt: ${error && error.message ? error.message : error}`, false);
+        showToast(L(`Prijzen verversen mislukt: ${error && error.message ? error.message : error}`, `Refreshing prices failed: ${error && error.message ? error.message : error}`), false);
       } finally {
         refresh.dataset.refreshing = "0";
         refresh.disabled = false;
-        refresh.textContent = "↻ Prijzen verversen";
+        refresh.textContent = L("↻ Prijzen verversen", "↻ Refresh prices");
       }
     });
-    const transfer = el("button", "pt-watch-refresh", "⇄ Overzetten");
+    const transfer = el("button", "pt-watch-refresh", L("⇄ Overzetten", "⇄ Transfer"));
     transfer.type = "button";
-    transfer.title = "Lijst + prijzen naar je telefoon (QR-code) of een code van je pc plakken";
-    const walk = el("button", "pt-watch-refresh pt-primary", "▶ Alles afgaan");
+    transfer.title = L("Lijst + prijzen naar je telefoon (QR-code) of een code van je pc plakken", "Send list + prices to your phone (QR code) or paste a code from your PC");
+    const walk = el("button", "pt-watch-refresh pt-primary", L("▶ Alles afgaan", "▶ Go through all"));
     walk.type = "button";
-    walk.title = "Zet speler na speler klaar op de transfermarkt (balk met \"Volgende\"): jouw PC-instapdoel als max BIN, leeg = auto uit de Genie-prijs. Duurste eerst.";
+    walk.title = L("Zet speler na speler klaar op de transfermarkt (balk met \"Volgende\"): jouw PC-instapdoel als max BIN, leeg = auto uit de Genie-prijs. Duurste eerst.", "Sets up player after player on the transfer market (bar with \"Next\"): your PC entry target as max BIN, empty = auto from the Genie price. Most expensive first.");
     walk.addEventListener("click", async () => {
-      if (!(await startWatchRun())) showToast("Nog geen spelers om af te gaan.", false);
+      if (!(await startWatchRun())) showToast(L("Nog geen spelers om af te gaan.", "No players to go through yet."), false);
     });
     const chime = el("button", "pt-watch-refresh");
     chime.type = "button";
     const showChime = () => {
       chime.textContent = chimeOn() ? "🔔" : "🔕";
-      chime.title = chimeOn() ? "Pling als een speler na een prijsupdate op je doel zit (klik om uit te zetten)" : "Pling staat uit (klik om aan te zetten)";
+      chime.title = chimeOn() ? L("Pling als een speler na een prijsupdate op je doel zit (klik om uit te zetten)", "Ding when a player is at your target after a price update (click to turn off)") : L("Pling staat uit (klik om aan te zetten)", "Ding is off (click to turn on)");
     };
     chime.addEventListener("click", () => {
       try {
@@ -2001,10 +2019,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const oneClick = el("button", "pt-watch-refresh");
     oneClick.type = "button";
     const showOneClick = () => {
-      oneClick.textContent = oneClickOn() ? "⚡ 1-klik" : "🛑 Pop-up";
+      oneClick.textContent = oneClickOn() ? L("⚡ 1-klik", "⚡ 1-click") : "🛑 Pop-up";
       oneClick.title = oneClickOn()
-        ? "Buy Now koopt direct, zonder bevestigings-pop-up (klik om de pop-up terug te zetten)"
-        : "Buy Now vraagt om bevestiging (klik voor kopen zonder pop-up). Staat One click Buy Now in FUT Genie aan, dan slaat Genie de pop-up nog steeds over.";
+        ? L("Buy Now koopt direct, zonder bevestigings-pop-up (klik om de pop-up terug te zetten)", "Buy Now buys instantly, without a confirmation pop-up (click to bring the pop-up back)")
+        : L("Buy Now vraagt om bevestiging (klik voor kopen zonder pop-up). Staat One click Buy Now in FUT Genie aan, dan slaat Genie de pop-up nog steeds over.", "Buy Now asks for confirmation (click to buy without pop-up). If One click Buy Now is on in FUT Genie, Genie still skips the pop-up.");
     };
     oneClick.addEventListener("click", () => {
       try {
@@ -2017,7 +2035,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     showOneClick();
     const push = el("button", "pt-watch-refresh", "📲");
     push.type = "button";
-    push.title = "Pushmelding op je telefoon (ntfy) als een speler op doel zit, ook als hij vergrendeld is";
+    push.title = L("Pushmelding op je telefoon (ntfy) als een speler op doel zit, ook als hij vergrendeld is", "Push notification on your phone (ntfy) when a player is at target, even if he is locked");
     const actions = el("div", "pt-watch-actions");
     actions.append(walk, oneClick, chime, push, transfer, refresh);
     const pushPanel = buildPushPanel();
@@ -2040,12 +2058,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     const head = el("thead");
     const headRow = el("tr");
     const columns = [
-      ["Speler", "pt-col-name"],
+      [L("Speler", "Player"), "pt-col-name"],
       ["Rating", "pt-col-rating"],
       ["Rarity", "pt-col-rarity"],
       ["Marketprijs", "pt-col-price"],
       ["PC-instapdoel", "pt-col-target"],
-      ["Afstand", "pt-col-distance pt-sortable"],
+      [L("Afstand", "Distance"), "pt-col-distance pt-sortable"],
       ["", "pt-col-remove"]
     ];
     columns.forEach(([label, className]) => headRow.appendChild(el("th", className, label)));
@@ -2064,7 +2082,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     table.append(head, body);
 
     const empty = el("div", "pt-watch-empty",
-      "Nog geen spelers. Open een spelerskaart (club, transfermarkt, transfer list, SBC) en klik op \"+ Price Watch\".");
+      L("Nog geen spelers. Open een spelerskaart (club, transfermarkt, transfer list, SBC) en klik op \"+ Price Watch\".", "No players yet. Open a player card (club, transfer market, transfer list, SBC) and click \"+ Price Watch\"."));
 
     card.append(toolbar, pushPanel, transferPanel, table, empty);
 
@@ -2077,10 +2095,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       name.title = entry.name;
       const copy = el("button", "pt-icon-btn", "📋");
       copy.type = "button";
-      copy.title = "Kopieer spelersnaam";
+      copy.title = L("Kopieer spelersnaam", "Copy player name");
       copy.addEventListener("click", async () => {
         const ok = await copyText(entry.name);
-        flashButton(copy, ok ? "✓" : "!", ok, ok ? `Gekopieerd: ${entry.name}` : "Kopiëren mislukt", "📋", "Kopieer spelersnaam");
+        flashButton(copy, ok ? "✓" : "!", ok, ok ? L(`Gekopieerd: ${entry.name}`, `Copied: ${entry.name}`) : L("Kopiëren mislukt", "Copy failed"), "📋", L("Kopieer spelersnaam", "Copy player name"));
       });
       const search = el("button", "pt-icon-btn pt-transfer-search", "🔍");
       search.type = "button";
@@ -2090,11 +2108,11 @@ function priceWatchMain(SCRIPT_VERSION) {
           openPreparedSearch(entry, event.shiftKey ? null : entry.target);
         } catch (error) {
           console.error("Price Watch:", error);
-          flashButton(search, "⚠️", false, `Fout: ${error.message}`, "🔍", SEARCH_TITLE);
-          showToast(`Transfermarkt openen mislukt – ${error.message}`, false);
+          flashButton(search, "⚠️", false, L(`Fout: ${error.message}`, `Error: ${error.message}`), "🔍", SEARCH_TITLE);
+          showToast(L(`Transfermarkt openen mislukt – ${error.message}`, `Opening transfer market failed – ${error.message}`), false);
         }
       });
-      const LOWEST_TITLE = "Handmatige live BIN-scan: maximaal 3 EA-zoekopdrachten, 12–18s pauze. Bij de apparaatlimiet: klik binnen 30s nogmaals voor een eenmalige bevestigde uitzondering.";
+      const LOWEST_TITLE = L("Handmatige live BIN-scan: maximaal 3 EA-zoekopdrachten, 12–18s pauze. Bij de apparaatlimiet: klik binnen 30s nogmaals voor een eenmalige bevestigde uitzondering.", "Manual live BIN scan: at most 3 EA searches, 12–18s pause. At the device limit: click again within 30s for a one-time confirmed exception.");
       const lowest = el("button", "pt-icon-btn pt-lowest", "🏷️");
       lowest.type = "button";
       lowest.title = LOWEST_TITLE;
@@ -2108,25 +2126,25 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (Date.now() - lastTap < 600) return;
         lastTap = Date.now();
         if (marketBusy) {
-          showToast(`Er loopt nog een zoekopdracht (${Math.round((Date.now() - marketBusySince) / 1000)}s) – even wachten`, false);
+          showToast(L(`Er loopt nog een zoekopdracht (${Math.round((Date.now() - marketBusySince) / 1000)}s) – even wachten`, `A search is still running (${Math.round((Date.now() - marketBusySince) / 1000)}s) – wait a moment`), false);
           return;
         }
         lowest.disabled = true;
         lowest.textContent = "…";
-        showToast(`${entry.name}: laagste prijs zoeken…`, true);
+        showToast(L(`${entry.name}: laagste prijs zoeken…`, `${entry.name}: searching lowest price…`), true);
         try {
           const price = await findLowestPrice(entry.definitionId, search => { lowest.textContent = `${search}…`; });
-          flashButton(lowest, price ? "✓" : "–", true, price ? `Laagste BIN: ${priceFormat.format(price)}` : "Niets te koop gevonden", "🏷️", LOWEST_TITLE);
+          flashButton(lowest, price ? "✓" : "–", true, price ? L(`Laagste BIN: ${priceFormat.format(price)}`, `Lowest BIN: ${priceFormat.format(price)}`) : L("Niets te koop gevonden", "Nothing for sale found"), "🏷️", LOWEST_TITLE);
           // Phones show no tooltips: say the result on screen.
           const state = distanceState(entry.target, price);
           showToast(price
-            ? `${entry.name}: ${formatLowestCounts(entry.definitionId) || `laagste BIN ${priceFormat.format(price)}`}` + (entry.target ? ` · afstand tot doel ${state.text}` : "")
-            : `${entry.name}: niets te koop gevonden`, true);
+            ? `${entry.name}: ${formatLowestCounts(entry.definitionId) || L(`laagste BIN ${priceFormat.format(price)}`, `lowest BIN ${priceFormat.format(price)}`)}` + (entry.target ? L(` · afstand tot doel ${state.text}`, ` · distance to target ${state.text}`) : "")
+            : L(`${entry.name}: niets te koop gevonden`, `${entry.name}: nothing for sale found`), true);
           listeners.forEach(listener => listener());
         } catch (error) {
-          console.warn("Price Watch: laagste prijs zoeken mislukt.", error);
+          console.warn(L("Price Watch: laagste prijs zoeken mislukt.", "Price Watch: searching lowest price failed."), error);
           flashButton(lowest, "⚠️", false, error.message, "🏷️", LOWEST_TITLE);
-          showToast(`${entry.name}: zoeken mislukt – ${error.message}`, false);
+          showToast(L(`${entry.name}: zoeken mislukt – ${error.message}`, `${entry.name}: search failed – ${error.message}`), false);
         } finally {
           lowest.disabled = false;
         }
@@ -2158,7 +2176,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const input = el("input", "pt-target-input");
       input.type = "text";
       input.inputMode = "numeric";
-      input.placeholder = "Bijv. 50000";
+      input.placeholder = L("Bijv. 50000", "E.g. 50000");
       input.value = entry.target ? String(entry.target) : "";
       input.setAttribute("aria-label", `PC-instapdoel ${entry.name}`);
       targetCell.appendChild(input);
@@ -2170,7 +2188,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const removeCell = el("td", "pt-col-remove");
       const remove = el("button", "pt-icon-btn pt-remove", "×");
       remove.type = "button";
-      remove.title = `Verwijder ${entry.name} uit Price Watch`;
+      remove.title = L(`Verwijder ${entry.name} uit Price Watch`, `Remove ${entry.name} from Price Watch`);
       remove.addEventListener("click", () => removeWatched(entry.definitionId));
       removeCell.appendChild(remove);
 
@@ -2182,7 +2200,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const price = genieEntry ? genieEntry.price : null;
         priceValue.textContent = price !== null ? priceFormat.format(price) : "—";
         let sourceLabel = "";
-        let sourceTitle = "Geen prijsbron beschikbaar";
+        let sourceTitle = L("Geen prijsbron beschikbaar", "No price source available");
         if (genieEntry && genieEntry._futgg) {
           sourceLabel = "GG";
           sourceTitle = `FUT.GG PC-feed · ID ${genieEntry._futggId}`;
@@ -2191,9 +2209,9 @@ function priceWatchMain(SCRIPT_VERSION) {
           sourceTitle = "FUT Genie (PC)";
         } else if (genieEntry && genieEntry._market) {
           sourceLabel = "";
-          sourceTitle = "Laagste BIN op de markt (zelf gezocht)";
+          sourceTitle = L("Laagste BIN op de markt (zelf gezocht)", "Lowest BIN on the market (searched yourself)");
         } else if (genieEntry && genieEntry._transferred) {
-          sourceTitle = "Overgezette prijs (bron niet bevestigd)";
+          sourceTitle = L("Overgezette prijs (bron niet bevestigd)", "Transferred price (source not confirmed)");
         } else if (genieEntry && genieEntry._remote) {
           sourceTitle = "Overige gesynchroniseerde prijsbron";
         }
@@ -2208,18 +2226,18 @@ function priceWatchMain(SCRIPT_VERSION) {
           const uncertain = !!(liveScan && !liveScan.certain);
           liveBinValue.textContent = `EA BIN ${uncertain ? "≥ " : ""}${priceFormat.format(livePrice)}`;
           liveBinValue.title = liveScan
-            ? `Laagste door Price Watch gevonden EA-BIN · ${liveScan.certain ? "resultaat compleet binnen de zoekfilters" : "resultaat is een voorlopige ondergrens; scanlimiet bereikt"} · ${formatDayTime(liveScan.at)}`
-            : `Eerder gevonden EA-BIN · ${formatDayTime(Number(savedMarket[1]) || Date.now())}`;
+            ? L(`Laagste door Price Watch gevonden EA-BIN · ${liveScan.certain ? L("resultaat compleet binnen de zoekfilters", "complete result within the search filters") : L("resultaat is een voorlopige ondergrens; scanlimiet bereikt", "result is a provisional lower bound; scan limit reached")} · ${formatDayTime(liveScan.at)}`, `Lowest EA BIN found by Price Watch · ${liveScan.certain ? L("resultaat compleet binnen de zoekfilters", "complete result within the search filters") : L("resultaat is een voorlopige ondergrens; scanlimiet bereikt", "result is a provisional lower bound; scan limit reached")} · ${formatDayTime(liveScan.at)}`)
+            : L(`Eerder gevonden EA-BIN · ${formatDayTime(Number(savedMarket[1]) || Date.now())}`, `Earlier found EA BIN · ${formatDayTime(Number(savedMarket[1]) || Date.now())}`);
           liveBinValue.classList.toggle("pt-live-uncertain", uncertain);
           liveBinValue.style.display = "block";
         } else if (liveScan) {
-          liveBinValue.textContent = "EA BIN geen aanbod";
-          liveBinValue.title = `Geen aanbod gevonden tijdens de EA-scan · ${formatDayTime(liveScan.at)}`;
+          liveBinValue.textContent = L("EA BIN geen aanbod", "EA BIN no listings");
+          liveBinValue.title = L(`Geen aanbod gevonden tijdens de EA-scan · ${formatDayTime(liveScan.at)}`, `No listings found during the EA scan · ${formatDayTime(liveScan.at)}`);
           liveBinValue.classList.remove("pt-live-uncertain");
           liveBinValue.style.display = "block";
         } else {
           liveBinValue.textContent = "";
-          liveBinValue.title = "Nog geen handmatige EA-BIN-scan gedaan";
+          liveBinValue.title = L("Nog geen handmatige EA-BIN-scan gedaan", "No manual EA BIN scan done yet");
           liveBinValue.style.display = "none";
         }
         priceCell.classList.toggle("pt-missing", price === null);
@@ -2228,11 +2246,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         priceCell.classList.toggle("pt-market", !!(genieEntry && genieEntry._market));
         priceCell.title = genieEntry
           ? genieEntry._market
-            ? `Laagste BIN op de markt (zelf gezocht) · ${formatDayTime(Number(genieEntry._fetchedAt))}`
+            ? L(`Laagste BIN op de markt (zelf gezocht) · ${formatDayTime(Number(genieEntry._fetchedAt))}`, `Lowest BIN on the market (searched yourself) · ${formatDayTime(Number(genieEntry._fetchedAt))}`)
             : genieEntry._transferred
-            ? `FUT Genie (PC), overgezet · prijs van ${formatDayTime(Number(genieEntry._fetchedAt) || Date.now())}`
-            : `FUT Genie (PC), opgehaald om ${formatTime(Number(genieEntry._fetchedAt) || Date.now())}`
-          : genie() ? "Nog geen FUT Genie-prijs voor deze kaart" : pcDevice() ? "Nog geen FUT.GG-prijs voor deze kaart" : "Nog geen prijs van je pc ontvangen";
+            ? L(`FUT Genie (PC), overgezet · prijs van ${formatDayTime(Number(genieEntry._fetchedAt) || Date.now())}`, `FUT Genie (PC), transferred · price from ${formatDayTime(Number(genieEntry._fetchedAt) || Date.now())}`)
+            : L(`FUT Genie (PC), opgehaald om ${formatTime(Number(genieEntry._fetchedAt) || Date.now())}`, `FUT Genie (PC), fetched at ${formatTime(Number(genieEntry._fetchedAt) || Date.now())}`)
+          : genie() ? L("Nog geen FUT Genie-prijs voor deze kaart", "No FUT Genie price for this card yet") : pcDevice() ? L("Nog geen FUT.GG-prijs voor deze kaart", "No FUT.GG price for this card yet") : L("Nog geen prijs van je pc ontvangen", "No price received from your PC yet");
 
         const state = distanceState(entry.target, price);
         row.__ptPercent = state.percent;
@@ -2277,8 +2295,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       distanceHeader.classList.toggle("pt-sorted", sortByDistance);
       distanceHeader.title = sortByDistance
-        ? "Gesorteerd op afstand tot je instapdoel (klik: volgorde van toevoegen)"
-        : "Klik om te sorteren op afstand tot je instapdoel";
+        ? L("Gesorteerd op afstand tot je instapdoel (klik: volgorde van toevoegen)", "Sorted by distance to your entry target (click: order added)")
+        : L("Klik om te sorteren op afstand tot je instapdoel", "Click to sort by distance to your entry target");
 
       table.style.display = list.length ? "" : "none";
       empty.style.display = list.length ? "none" : "";
@@ -2288,32 +2306,32 @@ function priceWatchMain(SCRIPT_VERSION) {
       const live = pcDevice() || relayFresh();
       refresh.disabled = pcDevice() ? genieLoading : relayBusy;
       const priceHeader = headRow.querySelector(".pt-col-price");
-      priceHeader.textContent = live ? "Genie (PC)" : "Prijs";
-      priceHeader.title = live ? "" : "Groen = laagste BIN die je zelf zocht (🏷️), wit = van je pc";
+      priceHeader.textContent = live ? "Genie (PC)" : L("Prijs", "Price");
+      priceHeader.title = live ? "" : L("Groen = laagste BIN die je zelf zocht (🏷️), wit = van je pc", "Green = lowest BIN you searched yourself (🏷️), white = from your PC");
       const hits = list.filter(entry => (rowsById.get(entry.definitionId).row.__ptPercent ?? Infinity) <= 0).length;
       setTabBadge("watch", hits, true);
-      const summary = `${list.length} speler(s)` + (hits ? ` · ${hits} op of onder doel` : "");
+      const summary = L(`${list.length} speler(s)`, `${list.length} player(s)`) + (hits ? L(` · ${hits} op of onder doel`, ` · ${hits} at or below target`) : "");
       if (pcDevice()) {
         status.textContent = futggPricesAt
-          ? `${summary} · FUT.GG PC-feed bijgewerkt om ${formatTime(futggPricesAt)} · manifest elke minuut gecontroleerd` + (genieLoading ? " · FUT Genie ook actief" : "")
+          ? L(`${summary} · FUT.GG PC-feed bijgewerkt om ${formatTime(futggPricesAt)} · manifest elke minuut gecontroleerd`, `${summary} · FUT.GG PC feed updated at ${formatTime(futggPricesAt)} · manifest checked every minute`) + (genieLoading ? L(" · FUT Genie ook actief", " · FUT Genie also active") : "")
           : genieLoading
-            ? `${summary} · prijzen ophalen bij FUT Genie…`
+            ? L(`${summary} · prijzen ophalen bij FUT Genie…`, `${summary} · fetching prices from FUT Genie…`)
             : genieRequestedAt
-              ? `${summary} · FUT Genie (PC) opgehaald om ${formatTime(genieRequestedAt)} · ververst elke 5 min`
+              ? L(`${summary} · FUT Genie (PC) opgehaald om ${formatTime(genieRequestedAt)} · ververst elke 5 min`, `${summary} · FUT Genie (PC) fetched at ${formatTime(genieRequestedAt)} · refreshed every 5 min`)
               : summary;
         return;
       }
       const pricesFrom = transferredAt(list.map(entry => entry.definitionId));
       const relayError = relay.error ? ` · gist: ${relay.error}` : "";
       status.textContent = relayBusy
-        ? `${summary} · prijzen van je pc ophalen…`
+        ? L(`${summary} · prijzen van je pc ophalen…`, `${summary} · fetching prices from your PC…`)
         : relayFresh()
-          ? `${summary} · FUT Genie via je pc · prijzen van ${formatTime(relay.pricesAt)} · ververst elke 2 min` + relayError
+          ? L(`${summary} · FUT Genie via je pc · prijzen van ${formatTime(relay.pricesAt)} · ververst elke 2 min`, `${summary} · FUT Genie via your PC · prices from ${formatTime(relay.pricesAt)} · refreshed every 2 min`) + relayError
           : relay.pricesAt
-            ? `${summary} · laatste prijzen van je pc: ${formatDayTime(relay.pricesAt)} (web app op je pc dicht?) · tik 🏷️ voor nu` + relayError
+            ? L(`${summary} · laatste prijzen van je pc: ${formatDayTime(relay.pricesAt)} (web app op je pc dicht?) · tik 🏷️ voor nu`, `${summary} · latest prices from your PC: ${formatDayTime(relay.pricesAt)} (web app on your PC closed?) · tap 🏷️ for now`) + relayError
             : (pricesFrom
-              ? `${summary} · prijzen overgezet van je pc (${formatDayTime(pricesFrom)}) · tik 🏷️ voor nu`
-              : `${summary} · nog geen prijzen: zet op je pc "Live via je pc" aan (⇄ Overzetten) · tik 🏷️ voor nu`) + relayError;
+              ? L(`${summary} · prijzen overgezet van je pc (${formatDayTime(pricesFrom)}) · tik 🏷️ voor nu`, `${summary} · prices transferred from your PC (${formatDayTime(pricesFrom)}) · tap 🏷️ for now`)
+              : L(`${summary} · nog geen prijzen: zet op je pc "Live via je pc" aan (⇄ Overzetten) · tik 🏷️ voor nu`, `${summary} · no prices yet: on your PC turn on "Live via your PC" (⇄ Transfer) · tap 🏷️ for now`)) + relayError;
     }
 
     const renderStock = buildStockSection(root);
@@ -2364,7 +2382,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try {
       localStorage.setItem(STOCK_KEY, JSON.stringify(getStock()));
     } catch (error) {
-      console.warn("Price Watch: stock-lijsten konden niet worden opgeslagen.", error);
+      console.warn(L("Price Watch: stock-lijsten konden niet worden opgeslagen.", "Price Watch: stock lists could not be saved."), error);
     }
     listeners.forEach(listener => listener());
   }
@@ -2483,7 +2501,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       input.value = "";
       ["input", "change", "blur"].forEach(type => input.dispatchEvent(new Event(type, { bubbles: true })));
     }
-    showToast("Min bid weer op 0 (bereikte je max BIN)", true);
+    showToast(L("Min bid weer op 0 (bereikte je max BIN)", "Min bid back to 0 (you reached your max BIN)"), true);
   }
 
   let minBidWrapInstalled = false;
@@ -2500,7 +2518,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         try {
           wrapMinBid();
         } catch (error) {
-          console.warn("Price Watch: min bid terugzetten mislukt.", error);
+          console.warn(L("Price Watch: min bid terugzetten mislukt.", "Price Watch: resetting min bid failed."), error);
         }
       }, delay));
     };
@@ -2548,7 +2566,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       try {
         buy = oneClickPrice(this);
       } catch (error) {
-        console.warn("Price Watch: one click Buy Now niet mogelijk, EA's pop-up volgt.", error);
+        console.warn(L("Price Watch: one click Buy Now niet mogelijk, EA's pop-up volgt.", "Price Watch: one click Buy Now not possible, EA's pop-up follows."), error);
       }
       if (!buy) return original.apply(this, arguments);
       if (buy.id === lastOneClick.id && Date.now() - lastOneClick.at < ONE_CLICK_REPEAT_MS) return undefined;
@@ -2677,22 +2695,22 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (seen) recordTransferStatus(items, sold.map(sale => ({ n: sale.name, p: sale.price, b: sale.bought, at: Date.now() })));
     else recordTransferStatus(items, []);
     if ((sold.length || expired) && seen && pcDevice()) window.setTimeout(() => pushRelay(true), 3000); // phone sees it soon
-    if (!seen || (!sold.length && !expired)) return { sold: sold.length, expired, sent: !seen ? "eerste keer: alleen onthouden" : "" };
+    if (!seen || (!sold.length && !expired)) return { sold: sold.length, expired, sent: !seen ? L("eerste keer: alleen onthouden", "first time: just remembering") : "" };
     const parts = [];
     if (sold.length) {
       const total = sold.reduce((sum, sale) => sum + sale.price, 0);
-      parts.push(`💰 ${sold.length} verkocht: ${sold.slice(0, 5).map(sale => `${sale.name} ${priceFormat.format(sale.price)}`).join(", ")}${sold.length > 5 ? ", …" : ""}` +
+      parts.push(L(`💰 ${sold.length} verkocht: ${sold.slice(0, 5).map(sale => `${sale.name} ${priceFormat.format(sale.price)}`).join(", ")}${sold.length > 5 ? ", …" : ""}`, `💰 ${sold.length} sold: ${sold.slice(0, 5).map(sale => `${sale.name} ${priceFormat.format(sale.price)}`).join(", ")}${sold.length > 5 ? ", …" : ""}`) +
         ` (+${priceFormat.format(Math.floor(total * 0.95))} na tax)`);
     }
-    if (expired) parts.push(`⏰ ${expired === 1 ? "1 kaart" : `${expired} kaarten`} niet verkocht – opnieuw listen (Price Watch → Transfers: met opslag op je aankoopprijs)`);
+    if (expired) parts.push(L(`⏰ ${expired === 1 ? "1 kaart" : `${expired} kaarten`} niet verkocht – opnieuw listen (Price Watch → Transfers: met opslag op je aankoopprijs)`, `⏰ ${expired === 1 ? "1 card" : `${expired} cards`} not sold – relist (Price Watch → Transfers: with markup on your purchase price)`));
     if (chimeOn()) playChime();
     showToast(`Transferlijst: ${parts.join(" · ")}`, true);
     // Busy at the pc right now: the toast is enough. Otherwise also on your phone.
-    if (watchingPc()) return { sold: sold.length, expired, sent: "alleen in beeld (je zat achter de pc)" };
-    const title = sold.length && expired ? "Verkocht + verlopen" : sold.length ? `${sold.length} verkocht` : "Transferlijst verlopen";
+    if (watchingPc()) return { sold: sold.length, expired, sent: L("alleen in beeld (je zat achter de pc)", "only shown on screen (you were at the PC)") };
+    const title = sold.length && expired ? L("Verkocht + verlopen", "Sold + expired") : sold.length ? L(`${sold.length} verkocht`, `${sold.length} sold`) : L("Transferlijst verlopen", "Transfer list expired");
     relayCall("notify", { title, text: parts.join("\n") }).then(
-      sent => logTransferCheck({ why: "melding", text: sent ? "ntfy verstuurd" : "geen ntfy-topic ingesteld" }),
-      error => logTransferCheck({ why: "melding", text: `ntfy mislukt: ${error.message}` }));
+      sent => logTransferCheck({ why: "melding", text: sent ? L("ntfy verstuurd", "ntfy sent") : L("geen ntfy-topic ingesteld", "no ntfy topic set") }),
+      error => logTransferCheck({ why: "melding", text: L(`ntfy mislukt: ${error.message}`, `ntfy failed: ${error.message}`) }));
     return { sold: sold.length, expired, sent: "ntfy" };
   }
 
@@ -2704,10 +2722,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   function noteLoggedOut() {
     if (!pcDevice() || readJson(LOGGED_OUT_KEY, 0)) return;
     writeJson(LOGGED_OUT_KEY, Date.now());
-    showToast("⚠️ Uitgelogd bij EA: je transferlijst wordt niet meer gevolgd tot je opnieuw inlogt.", false);
-    relayCall("notify", { title: "Pc uitgelogd bij EA", text: "⚠️ Je pc kan je transferlijst niet meer ophalen (uitgelogd, bijv. omdat je op je telefoon of in de FUT Genie-app inlogde). Verkopen worden niet gemeld tot je op de pc opnieuw inlogt." })
-      .then(sent => logTransferCheck({ why: "uitgelogd", text: sent ? "ntfy verstuurd" : "geen ntfy-topic ingesteld" }),
-        error => logTransferCheck({ why: "uitgelogd", text: `ntfy mislukt: ${error.message}` }));
+    showToast(L("⚠️ Uitgelogd bij EA: je transferlijst wordt niet meer gevolgd tot je opnieuw inlogt.", "⚠️ Logged out of EA: your transfer list is no longer tracked until you log in again."), false);
+    relayCall("notify", { title: L("Pc uitgelogd bij EA", "PC logged out of EA"), text: L("⚠️ Je pc kan je transferlijst niet meer ophalen (uitgelogd, bijv. omdat je op je telefoon of in de FUT Genie-app inlogde). Verkopen worden niet gemeld tot je op de pc opnieuw inlogt.", "⚠️ Your PC can no longer fetch your transfer list (logged out, e.g. because you logged in on your phone or in the FUT Genie app). Sales won't be reported until you log in again on the PC.") })
+      .then(sent => logTransferCheck({ why: "uitgelogd", text: sent ? L("ntfy verstuurd", "ntfy sent") : L("geen ntfy-topic ingesteld", "no ntfy topic set") }),
+        error => logTransferCheck({ why: "uitgelogd", text: L(`ntfy mislukt: ${error.message}`, `ntfy failed: ${error.message}`) }));
   }
 
   function noteTransferLoad(ok) {
@@ -2719,7 +2737,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     transferLoadFailures = 0;
     if (!readJson(LOGGED_OUT_KEY, 0)) return;
     writeJson(LOGGED_OUT_KEY, 0);
-    if (pcDevice()) relayCall("notify", { title: "Pc weer ingelogd", text: "✅ Je pc volgt je transferlijst weer; wat in de tussentijd verkocht is komt in de volgende melding." }).catch(() => {});
+    if (pcDevice()) relayCall("notify", { title: "Pc weer ingelogd", text: L("✅ Je pc volgt je transferlijst weer; wat in de tussentijd verkocht is komt in de volgende melding.", "✅ Your PC is tracking your transfer list again; anything sold in the meantime will be in the next notification.") }).catch(() => {});
   }
 
   function scheduleListingPoll(delay, why) {
@@ -2745,13 +2763,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     const items = await requestPile("requestTransferItems");
     ownTransferPoll = "";
     if (!items) {
-      logTransferCheck({ why: why || "controle", text: "transferlijst ophalen mislukt (niet ingelogd?)" });
+      logTransferCheck({ why: why || "controle", text: L("transferlijst ophalen mislukt (niet ingelogd?)", "fetching transfer list failed (not logged in?)") });
       if (due.length) listingAlert({ count: due.reduce((sum, group) => sum + group.count, 0) });
       noteTransferLoad(false);
       return scheduleListingPoll(transferLoadFailures < 2 ? 2 * 60 * 1000 : null, why); // check again soon: logged out?
     }
     // The wrapper in installListingWatch did the rest; a listing at 0 seconds: look again in a minute.
-    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(LISTING_MIN_GAP_MS + 2000, "listing op 0 sec, nog eens");
+    if (items.some(item => { const a = auctionOf(item); return a && a.tradeState === "active" && !(Number(a.expires) > 0); })) scheduleListingPoll(LISTING_MIN_GAP_MS + 2000, L("listing op 0 sec, nog eens", "listing at 0 sec, again"));
     else scheduleListingPoll();
   }
 
@@ -2772,12 +2790,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     ownTransferPoll = "";
     await new Promise(resolve => window.setTimeout(resolve, 800)); // resource entries come in a bit later
     if (observer) observer.disconnect();
-    if (!items) return { ok: false, text: "Transferlijst ophalen mislukt (niet ingelogd in de web app?)." };
+    if (!items) return { ok: false, text: L("Transferlijst ophalen mislukt (niet ingelogd in de web app?).", "Fetching transfer list failed (not logged in to the web app?).") };
     const count = state => items.filter(item => { const a = auctionOf(item); return a && a.tradeState === state; }).length;
     const left = items.map(item => { const a = auctionOf(item); return a && a.tradeState === "active" ? Number(a.expires) : 0; }).filter(seconds => seconds > 0);
     const fresh = !observer || requests.length > 0;
-    const text = `Transferlijst ${!observer ? "opgehaald" : fresh ? "vers van EA opgehaald" : "NIET vers opgehaald (oude kopie, geen verzoek naar EA gezien)"}: ` +
-      `${count("active")} actief, ${count("closed")} verkocht, ${count("expired")} verlopen` +
+    const text = `${L("Transferlijst", "Transfer list")} ${!observer ? L("opgehaald", "fetched") : fresh ? L("vers van EA opgehaald", "freshly fetched from EA") : L("NIET vers opgehaald (oude kopie, geen verzoek naar EA gezien)", "NOT freshly fetched (old copy, no request to EA seen)")}: ` +
+      L(`${count("active")} actief, ${count("closed")} verkocht, ${count("expired")} verlopen`, `${count("active")} active, ${count("closed")} sold, ${count("expired")} expired`) +
       (left.length ? ` · eerstvolgende loopt af over ${Math.max(1, Math.round(Math.min(...left) / 60))} min` : "");
     return { ok: fresh, text };
   }
@@ -2798,11 +2816,11 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Fallback when the transfer list can't be loaded: only the timer is known.
   function listingAlert(group) {
-    const what = group.count === 1 ? "1 kaart" : `${group.count} kaarten`;
+    const what = group.count === 1 ? L("1 kaart", "1 card") : L(`${group.count} kaarten`, `${group.count} cards`);
     if (chimeOn()) playChime();
-    showToast(`⏰ Transferlijst: listing van ${what} is afgelopen – wat niet verkocht is kun je opnieuw listen.`, true);
-    relayCall("notify", { title: "Transferlijst verlopen", text: `Listing van ${what} afgelopen. Niet verkocht? Opnieuw listen.` })
-      .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+    showToast(L(`⏰ Transferlijst: listing van ${what} is afgelopen – wat niet verkocht is kun je opnieuw listen.`, `⏰ Transfer list: listing of ${what} has ended – you can relist whatever didn't sell.`), true);
+    relayCall("notify", { title: L("Transferlijst verlopen", "Transfer list expired"), text: L(`Listing van ${what} afgelopen. Niet verkocht? Opnieuw listen.`, `Listing of ${what} ended. Not sold? Relist.`) })
+      .catch(error => console.warn(L("Price Watch: ntfy-melding mislukt.", "Price Watch: ntfy notification failed."), error));
   }
 
   // Watch EA's own transfer list calls: loading it, listing one card, relisting the expired ones.
@@ -2821,7 +2839,7 @@ function priceWatchMain(SCRIPT_VERSION) {
               try {
                 if (response && response.success) onSuccess(response, args);
               } catch (error) {
-                console.warn("Price Watch: transferlijst-timer niet bijgewerkt.", error);
+                console.warn(L("Price Watch: transferlijst-timer niet bijgewerkt.", "Price Watch: transfer list timer not updated."), error);
               }
             });
           }
@@ -2846,15 +2864,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!Array.isArray(items)) return;
       lastTransferLoad = Date.now();
       noteTransferLoad(true);
-      const why = ownTransferPoll || "geladen door jou, de web app of FUT Genie";
+      const why = ownTransferPoll || L("geladen door jou, de web app of FUT Genie", "loaded by you, the web app or FUT Genie");
       recordTransferList(items);
       rememberTransferItems(items);
       const found = reportTransferChanges(items);
       const active = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "active"; }).length;
-      logTransferCheck({ why, text: `${active} actief · ${found.sold ? `${found.sold} nieuw verkocht` : "niets nieuw verkocht"} · ${found.expired ? `${found.expired} nieuw verlopen` : "niets nieuw verlopen"}${found.sent ? ` → ${found.sent}` : ""}` });
+      logTransferCheck({ why, text: L(`${active} actief · ${found.sold ? `${found.sold} nieuw verkocht` : "niets nieuw verkocht"} · ${found.expired ? `${found.expired} nieuw verlopen` : "niets nieuw verlopen"}${found.sent ? ` → ${found.sent}` : ""}`, `${active} active · ${found.sold ? `${found.sold} newly sold` : "nothing newly sold"} · ${found.expired ? `${found.expired} newly expired` : "nothing newly expired"}${found.sent ? ` → ${found.sent}` : ""}`) });
     });
     // Listing one card: (item, startingBid, buyNowPrice, duration in seconds).
     wrap("list", (response, args) => {
+      // What you paid, remembered the moment you list it: EA sets lastSalePrice to 0 once the card has sold,
+      // and a card listed straight from your club / Unassigned may sell before the transfer list is opened.
+      const listed = args[0];
+      const paid = listed && (listed.lastSalePrice > 0 ? listed.lastSalePrice : wonPrices.get(listed.id) || 0);
+      if (listed && listed.id && paid > 0) writeJson(BOUGHT_KEY, { ...readJson(BOUGHT_KEY, {}), [listed.id]: paid });
       const duration = Number(args[3]);
       if (duration > 0) saveListingEnds(groupEnds(getListingEnds().flatMap(group => Array(group.count).fill(group.end)).concat(Date.now() + duration * 1000)));
     });
@@ -2869,7 +2892,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }, 1500));
     scheduleListingAlerts();
     // Sold while the page was closed, or listed from the game/app: look once shortly after loading.
-    scheduleListingPoll(20 * 1000, "na laden");
+    scheduleListingPoll(20 * 1000, L("na laden", "after load"));
   }
 
   // --- Transfer list status and sales, for the Transfers tab (and via the gist on your phone) ------
@@ -3003,9 +3026,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const limit = searchLimit();
     const near = Math.max(1, Math.ceil(limit * 0.8));
     if (hour >= limit) {
-      showSearchReminder("limit", `Zoekactiviteit hoog: ${hour}/${limit} transfermarktzoekacties gestart in het afgelopen uur. Dit is jouw lokale herinneringsgrens, geen melding of banstatus van EA.`);
+      showSearchReminder("limit", L(`Zoekactiviteit hoog: ${hour}/${limit} transfermarktzoekacties gestart in het afgelopen uur. Dit is jouw lokale herinneringsgrens, geen melding of banstatus van EA.`, `High search activity: ${hour}/${limit} transfer market searches started in the past hour. This is your local reminder limit, not an EA notice or ban status.`));
     } else if (hour >= near) {
-      showSearchReminder("near", `Let op: ${hour}/${limit} transfermarktzoekacties gestart in het afgelopen uur. Je nadert je zelf ingestelde herinneringsgrens. Dit zegt niet dat EA je heeft geblokkeerd.`);
+      showSearchReminder("near", L(`Let op: ${hour}/${limit} transfermarktzoekacties gestart in het afgelopen uur. Je nadert je zelf ingestelde herinneringsgrens. Dit zegt niet dat EA je heeft geblokkeerd.`, `Heads up: ${hour}/${limit} transfer market searches started in the past hour. You're nearing your own reminder limit. This doesn't mean EA has blocked you.`));
     }
     updateSearchBadges();
   }
@@ -3015,7 +3038,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const limit = searchLimit();
     document.querySelectorAll(".pt-search-count").forEach(node => {
       node.textContent = `🔎 ${counts.hour}/u`;
-      node.title = `Waargenomen transfermarktzoekacties in deze browser: ${counts.tenMinutes} in 10 min, ${counts.hour} in 1 uur, ${counts.day} in 24 uur. Jouw herinneringsgrens: ${limit}/uur. Dit is geen EA-banstatus.`;
+      node.title = L(`Waargenomen transfermarktzoekacties in deze browser: ${counts.tenMinutes} in 10 min, ${counts.hour} in 1 uur, ${counts.day} in 24 uur. Jouw herinneringsgrens: ${limit}/uur. Dit is geen EA-banstatus.`, `Observed transfer market searches in this browser: ${counts.tenMinutes} in 10 min, ${counts.hour} in 1 hour, ${counts.day} in 24 hours. Your reminder limit: ${limit}/hour. This is not an EA ban status.`);
       node.classList.toggle("pt-search-hot", counts.hour >= limit);
     });
   }
@@ -3023,7 +3046,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // --- Relist with a markup on what you paid: expired cards → BIN = bought price + x% -------------
   // Only when you press the button; one card at a time with a pause, like listing them yourself.
   const RELIST_KEY = "pt_relist_v1"; // { pct, duration }
-  const RELIST_DURATIONS = [[3600, "1 uur"], [10800, "3 uur"], [21600, "6 uur"], [43200, "12 uur"], [86400, "1 dag"], [259200, "3 dagen"]];
+  const RELIST_DURATIONS = [[3600, L("1 uur", "1 hour")], [10800, L("3 uur", "3 hours")], [21600, L("6 uur", "6 hours")], [43200, L("12 uur", "12 hours")], [86400, L("1 dag", "1 day")], [259200, L("3 dagen", "3 days")]];
   const RELIST_PAUSE_MS = 1500;
 
   function relistSettings() {
@@ -3092,7 +3115,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       saveClubRise({ cards, scannedAt: Date.now() });
     } catch (error) {
       saveClubRise({ scannedAt: Date.now() - CLUB_RISE_SCAN_MS + 30 * 60 * 1000 }); // try again in half an hour
-      console.warn("Price Watch: club lezen voor prijsstijgingen mislukt.", error);
+      console.warn(L("Price Watch: club lezen voor prijsstijgingen mislukt.", "Price Watch: reading club for price rises failed."), error);
     } finally {
       clubRiseBusy = "";
     }
@@ -3103,7 +3126,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const state = getClubRise();
     if (!pcDevice() || !state.on || clubRiseBusy || !state.cards.length) return;
     if (!force && Date.now() - state.checkedAt < CLUB_RISE_CHECK_MS) return;
-    clubRiseBusy = "prijzen…";
+    clubRiseBusy = L("prijzen…", "prices…");
     listeners.forEach(listener => listener());
     try {
       const ids = [...new Set(state.cards.map(card => card.d))];
@@ -3125,11 +3148,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (risen.length) {
         const lines = risen.sort((a, b) => b.now / b.base - a.now / a.base).slice(0, 6).map(card =>
           `${card.n} (${card.r}): ${priceFormat.format(card.base)} → ${priceFormat.format(card.now)} (+${Math.round((card.now / card.base - 1) * 100)}%)` +
-          (card.b ? ` · verkopen = ${signedCoins(netProfit(card.now, card.b))} na tax` : ""));
+          (card.b ? L(` · verkopen = ${signedCoins(netProfit(card.now, card.b))} na tax`, ` · sell = ${signedCoins(netProfit(card.now, card.b))} after tax`) : ""));
         if (chimeOn()) playChime();
-        showToast(`📈 Gestegen in je club: ${lines.join(" · ")}`, true);
+        showToast(L(`📈 Gestegen in je club: ${lines.join(" · ")}`, `📈 Risen in your club: ${lines.join(" · ")}`), true);
         relayCall("notify", { title: risen.length === 1 ? `${risen[0].n} gestegen` : `${risen.length} clubkaarten gestegen`, text: lines.join("\n") })
-          .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+          .catch(error => console.warn(L("Price Watch: ntfy-melding mislukt.", "Price Watch: ntfy notification failed."), error));
       }
     } finally {
       clubRiseBusy = "";
@@ -3177,7 +3200,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     saveRelay({ phoneRise: sent });
     const relay = getRelay();
     relayCall("push", { gistId: relay.gistId, file: RELAY_SETTINGS_FILE, content: JSON.stringify(sent) })
-      .catch(error => showToast(`Instelling niet verstuurd: ${error.message}`, false));
+      .catch(error => showToast(L(`Instelling niet verstuurd: ${error.message}`, `Setting not sent: ${error.message}`), false));
   }
 
   // Pc: a change from the phone (newer than the last one here) wins; "scanAt": read the club now.
@@ -3196,7 +3219,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!sent || !(sent.at > (state.settingsAt || 0))) return;
     saveClubRise({ on: !!sent.on, pct: Math.max(5, Number(sent.pct) || 20), min: Math.max(0, Number(sent.min) || 0), settingsAt: sent.at });
     if (sent.on && (sent.scanAt || !state.cards.length)) await scanClubRise();
-    showToast(`Price Watch: clubkaart-meldingen ${sent.on ? `aan (${sent.pct}%)` : "uit"} gezet vanaf je telefoon.`, true);
+    showToast(L(`Price Watch: clubkaart-meldingen ${sent.on ? `aan (${sent.pct}%)` : "uit"} gezet vanaf je telefoon.`, `Price Watch: club card alerts ${sent.on ? `on (${sent.pct}%)` : "off"} set from your phone.`), true);
     pushRelay(true);
   }
 
@@ -3231,20 +3254,20 @@ function priceWatchMain(SCRIPT_VERSION) {
     // Test: fetch the list now, result to your phone via ntfy (only a pc with FUT Genie sends ntfy).
     const checkLog = el("div", "pt-tl-sales");
     if (pcDevice()) {
-      const testButton = el("button", "pt-watch-refresh", "🧪 Test: lijst nu ophalen + ntfy");
+      const testButton = el("button", "pt-watch-refresh", L("🧪 Test: lijst nu ophalen + ntfy", "🧪 Test: fetch list now + ntfy"));
       testButton.type = "button";
       const testInfo = el("div", "pt-tl-line pt-muted");
-      statusBlock.append(testButton, testInfo, el("div", "pt-tl-line", "Laatste controles (nieuwste bovenaan):"), checkLog);
+      statusBlock.append(testButton, testInfo, el("div", "pt-tl-line", L("Laatste controles (nieuwste bovenaan):", "Latest checks (newest first):")), checkLog);
       testButton.addEventListener("click", async () => {
         testButton.disabled = true;
-        testInfo.textContent = "Transferlijst bij EA ophalen…";
+        testInfo.textContent = L("Transferlijst bij EA ophalen…", "Fetching transfer list from EA…");
         const result = await testTransferPoll();
         testInfo.textContent = result.text;
         try {
-          const sent = await relayCall("notify", { title: result.ok ? "Test transferlijst geslaagd" : "Test transferlijst mislukt", text: result.text });
-          testInfo.textContent += sent ? " · ntfy-melding verstuurd" : " · geen ntfy-topic ingesteld (Instellingen → meldingen)";
+          const sent = await relayCall("notify", { title: result.ok ? "Test transferlijst geslaagd" : L("Test transferlijst mislukt", "Transfer list test failed"), text: result.text });
+          testInfo.textContent += sent ? L(" · ntfy-melding verstuurd", " · ntfy notification sent") : L(" · geen ntfy-topic ingesteld (Instellingen → meldingen)", " · no ntfy topic set (Settings → notifications)");
         } catch (error) {
-          testInfo.textContent += ` · ntfy mislukt: ${error.message}`;
+          testInfo.textContent += L(` · ntfy mislukt: ${error.message}`, ` · ntfy failed: ${error.message}`);
         }
         testButton.disabled = false;
       });
@@ -3264,19 +3287,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     const custom = el("input", "pt-target-input");
     custom.inputMode = "numeric";
     custom.placeholder = "eigen";
-    customLabel.append(el("span", "pt-muted", "of"), custom, el("span", "pt-muted", "%"));
+    customLabel.append(el("span", "pt-muted", L("of", "or")), custom, el("span", "pt-muted", "%"));
     const durationLabel = el("label", "pt-goal");
     const duration = el("select", "pt-stock-select");
     RELIST_DURATIONS.forEach(([seconds, label]) => duration.appendChild(new Option(label, String(seconds))));
     duration.value = String(settings.duration);
-    durationLabel.append(el("span", "pt-muted", "Duur"), duration);
-    const load = el("button", "pt-watch-refresh", "↻ Verlopen kaarten laden");
+    durationLabel.append(el("span", "pt-muted", L("Duur", "Duration")), duration);
+    const load = el("button", "pt-watch-refresh", L("↻ Verlopen kaarten laden", "↻ Load expired cards"));
     const go = el("button", "btn-standard call-to-action pt-relist-go", "▶ Listen");
     [load, go].forEach(button => { button.type = "button"; });
     pctRow.append(...pctButtons, customLabel, durationLabel, load);
-    const relistInfo = el("div", "pt-tl-line pt-muted", "Kies een opslag: de kaarten die niet verkocht zijn gaan opnieuw op de lijst met BIN = aankoopprijs + dat percentage.");
+    const relistInfo = el("div", "pt-tl-line pt-muted", L("Kies een opslag: de kaarten die niet verkocht zijn gaan opnieuw op de lijst met BIN = aankoopprijs + dat percentage.", "Choose a markup: cards that didn't sell go back on the list with BIN = purchase price + that percentage."));
     const relistTable = el("div", "pt-tl-sales pt-relist-table");
-    relistBlock.append(el("h3", "pt-tl-title", "🔁 Opnieuw listen met opslag op je aankoopprijs"), pctRow, relistInfo, relistTable, go);
+    relistBlock.append(el("h3", "pt-tl-title", L("🔁 Opnieuw listen met opslag op je aankoopprijs", "🔁 Relist with markup on your purchase price")), pctRow, relistInfo, relistTable, go);
 
     let expired = null;
     let plan = [];
@@ -3298,30 +3321,30 @@ function priceWatchMain(SCRIPT_VERSION) {
       plan.forEach(row => {
         const line = el("div", "pt-tl-sale");
         if (row.skip) {
-          line.textContent = `${row.name}: geen aankoopprijs bekend (bijv. uit een pack) – overgeslagen`;
+          line.textContent = L(`${row.name}: geen aankoopprijs bekend (bijv. uit een pack) – overgeslagen`, `${row.name}: no purchase price known (e.g. from a pack) – skipped`);
           line.classList.add("pt-muted");
         } else {
-          line.append(`${row.name}: gekocht ${priceFormat.format(row.bought)} → BIN ${priceFormat.format(row.bin)} `,
+          line.append(L(`${row.name}: gekocht ${priceFormat.format(row.bought)} → BIN ${priceFormat.format(row.bin)} `, `${row.name}: bought ${priceFormat.format(row.bought)} → BIN ${priceFormat.format(row.bin)} `),
             el("span", row.net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(row.net)} na tax`),
-            row.genie ? el("span", row.genie < row.bin ? "pt-neg" : "pt-muted", ` · Genie ${priceFormat.format(row.genie)}${row.genie < row.bin ? " (lager dan je BIN)" : ""}`) : "");
+            row.genie ? el("span", row.genie < row.bin ? "pt-neg" : "pt-muted", ` · Genie ${priceFormat.format(row.genie)}${row.genie < row.bin ? L(" (lager dan je BIN)", " (lower than your BIN)") : ""}`) : "");
         }
         relistTable.appendChild(line);
       });
       const total = ready.reduce((sum, row) => sum + row.net, 0);
       relistInfo.textContent = expired.length
-        ? `${expired.length} verlopen · ${ready.length} met aankoopprijs · opslag ${pct}% · samen ${signedCoins(total)} winst na tax als alles verkoopt`
-        : "Geen verlopen kaarten op je transferlijst.";
-      go.textContent = `▶ ${ready.length} kaart(en) listen voor ${RELIST_DURATIONS.find(([seconds]) => seconds === Number(duration.value))[1]}`;
+        ? L(`${expired.length} verlopen · ${ready.length} met aankoopprijs · opslag ${pct}% · samen ${signedCoins(total)} winst na tax als alles verkoopt`, `${expired.length} expired · ${ready.length} with purchase price · markup ${pct}% · together ${signedCoins(total)} profit after tax if everything sells`)
+        : L("Geen verlopen kaarten op je transferlijst.", "No expired cards on your transfer list.");
+      go.textContent = L(`▶ ${ready.length} kaart(en) listen voor ${RELIST_DURATIONS.find(([seconds]) => seconds === Number(duration.value))[1]}`, `▶ List ${ready.length} card(s) for ${RELIST_DURATIONS.find(([seconds]) => seconds === Number(duration.value))[1]}`);
       go.style.display = ready.length ? "" : "none";
       go.disabled = relistBusy;
     };
     const loadExpired = async () => {
       load.disabled = true;
-      relistInfo.textContent = "Transferlijst laden…";
+      relistInfo.textContent = L("Transferlijst laden…", "Loading transfer list…");
       const items = await requestPile("requestTransferItems");
       load.disabled = false;
       if (!items) {
-        relistInfo.textContent = "Transferlijst laden mislukt (niet ingelogd in de web app?).";
+        relistInfo.textContent = L("Transferlijst laden mislukt (niet ingelogd in de web app?).", "Loading transfer list failed (not logged in to the web app?).");
         return;
       }
       expired = items.filter(item => { const a = auctionOf(item); return a && a.tradeState === "expired"; });
@@ -3353,12 +3376,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       let failed = 0;
       for (let i = 0; i < rows.length; i++) {
         if (i) await new Promise(resolve => window.setTimeout(resolve, RELIST_PAUSE_MS));
-        relistInfo.textContent = `Listen ${i + 1}/${rows.length}: ${rows[i].name} voor ${priceFormat.format(rows[i].bin)}…`;
+        relistInfo.textContent = L(`Listen ${i + 1}/${rows.length}: ${rows[i].name} voor ${priceFormat.format(rows[i].bin)}…`, `Listing ${i + 1}/${rows.length}: ${rows[i].name} for ${priceFormat.format(rows[i].bin)}…`);
         if (await listItem(rows[i].item, rows[i].start, rows[i].bin, Number(duration.value))) listed++;
         else failed++;
       }
       relistBusy = false;
-      showToast(`🔁 ${listed} kaart(en) opnieuw gelist` + (failed ? `, ${failed} mislukt (bijv. buiten EA's prijsgrenzen voor die kaart)` : "") + ".", !failed);
+      showToast(L(`🔁 ${listed} kaart(en) opnieuw gelist`, `🔁 ${listed} card(s) relisted`) + (failed ? L(`, ${failed} mislukt (bijv. buiten EA's prijsgrenzen voor die kaart)`, `, ${failed} failed (e.g. outside EA's price limits for that card)`) : "") + ".", !failed);
       await loadExpired();
     });
 
@@ -3375,10 +3398,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       limitInput.value = String(searchLimit());
       render();
     });
-    limitLabel.append(el("span", "pt-muted", "Waarschuwen bij"), limitInput, el("span", "pt-muted", "per uur"));
+    limitLabel.append(el("span", "pt-muted", L("Waarschuwen bij", "Warn at")), limitInput, el("span", "pt-muted", L("per uur", "per hour")));
     searchBlock.append(el("h3", "pt-tl-title", "🔎 Transfermarkt-zoekteller"), searchLine, limitLabel,
-      el("div", "pt-tl-line pt-muted", "Telt transfermarktzoekacties die deze browser via de EA Web App ziet starten. Dit is alleen een persoonlijke herinneringsgrens: geen officiële EA-limiet en geen indicatie dat je account geblokkeerd is. Pc en telefoon hebben ieder hun eigen lokale teller; EA kan activiteit over apparaten combineren."),
-      el("div", "pt-tl-line pt-muted", "BIN-scan: alleen na een handmatige klik, maximaal 3 zoekopdrachten per scan met 12–18 seconden pauze, maximaal 3 eigen scannerverzoeken per 10 minuten en 6 per uur, plus 15 minuten cooldown per speler. Bij veel andere transfermarktactiviteit kan de lokale druktebeveiliging de scan uitstellen. Alleen een expliciete EA-rate-limitreactie wordt als zodanig gemeld; een time-out of algemene fout is niet automatisch een softban. De pauze na een fout duurt 30 minuten. Dit is geen garantie tegen marktbeperkingen."));
+      el("div", "pt-tl-line pt-muted", L("Telt transfermarktzoekacties die deze browser via de EA Web App ziet starten. Dit is alleen een persoonlijke herinneringsgrens: geen officiële EA-limiet en geen indicatie dat je account geblokkeerd is. Pc en telefoon hebben ieder hun eigen lokale teller; EA kan activiteit over apparaten combineren.", "Counts transfer market searches that this browser sees starting via the EA Web App. This is only a personal reminder limit: not an official EA limit and no indication that your account is blocked. PC and phone each have their own local counter; EA may combine activity across devices.")),
+      el("div", "pt-tl-line pt-muted", L("BIN-scan: alleen na een handmatige klik, maximaal 3 zoekopdrachten per scan met 12–18 seconden pauze, maximaal 3 eigen scannerverzoeken per 10 minuten en 6 per uur, plus 15 minuten cooldown per speler. Bij veel andere transfermarktactiviteit kan de lokale druktebeveiliging de scan uitstellen. Alleen een expliciete EA-rate-limitreactie wordt als zodanig gemeld; een time-out of algemene fout is niet automatisch een softban. De pauze na een fout duurt 30 minuten. Dit is geen garantie tegen marktbeperkingen.", "BIN scan: only after a manual click, at most 3 searches per scan with a 12–18 second pause, at most 3 own scanner requests per 10 minutes and 6 per hour, plus a 15 minute cooldown per player. With a lot of other transfer market activity, the local busy protection may postpone the scan. Only an explicit EA rate limit response is reported as such; a timeout or general error is not automatically a soft ban. The pause after an error lasts 30 minutes. This is no guarantee against market restrictions.")));
 
     // Club price rises.
     const riseBlock = el("div", "pt-tl-block");
@@ -3392,14 +3415,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     const riseMinLabel = el("label", "pt-goal");
     const riseMin = el("input", "pt-target-input");
     [risePct, riseMin].forEach(input => { input.inputMode = "numeric"; });
-    risePctLabel.append(el("span", "pt-muted", "bij"), risePct, el("span", "pt-muted", "% stijging"));
-    riseMinLabel.append(el("span", "pt-muted", "kaarten vanaf"), riseMin);
+    risePctLabel.append(el("span", "pt-muted", L("bij", "at")), risePct, el("span", "pt-muted", "% stijging"));
+    riseMinLabel.append(el("span", "pt-muted", L("kaarten vanaf", "cards from")), riseMin);
     const riseScan = el("button", "pt-watch-refresh", "↻ Club nu lezen");
     riseScan.type = "button";
     riseRow.append(riseOnLabel, risePctLabel, riseMinLabel, riseScan);
     const riseLine = el("div", "pt-tl-line");
     const riseList = el("div", "pt-tl-sales");
-    riseBlock.append(el("h3", "pt-tl-title", "📈 Prijsstijging van je clubkaarten"), riseRow, riseLine, riseList);
+    riseBlock.append(el("h3", "pt-tl-title", L("📈 Prijsstijging van je clubkaarten", "📈 Price rise of your club cards")), riseRow, riseLine, riseList);
     const fillRiseInputs = () => {
       const view = clubRiseView();
       riseOn.checked = view.on;
@@ -3416,19 +3439,19 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     function render() {
       const status = transferStatusNow();
-      const where = status.own ? "" : " (via je pc)";
+      const where = status.own ? "" : L(" (via je pc)", " (via your PC)");
       statusLine.textContent = status.at
-        ? `${status.active || 0} gelist` + (status.next > Date.now() ? ` · volgende loopt af om ${formatTime(status.next)}` : "") +
-          ` · ${status.expired || 0} verlopen · ${status.sold || 0} verkocht (nog niet opgeruimd) · bijgewerkt ${formatDayTime(status.at)}${where}`
-        : "Nog niet bekend: open één keer je transferlijst in de web app.";
+        ? `${status.active || 0} gelist` + (status.next > Date.now() ? L(` · volgende loopt af om ${formatTime(status.next)}`, ` · next one expires at ${formatTime(status.next)}`) : "") +
+          L(` · ${status.expired || 0} verlopen · ${status.sold || 0} verkocht (nog niet opgeruimd) · bijgewerkt ${formatDayTime(status.at)}${where}`, ` · ${status.expired || 0} expired · ${status.sold || 0} sold (not cleared yet) · updated ${formatDayTime(status.at)}${where}`)
+        : L("Nog niet bekend: open één keer je transferlijst in de web app.", "Not known yet: open your transfer list once in the web app.");
       const since = Date.now() - 24 * 3600 * 1000;
       const sales = (status.sales || []).filter(sale => sale.at > since).reverse();
       const income = sales.reduce((sum, sale) => sum + Math.floor(sale.p * (1 - EA_TAX)), 0);
       const known = sales.filter(sale => sale.b > 0);
       const profit = known.reduce((sum, sale) => sum + netProfit(sale.p, sale.b), 0);
       salesLine.textContent = sales.length
-        ? `Verkocht in 24 uur: ${sales.length} · ${priceFormat.format(income)} na tax` + (known.length ? ` · winst ${signedCoins(profit)}${known.length < sales.length ? ` (van ${known.length} met aankoopprijs)` : ""}` : "")
-        : "Verkocht in 24 uur: nog niets gezien.";
+        ? L(`Verkocht in 24 uur: ${sales.length} · ${priceFormat.format(income)} na tax`, `Sold in 24 hours: ${sales.length} · ${priceFormat.format(income)} after tax`) + (known.length ? L(` · winst ${signedCoins(profit)}${known.length < sales.length ? ` (van ${known.length} met aankoopprijs)` : ""}`, ` · profit ${signedCoins(profit)}${known.length < sales.length ? ` (of ${known.length} with purchase price)` : ""}`) : "")
+        : L("Verkocht in 24 uur: nog niets gezien.", "Sold in 24 hours: nothing seen yet.");
       checkLog.textContent = "";
       readJson(TL_LOG_KEY, []).slice().reverse().forEach(entry => {
         checkLog.appendChild(el("div", "pt-tl-sale pt-muted", `${formatDayTime(entry.at)}${entry.n > 1 ? ` (${entry.n}×)` : ""} · ${entry.why}: ${entry.text}`));
@@ -3438,13 +3461,13 @@ function priceWatchMain(SCRIPT_VERSION) {
         const line = el("div", "pt-tl-sale", `${formatTime(sale.at)} ${sale.n} ${priceFormat.format(sale.p)}`);
         if (sale.b > 0) {
           const net = netProfit(sale.p, sale.b);
-          line.append(` (gekocht ${priceFormat.format(sale.b)} → `, el("span", net >= 0 ? "pt-pos" : "pt-neg", signedCoins(net)), ")");
+          line.append(L(` (gekocht ${priceFormat.format(sale.b)} → `, ` (bought ${priceFormat.format(sale.b)} → `), el("span", net >= 0 ? "pt-pos" : "pt-neg", signedCoins(net)), ")");
         }
         salesList.appendChild(line);
       });
 
       const counts = searchCounts();
-      searchLine.textContent = `${counts.tenMinutes} in 10 min · ${counts.hour} in het afgelopen uur · ${counts.day} in 24 uur`;
+      searchLine.textContent = L(`${counts.tenMinutes} in 10 min · ${counts.hour} in het afgelopen uur · ${counts.day} in 24 uur`, `${counts.tenMinutes} in 10 min · ${counts.hour} in the past hour · ${counts.day} in 24 hours`);
       searchLine.classList.toggle("pt-neg", counts.hour >= searchLimit());
 
       const rise = clubRiseView();
@@ -3453,19 +3476,19 @@ function priceWatchMain(SCRIPT_VERSION) {
       riseBlock.style.display = pcDevice() || (relay.hasToken && relay.gistId) ? "" : "none";
       riseScan.disabled = rise.busy;
       if (!riseBlock.contains(document.activeElement)) fillRiseInputs();
-      const via = pcDevice() ? "" : rise.pcAt ? ` · stand van je pc ${formatDayTime(rise.pcAt)}` : " · nog niets van je pc ontvangen";
-      riseLine.textContent = (rise.pending ? "⏳ Verstuurd, je pc neemt het binnen een minuut over (web app op je pc moet open zijn). " : "") + (!rise.on
-        ? "Uit. Zet aan om een melding (ook op je telefoon) te krijgen als een verhandelbare kaart in je club flink stijgt t.o.v. je aankoopprijs."
-        : (rise.busyText ? `Bezig: ${rise.busyText} · ` : "") + (rise.count
-          ? `${rise.count} kaarten gevolgd · club gelezen ${formatDayTime(rise.scannedAt)}` + (rise.checkedAt ? ` · prijzen ${formatTime(rise.checkedAt)}` : "")
-          : "Club nog niet gelezen.")) + via;
+      const via = pcDevice() ? "" : rise.pcAt ? L(` · stand van je pc ${formatDayTime(rise.pcAt)}`, ` · status of your PC ${formatDayTime(rise.pcAt)}`) : L(" · nog niets van je pc ontvangen", " · nothing received from your PC yet");
+      riseLine.textContent = (rise.pending ? L("⏳ Verstuurd, je pc neemt het binnen een minuut over (web app op je pc moet open zijn). ", "⏳ Sent, your PC picks it up within a minute (web app on your PC must be open). ") : "") + (!rise.on
+        ? L("Uit. Zet aan om een melding (ook op je telefoon) te krijgen als een verhandelbare kaart in je club flink stijgt t.o.v. je aankoopprijs.", "Off. Turn on to get a notification (also on your phone) when a tradable card in your club rises sharply vs. your purchase price.")
+        : (rise.busyText ? L(`Bezig: ${rise.busyText} · `, `Busy: ${rise.busyText} · `) : "") + (rise.count
+          ? L(`${rise.count} kaarten gevolgd · club gelezen ${formatDayTime(rise.scannedAt)}`, `${rise.count} cards tracked · club read ${formatDayTime(rise.scannedAt)}`) + (rise.checkedAt ? L(` · prijzen ${formatTime(rise.checkedAt)}`, ` · prices ${formatTime(rise.checkedAt)}`) : "")
+          : L("Club nog niet gelezen.", "Club not read yet."))) + via;
       riseList.textContent = "";
       if (rise.on) {
         rise.top.forEach(c => {
           const change = Math.round((c.now / c.base - 1) * 100);
-          const line = el("div", "pt-tl-sale", `${c.n} (${c.r}): ${c.b ? "gekocht" : "was"} ${priceFormat.format(c.base)} → ${priceFormat.format(c.now)} `);
+          const line = el("div", "pt-tl-sale", `${c.n} (${c.r}): ${c.b ? L("gekocht", "bought") : "was"} ${priceFormat.format(c.base)} → ${priceFormat.format(c.now)} `);
           line.appendChild(el("span", change >= 0 ? "pt-pos" : "pt-neg", `${change >= 0 ? "+" : ""}${change}%`));
-          if (c.b) line.append(` · verkopen ${signedCoins(netProfit(c.now, c.b))} na tax`);
+          if (c.b) line.append(L(` · verkopen ${signedCoins(netProfit(c.now, c.b))} na tax`, ` · sell ${signedCoins(netProfit(c.now, c.b))} after tax`));
           riseList.appendChild(line);
         });
       }
@@ -3486,10 +3509,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       (root.querySelector(".ut-button-group") || root).appendChild(info);
     }
     const price = (geniePrice(item.definitionId, item.resourceId) || {}).price;
-    info.textContent = `Gekocht ${priceFormat.format(bought)} · break-even BIN ${priceFormat.format(roundUpToStep(bought / (1 - EA_TAX)))}`;
+    info.textContent = L(`Gekocht ${priceFormat.format(bought)} · break-even BIN ${priceFormat.format(roundUpToStep(bought / (1 - EA_TAX)))}`, `Bought ${priceFormat.format(bought)} · break-even BIN ${priceFormat.format(roundUpToStep(bought / (1 - EA_TAX)))}`);
     if (price) {
       const net = netProfit(price, bought);
-      info.append(` · bij ${priceFormat.format(price)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(net)} na tax`));
+      info.append(L(` · bij ${priceFormat.format(price)}: `, ` · at ${priceFormat.format(price)}: `), el("span", net >= 0 ? "pt-pos" : "pt-neg", `${signedCoins(net)} na tax`));
     }
   }
 
@@ -3558,7 +3581,7 @@ function priceWatchMain(SCRIPT_VERSION) {
               sender.unobserve(context);
               recordMarketSearch(snapshot, response);
             } catch (error) {
-              console.warn("Price Watch: marktprijs uit zoekopdracht niet verwerkt.", error);
+              console.warn(L("Price Watch: marktprijs uit zoekopdracht niet verwerkt.", "Price Watch: market price from search not processed."), error);
             }
           });
         }
@@ -3775,19 +3798,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     const age = Math.round((Date.now() - sessionAuthAt) / 1000);
     const next = nextWatchedEnd();
     const left = next ? Math.round((next - Date.now()) / 1000) : null;
-    let text = `🔌 sessie ${formatLeft(age)}`;
+    let text = L(`🔌 sessie ${formatLeft(age)}`, `🔌 session ${formatLeft(age)}`);
     let level = age >= SESSION_TYPICAL_S - 10 ? "old" : "fresh";
-    let tip = "Leeftijd van je EA-sessie. EA laat sessies nu vaak na ~1 minuut vervallen. Klik = herladen en terug naar Transfer Targets.";
+    let tip = L("Leeftijd van je EA-sessie. EA laat sessies nu vaak na ~1 minuut vervallen. Klik = herladen en terug naar Transfer Targets.", "Age of your EA session. EA now often lets sessions expire after ~1 minute. Click = reload and go back to Transfer Targets.");
     if (left != null && left <= 3600) {
-      text += ` · volgende veiling ${formatLeft(left)}`;
+      text += L(` · volgende veiling ${formatLeft(left)}`, ` · next auction ${formatLeft(left)}`);
       if (left >= RELOAD_LEAD_MIN && left <= RELOAD_LEAD_MAX && age + left > SESSION_TYPICAL_S) {
         level = "reload";
-        text = `⟳ Herlaad nú (klik) · volgende veiling over ${formatLeft(left)} · sessie ${formatLeft(age)}`;
-        tip = "Nu herladen geeft een verse sessie die het einde van je volgende veiling waarschijnlijk haalt. Na het laden opent Transfer Targets vanzelf.";
+        text = L(`⟳ Herlaad nú (klik) · volgende veiling over ${formatLeft(left)} · sessie ${formatLeft(age)}`, `⟳ Reload now (click) · next auction in ${formatLeft(left)} · session ${formatLeft(age)}`);
+        tip = L("Nu herladen geeft een verse sessie die het einde van je volgende veiling waarschijnlijk haalt. Na het laden opent Transfer Targets vanzelf.", "Reloading now gives a fresh session that will probably last until the end of your next auction. After loading, Transfer Targets opens automatically.");
       } else if (left < RELOAD_LEAD_MIN) {
         level = sessionState === "ok" ? level : "late";
-        text += " · niet meer herladen";
-        tip = "Te laat om te herladen: bied nu. Faalt het (461), dan haal je deze veiling niet.";
+        text += L(" · niet meer herladen", " · don't reload anymore");
+        tip = L("Te laat om te herladen: bied nu. Faalt het (461), dan haal je deze veiling niet.", "Too late to reload: bid now. If it fails (461), you won't get this auction.");
       }
     }
     if (sessionPill.textContent !== text) sessionPill.textContent = text;
@@ -3838,7 +3861,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           if (!tile) {
             if (++tries > 24) {
               window.clearInterval(findTile);
-              showToast("Open Transfer Targets zelf (tegel niet gevonden).", false);
+              showToast(L("Open Transfer Targets zelf (tegel niet gevonden).", "Open Transfer Targets yourself (tile not found)."), false);
             }
             return;
           }
@@ -3865,15 +3888,15 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (state === "closed" || state === "expired" || state === "inactive") {
       return highest && current
         ? { kind: "won", text: massBidHold(info, current)
-          ? `🏆 gewonnen voor ${priceFormat.format(current)} · 📦 houden (fodder ≥${MASS_BID_HOLD_PCT}% onder ${priceFormat.format(info.sell)})`
-          : `🏆 gewonnen voor ${priceFormat.format(current)} · verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.sell ? ` = ${formatSigned(flipNet(info.sell, current))}` : ""}` }
-        : { kind: "lost", text: "✖ voorbij" };
+          ? L(`🏆 gewonnen voor ${priceFormat.format(current)} · 📦 houden (fodder ≥${MASS_BID_HOLD_PCT}% onder ${priceFormat.format(info.sell)})`, `🏆 won for ${priceFormat.format(current)} · 📦 keep (fodder ≥${MASS_BID_HOLD_PCT}% below ${priceFormat.format(info.sell)})`)
+          : L(`🏆 gewonnen voor ${priceFormat.format(current)} · verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.sell ? ` = ${formatSigned(flipNet(info.sell, current))}` : ""}`, `🏆 won for ${priceFormat.format(current)} · sell ${info.sell ? priceFormat.format(info.sell) : "—"}${info.sell ? ` = ${formatSigned(flipNet(info.sell, current))}` : ""}`) }
+        : { kind: "lost", text: L("✖ voorbij", "✖ over") };
     }
     if (state !== "active") return null;
     const max = info.max;
-    if (highest) return { kind: "highest", text: `🟢 jij hoogste ${priceFormat.format(current)}${max ? ` · max ${priceFormat.format(max)}` : ""}`, left };
+    if (highest) return { kind: "highest", text: L(`🟢 jij hoogste ${priceFormat.format(current)}`, `🟢 you're highest ${priceFormat.format(current)}`) + (max ? ` · max ${priceFormat.format(max)}` : ""), left };
     const bid = current > 0 ? priceStepAbove(current) : Number(auction.startingBid) || 150;
-    if (!max) return { kind: "over", text: `bod ${priceFormat.format(bid)} · geen max (geen prijs)`, bid, left };
+    if (!max) return { kind: "over", text: L(`bod ${priceFormat.format(bid)} · geen max (geen prijs)`, `bid ${priceFormat.format(bid)} · no max (no price)`), bid, left };
     const outbid = auction.bidState === "outbid";
     if (bid > max) return { kind: "over", text: `${outbid ? "⚠ overboden · " : ""}❌ ${priceFormat.format(bid)} > max ${priceFormat.format(max)}`, bid, left };
     return {
@@ -3924,10 +3947,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (tile) {
       const short = advice.kind === "over" ? `❌ ${priceFormat.format(advice.bid)} > max ${priceFormat.format(badge.__ptInfo.max || 0)}`
         : advice.kind === "ok" ? `✅ bied ${priceFormat.format(advice.bid)} · max ${priceFormat.format(badge.__ptInfo.max)}`
-          : advice.text.replace("jij hoogste ", "hoogste ").replace("gewonnen voor ", "").replace(" · verkoop ", " → ");
+          : advice.text.replace(L("jij hoogste ", "you're highest "), L("hoogste ", "highest ")).replace(L("gewonnen voor ", "won for "), "").replace(L(" · verkoop ", " · sell "), " → ");
       badge.title = advice.text;
       badge.append(el("div", "pt-mb-tile-main", short));
-      if (advice.left != null) badge.append(el("div", "pt-mb-left", advice.left <= 0 ? "loopt af" : `nog ${formatLeft(advice.left)}`));
+      if (advice.left != null) badge.append(el("div", "pt-mb-left", advice.left <= 0 ? "loopt af" : L(`nog ${formatLeft(advice.left)}`, `${formatLeft(advice.left)} left`)));
       return;
     }
     badge.append(el("span", "", `🎯 ${advice.text}`));
@@ -3974,12 +3997,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       line.className = `pt-mb-panel pt-mb-${advice.kind}${advice.hot ? " pt-mb-hot" : ""}`;
       const wait = advice.kind === "ok" && advice.left != null && advice.left > MASS_BID_HOT_SECONDS;
       line.append(
-        el("div", "pt-mb-panel-main", `🎯 ${advice.text}${advice.left != null ? ` · nog ${formatLeft(advice.left)}` : ""}`),
-        el("div", "pt-mb-panel-sub", (advice.kind === "over" ? "Niet bieden: boven je max bod. " : wait ? "Wacht tot de laatste 30 seconden. " : advice.hot ? "Laatste 30 seconden: nu bieden. " : "") +
+        el("div", "pt-mb-panel-main", `🎯 ${advice.text}${advice.left != null ? L(` · nog ${formatLeft(advice.left)}`, ` · ${formatLeft(advice.left)} left`) : ""}`),
+        el("div", "pt-mb-panel-sub", (advice.kind === "over" ? L("Niet bieden: boven je max bod. ", "Don't bid: above your max bid. ") : wait ? L("Wacht tot de laatste 30 seconden. ", "Wait until the last 30 seconds. ") : advice.hot ? L("Laatste 30 seconden: nu bieden. ", "Last 30 seconds: bid now. ") : "") +
           (info.list.massBid.flip
             ? ft("mb_flipLine", { sell: info.sell ? priceFormat.format(info.sell) : "—" })
-            : `Verkoop ${info.sell ? priceFormat.format(info.sell) : "—"}${info.player.sell ? " (jouw BIN)" : " (FUT.GG)"} · max = BIN − ${massBidPct(info.list)}%`) +
-          (advice.bid && info.sell ? ` · bij ${priceFormat.format(advice.bid)}: ${formatSigned(flipNet(info.sell, advice.bid))} na 5%` : ""))
+            : `${L("Verkoop", "Sell")} ${info.sell ? priceFormat.format(info.sell) : "—"}${info.player.sell ? L(" (jouw BIN)", " (your BIN)") : " (FUT.GG)"} · max = BIN − ${massBidPct(info.list)}%`) +
+          (advice.bid && info.sell ? L(` · bij ${priceFormat.format(advice.bid)}: ${formatSigned(flipNet(info.sell, advice.bid))} na 5%`, ` · at ${priceFormat.format(advice.bid)}: ${formatSigned(flipNet(info.sell, advice.bid))} after 5%`) : ""))
       );
     };
     massBidPanels.add(line);
@@ -4194,7 +4217,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const nation = target.flag && nationFromFlag(target.flag);
       const known = playerNation(player.definitionId);
       if (nation && known) {
-        if (known === nation.id) { cost -= 1; reason = reason === "naam" ? reason : "vlag + prijs"; } else cost += 10;
+        if (known === nation.id) { cost -= 1; reason = reason === "naam" ? reason : L("vlag + prijs", "flag + price"); } else cost += 10;
       }
       return { player, coins, cost, reason };
     }).sort((a, b) => a.cost - b.cost);
@@ -4302,7 +4325,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const date = new Date(timestamp);
     const today = new Date();
     const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    const day = date.toDateString() === today.toDateString() ? "vandaag"
+    const day = date.toDateString() === today.toDateString() ? L("vandaag", "today")
       : date.toDateString() === tomorrow.toDateString() ? "morgen"
         : date.toLocaleDateString("nl-NL", { weekday: "short", day: "numeric", month: "short" });
     return `${day} ${formatTime(timestamp)}`;
@@ -4311,10 +4334,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   function windowState(span, now = Date.now()) {
     if (!span || !span.start || !span.end) return null;
     if (now < span.start) {
-      return { state: "before", text: `Venster ${formatDayTime(span.start)}–${formatTime(span.end)} · begint over ${formatDuration(span.start - now)}` };
+      return { state: "before", text: L(`Venster ${formatDayTime(span.start)}–${formatTime(span.end)} · begint over ${formatDuration(span.start - now)}`, `Window ${formatDayTime(span.start)}–${formatTime(span.end)} · starts in ${formatDuration(span.start - now)}`) };
     }
-    if (now <= span.end) return { state: "open", text: `VENSTER OPEN · nog ${formatDuration(span.end - now)}` };
-    return { state: "after", text: `Venster voorbij (${formatDayTime(span.start)}–${formatTime(span.end)})` };
+    if (now <= span.end) return { state: "open", text: L(`VENSTER OPEN · nog ${formatDuration(span.end - now)}`, `WINDOW OPEN · ${formatDuration(span.end - now)} left`) };
+    return { state: "after", text: L(`Venster voorbij (${formatDayTime(span.start)}–${formatTime(span.end)})`, `Window over (${formatDayTime(span.start)}–${formatTime(span.end)})`) };
   }
 
   // --- Player matching (static player data of the web app) -----------------------
@@ -4567,7 +4590,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function versionLabel(version, baseId) {
     const price = (geniePrice(version.definitionId) || {}).price;
     const kind = version.definitionId === baseId ? "Gewoon" : rarityName(version.rarity);
-    return `${isHolo(version) ? "✨ Holo " : ""}${kind} ${version.rating}` + (price ? ` · Genie ${priceFormat.format(price)}` : " · geen prijs");
+    return `${isHolo(version) ? "✨ Holo " : ""}${kind} ${version.rating}` + (price ? ` · Genie ${priceFormat.format(price)}` : L(" · geen prijs", " · no price"));
   }
 
   // The holo twin of a normal version (same rating and rarity), and the normal one of a holo.
@@ -4670,7 +4693,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     for (let offset = 0, page = 0; page < 30; page++, offset += CLUB_PAGE_SIZE) {
       if (page) await new Promise(resolve => window.setTimeout(resolve, CLUB_SEARCH_DELAY_MS));
       const result = await clubSearchPage(applyFilter, offset);
-      if (result.failed) throw new Error("Club doorzoeken mislukt");
+      if (result.failed) throw new Error(L("Club doorzoeken mislukt", "Club search failed"));
       items.push(...result.items);
       if (result.done) break;
     }
@@ -4767,7 +4790,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Filter lists: one club search per rule (nation + quality, league if fixed), positions checked here.
   async function updateFilterInventory(list) {
-    inventoryProgress.set(list.id, "lijsten…");
+    inventoryProgress.set(list.id, L("lijsten…", "lists…"));
     listeners.forEach(listener => listener());
     const outside = await itemsOutsideClub();
     const targets = list.rules.filter(rule => rule.enabled !== false);
@@ -4816,7 +4839,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     stockRules(list).forEach(rule => { rules[rule.key] = { untradeable: 0, items: [] }; });
 
     // Cards on the transfer list, unassigned and won in Transfer Targets also count as stock.
-    inventoryProgress.set(list.id, "lijsten…");
+    inventoryProgress.set(list.id, L("lijsten…", "lists…"));
     listeners.forEach(listener => listener());
     const transferPile = await itemsOutsideClub();
     const targets = isFodder ? stockRules(list).map(rule => rule.fodder) : isPlayers ? list.players : list.clubs;
@@ -5476,7 +5499,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function filterStepLabel(step) {
-    return `${step.position || (step.filter && step.filter.kind === "manager" ? "managers" : "alle posities")} · ${step.league ? step.league.label : "alle competities"}`;
+    return `${step.position || (step.filter && step.filter.kind === "manager" ? "managers" : L("alle posities", "all positions"))} · ${step.league ? step.league.label : L("alle competities", "all leagues")}`;
   }
 
   function filterRuleTitle(rule) {
@@ -5523,7 +5546,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       // "at min (price)" = the lowest BIN; "at discard" = the quick-sell value, which you fill in yourself.
       if (!rule.max && /\bmin(?:imum)?\b/i.test(after)) rule.max = MIN_BIN;
       if (!rule.max && /\b(discard|quick ?sell|qs)\b/i.test(after)) rule.priceNote = "discard";
-      if (/\bno risk\b/i.test(after)) rule.note = "geen risico";
+      if (/\bno risk\b/i.test(after)) rule.note = L("geen risico", "no risk");
       if (nation) added.push(rule);
     }
     rules.push(...added);
@@ -5739,11 +5762,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       runBar = el("div", "pt-run-bar");
       const info = el("div", "pt-run-info");
       const prev = el("button", "pt-run-btn pt-run-prev", "◀");
-      const next = el("button", "pt-run-btn pt-run-next", "Volgende ▶");
+      const next = el("button", "pt-run-btn pt-run-next", L("Volgende ▶", "Next ▶"));
       const stop = el("button", "pt-run-btn pt-run-stop", "✕");
       // Top or bottom of the screen, so it never sits on EA's Search button (remembered; phone starts at the top).
       const flip = el("button", "pt-run-btn pt-run-flip", "⇅");
-      flip.title = "Balk naar boven/onder verplaatsen";
+      flip.title = L("Balk naar boven/onder verplaatsen", "Move bar to top/bottom");
       const placeBar = () => {
         let top = IS_PHONE;
         try {
@@ -5764,8 +5787,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
       placeBar();
       [prev, next, stop, flip].forEach(button => { button.type = "button"; });
-      prev.title = "Vorige klaarzetten";
-      next.title = "Volgende club/kwaliteit klaarzetten (zoeken doe je zelf)";
+      prev.title = L("Vorige klaarzetten", "Set up previous");
+      next.title = L("Volgende club/kwaliteit klaarzetten (zoeken doe je zelf)", "Set up next club/quality (you search yourself)");
       stop.title = "Stock-ronde stoppen";
       prev.addEventListener("click", () => runStep(() => goToRule(run.listId, run.index - 1)));
       // At the last rule "Volgende" starts over at the first one.
@@ -5800,8 +5823,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const newRound = (list, fresh) => {
         if (!list) return;
         const freshText = !fresh ? "" : fresh.added
-          ? ` · 🔄 ${fresh.added} nieuwe speler${fresh.added === 1 ? "" : "s"} (${fresh.total})`
-          : ` · 🔄 zelfde ${fresh.total} spelers`;
+          ? L(` · 🔄 ${fresh.added} nieuwe speler${fresh.added === 1 ? "" : "s"} (${fresh.total})`, ` · 🔄 ${fresh.added} new player${fresh.added === 1 ? "" : "s"} (${fresh.total})`)
+          : L(` · 🔄 zelfde ${fresh.total} spelers`, ` · 🔄 same ${fresh.total} players`);
         if (list.mode !== "bid") {
           // First completed BIN round -> 150, then 200, 250, etc. Above every max BIN it starts over at 0.
           // (Also with refreshed picks: players that stay in the list would otherwise show EA's cached result.)
@@ -5809,7 +5832,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           const maxes = stockRules(list).map(rule => rule.max || Infinity);
           list.fodderBidMin = raised >= Math.max(...maxes) ? 0 : raised;
           saveStock();
-          showToast((list.fodderBidMin ? `🔼 Nieuwe ronde: min bid ${priceFormat.format(list.fodderBidMin)}` : "Nieuwe ronde: min bid weer op 0") + freshText, true);
+          showToast((list.fodderBidMin ? `🔼 Nieuwe ronde: min bid ${priceFormat.format(list.fodderBidMin)}` : L("Nieuwe ronde: min bid weer op 0", "New round: min bid back to 0")) + freshText, true);
         } else if (fresh) {
           saveStock();
           showToast(`Nieuwe ronde${freshText}`, true);
@@ -5822,16 +5845,16 @@ function priceWatchMain(SCRIPT_VERSION) {
       const market = el("div", "pt-run-market");
       const marketInput = el("input", "pt-target-input");
       marketInput.inputMode = "numeric";
-      marketInput.placeholder = "markt";
-      marketInput.title = "Goedkoopste BIN die je nu op de markt ziet";
+      marketInput.placeholder = L("markt", "market");
+      marketInput.title = L("Goedkoopste BIN die je nu op de markt ziet", "Cheapest BIN you currently see on the market");
       const marketSet = el("button", "pt-run-btn", "OK");
-      const marketBuy = el("button", "pt-run-btn pt-run-buy", "🔍 Koopfilter");
+      const marketBuy = el("button", "pt-run-btn pt-run-buy", L("🔍 Koopfilter", "🔍 Buy filter"));
       const marketClear = el("button", "pt-run-btn", "↺");
       [marketSet, marketBuy, marketClear].forEach(button => { button.type = "button"; });
-      marketSet.title = "Marktprijs opslaan en het koopfilter klaarzetten";
-      marketBuy.title = "Koopfilter (markt min je marge) klaarzetten";
+      marketSet.title = L("Marktprijs opslaan en het koopfilter klaarzetten", "Save market price and set up the buy filter");
+      marketBuy.title = L("Koopfilter (markt min je marge) klaarzetten", "Set up buy filter (market minus your margin)");
       marketBuy.addEventListener("click", () => run && goToRule(run.listId, run.index));
-      marketClear.title = "Marktprijs vergeten en de markt opnieuw bekijken";
+      marketClear.title = L("Marktprijs vergeten en de markt opnieuw bekijken", "Forget market price and look at the market again");
       const setMarket = price => {
         const list = run && getStock().find(item => item.id === run.listId);
         const rule = list && stockRules(list)[run.index];
@@ -5853,13 +5876,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       const sellBox = el("div", "pt-run-market pt-run-sell");
       const sellInput = el("input", "pt-target-input");
       sellInput.inputMode = "numeric";
-      sellInput.placeholder = "verkoop";
-      sellInput.title = "Prijs waarvoor de kaart direct verkoopt: max BIN = na 5% belasting min je winst-%";
+      sellInput.placeholder = L("verkoop", "sell");
+      sellInput.title = L("Prijs waarvoor de kaart direct verkoopt: max BIN = na 5% belasting min je winst-%", "Price the card sells for instantly: max BIN = after 5% tax minus your profit %");
       const sellSave = el("button", "pt-run-btn", "OK ▶");
       const sellClear = el("button", "pt-run-btn", "↺");
       [sellSave, sellClear].forEach(button => { button.type = "button"; });
-      sellSave.title = "Onthouden en de volgende klaarzetten";
-      sellClear.title = "Verkoopprijs vergeten (weer de hele markt)";
+      sellSave.title = L("Onthouden en de volgende klaarzetten", "Remember and set up the next one");
+      sellClear.title = L("Verkoopprijs vergeten (weer de hele markt)", "Forget sell price (whole market again)");
       const setSell = price => {
         const list = run && getStock().find(item => item.id === run.listId);
         const rule = list && stockRules(list)[run.index];
@@ -5886,11 +5909,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         const rule = list && stockRules(list)[run.index];
         if (rule && list.massBid) {
           // Mass bid: same card again with the new max bid (search it yourself).
-          showToast(`Onthouden: BIN ${priceFormat.format(price)} → max bod ${rule.max ? priceFormat.format(rule.max) : "—"}${rule.max ? ` (${formatSigned(flipNet(price, rule.max))} na 5%)` : ""}`, true);
+          showToast(L(`Onthouden: BIN ${priceFormat.format(price)} → max bod ${rule.max ? priceFormat.format(rule.max) : "—"}${rule.max ? ` (${formatSigned(flipNet(price, rule.max))} na 5%)` : ""}`, `Saved: BIN ${priceFormat.format(price)} → max bid ${rule.max ? priceFormat.format(rule.max) : "—"}${rule.max ? ` (${formatSigned(flipNet(price, rule.max))} after 5%)` : ""}`), true);
           goToRule(run.listId, run.index);
           return;
         }
-        if (rule) showToast(`Onthouden: verkoop ${priceFormat.format(price)} → koop ≤ ${priceFormat.format(rule.max)} (${formatSigned(flipNet(price, rule.max))})`, true);
+        if (rule) showToast(L(`Onthouden: verkoop ${priceFormat.format(price)} → koop ≤ ${priceFormat.format(rule.max)} (${formatSigned(flipNet(price, rule.max))})`, `Saved: sell ${priceFormat.format(price)} → buy ≤ ${priceFormat.format(rule.max)} (${formatSigned(flipNet(price, rule.max))})`), true);
         next.click();
       });
       sellInput.addEventListener("keydown", event => { if (event.key === "Enter") sellSave.click(); });
@@ -5898,9 +5921,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       sellBox.append(sellInput, sellSave, sellClear);
       // Mass bid: EA often shows only cards with 10-20 min left on the first search. Watch ~5, go back,
       // and run the SAME filter again; this button puts that filter back without retyping.
-      const again = el("button", "pt-run-btn pt-run-again", "🔁 Zelfde filter");
+      const again = el("button", "pt-run-btn pt-run-again", L("🔁 Zelfde filter", "🔁 Same filter"));
       again.type = "button";
-      again.title = "Zelfde zoekfilter opnieuw klaarzetten (na 5 op je watch list zetten en terug): dan zie je de veilingen die het eerst aflopen";
+      again.title = L("Zelfde zoekfilter opnieuw klaarzetten (na 5 op je watch list zetten en terug): dan zie je de veilingen die het eerst aflopen", "Set up the same search filter again (after putting 5 on your watch list and going back): then you see the auctions ending first");
       again.addEventListener("click", () => run && goToRule(run.listId, run.index));
       runBar.append(info, market, sellBox, again, prev, next, flip, stop, el("span", "pt-search-count"));
       updateSearchBadges();
@@ -5914,13 +5937,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     runBar.dataset.window = state ? state.state : "";
 
     if (runLoading) {
-      info.append(el("div", "pt-run-title", "Verse FUT Genie-prijzen ophalen…"), el("div", "pt-run-sub", list.name));
+      info.append(el("div", "pt-run-title", L("Verse FUT Genie-prijzen ophalen…", "Fetching fresh FUT Genie prices…")), el("div", "pt-run-sub", list.name));
     } else if (rule.fodder) {
-      const what = list.mode === "bid" ? "max bod" : "max BIN";
+      const what = list.mode === "bid" ? L("max bod", "max bid") : "max BIN";
       info.append(
         el("div", "pt-run-title", `${rule.fodder.rating}-rated · ${what} ${rule.max ? priceFormat.format(rule.max) : "—"}`),
-        el("div", "pt-run-sub", (rule.ideal ? `ideaal ≤ ${priceFormat.format(rule.ideal)} · ` : "") +
-          (rule.max ? `winst vanaf verkoop ≥ ${priceFormat.format(roundUpToStep(rule.max / (1 - EA_TAX)))} · ` : "") +
+        el("div", "pt-run-sub", (rule.ideal ? L(`ideaal ≤ ${priceFormat.format(rule.ideal)} · `, `ideal ≤ ${priceFormat.format(rule.ideal)} · `) : "") +
+          (rule.max ? L(`winst vanaf verkoop ≥ ${priceFormat.format(roundUpToStep(rule.max / (1 - EA_TAX)))} · `, `profit from sale ≥ ${priceFormat.format(roundUpToStep(rule.max / (1 - EA_TAX)))} · `) : "") +
           `${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else if (rule.player && list.flipSheet) {
@@ -5934,30 +5957,30 @@ function priceWatchMain(SCRIPT_VERSION) {
     } else if (rule.player && list.massBid) {
       const sell = massBidSell(rule.player);
       const watch = watchListCount
-        ? `watch list ${watchListCount.n}/${MASS_BID_WATCH_MAX}${watchListCount.n >= MASS_BID_WATCH_MAX ? " (vol)" : ""} om ${formatTime(watchListCount.at)}`
-        : "watch list: open Transfer Targets om te tellen";
+        ? L(`watch list ${watchListCount.n}/${MASS_BID_WATCH_MAX}${watchListCount.n >= MASS_BID_WATCH_MAX ? " (vol)" : ""} om ${formatTime(watchListCount.at)}`, `watch list ${watchListCount.n}/${MASS_BID_WATCH_MAX}${watchListCount.n >= MASS_BID_WATCH_MAX ? " (full)" : ""} at ${formatTime(watchListCount.at)}`)
+        : L("watch list: open Transfer Targets om te tellen", "watch list: open Transfer Targets to count");
       info.append(
-        el("div", "pt-run-title", `🎯 ${rule.player.name} · max bod ${rule.max ? priceFormat.format(rule.max) : "—"}`),
-        el("div", "pt-run-sub", `BIN ${sell ? priceFormat.format(sell) : "—"} ${rule.player.sell ? "(jouw)" : "(FUT.GG, check de markt)"} − ${massBidPct(list)}%` +
+        el("div", "pt-run-title", L(`🎯 ${rule.player.name} · max bod ${rule.max ? priceFormat.format(rule.max) : "—"}`, `🎯 ${rule.player.name} · max bid ${rule.max ? priceFormat.format(rule.max) : "—"}`)),
+        el("div", "pt-run-sub", `BIN ${sell ? priceFormat.format(sell) : "—"} ${rule.player.sell ? L("(jouw)", "(yours)") : L("(FUT.GG, check de markt)", "(FUT.GG, check the market)")} − ${massBidPct(list)}%` +
           (sell && rule.max ? ` = ${formatSigned(flipNet(sell, rule.max))} na 5%` : "") + ` · ${list.name} · ${run.index + 1}/${rules.length}`),
-        el("div", "pt-run-sub pt-mb-steps", `Zoek → zet 5 op je watch list → terug → 🔁 Zelfde filter → zoek: kaarten die het eerst aflopen · ${watch}`)
+        el("div", "pt-run-sub pt-mb-steps", L(`Zoek → zet 5 op je watch list → terug → 🔁 Zelfde filter → zoek: kaarten die het eerst aflopen · ${watch}`, `Search → put 5 on your watch list → back → 🔁 Same filter → search: cards ending first · ${watch}`))
       );
     } else if (rule.player) {
       const outlook = snipeOutlook(rule);
       info.append(
-        el("div", "pt-run-title", `${rule.player.name} · ${list.mode === "bid" ? "max bod" : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"}`),
+        el("div", "pt-run-title", `${rule.player.name} · ${list.mode === "bid" ? L("max bod", "max bid") : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"}`),
         el("div", "pt-run-sub", (list.fodderRating
-          ? `${rule.player.rating || list.fodderRating}-rated · Genie ${rule.genie ? priceFormat.format(rule.genie.price) : "—"}` + (rule.player.fixedMax ? " · jouw doel" : ` · auto (winst ${profitFor(list)}%)`)
-          : list.holo ? `✨ alleen holo · max = normale prijs${rule.genie ? "" : " (geen Genie-prijs)"}`
-          : rule.player.fixedMax ? "vaste max BIN" : rule.genie ? `Genie ${priceFormat.format(rule.genie.price)} · winst ${profitFor(list)}%` : "geen Genie-prijs") +
-          (outlook ? ` · winst vanaf verkoop ≥ ${priceFormat.format(outlook.breakEven)}` : "") +
+          ? `${rule.player.rating || list.fodderRating}-rated · Genie ${rule.genie ? priceFormat.format(rule.genie.price) : "—"}` + (rule.player.fixedMax ? L(" · jouw doel", " · your target") : L(` · auto (winst ${profitFor(list)}%)`, ` · auto (profit ${profitFor(list)}%)`))
+          : list.holo ? L(`✨ alleen holo · max = normale prijs${rule.genie ? "" : " (geen Genie-prijs)"}`, `✨ holo only · max = normal price${rule.genie ? "" : " (no Genie price)"}`)
+          : rule.player.fixedMax ? "vaste max BIN" : rule.genie ? L(`Genie ${priceFormat.format(rule.genie.price)} · winst ${profitFor(list)}%`, `Genie ${priceFormat.format(rule.genie.price)} · profit ${profitFor(list)}%`) : L("geen Genie-prijs", "no Genie price")) +
+          (outlook ? L(` · winst vanaf verkoop ≥ ${priceFormat.format(outlook.breakEven)}`, ` · profit from sale ≥ ${priceFormat.format(outlook.breakEven)}`) : "") +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else if (rule.filter) {
       info.append(
         el("div", "pt-run-title", `${filterRuleTitle(rule.filter)}${rule.position ? ` · ${rule.position}` : ""} ≤ ${rule.max ? priceFormat.format(rule.max) : "—"}`),
-        el("div", "pt-run-sub", `${rule.league ? rule.league.label : "alle competities"}` + (rule.ideal ? ` · ideaal ≤ ${priceFormat.format(rule.ideal)}` : "") +
-          (rule.sell ? ` · verkoop ${priceFormat.format(rule.sell.price)} = ${formatSigned(flipNet(rule.sell.price, rule.max))} na 5%` : " · vul in wat direct verkoopt") +
+        el("div", "pt-run-sub", `${rule.league ? rule.league.label : L("alle competities", "all leagues")}` + (rule.ideal ? L(` · ideaal ≤ ${priceFormat.format(rule.ideal)}`, ` · ideal ≤ ${priceFormat.format(rule.ideal)}`) : "") +
+          (rule.sell ? ` · ${L("verkoop", "sell")} ${priceFormat.format(rule.sell.price)} = ${formatSigned(flipNet(rule.sell.price, rule.max))} ${L("na 5%", "after 5%")}` : L(" · vul in wat direct verkoopt", " · enter what sells instantly")) +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else if (list.flip && rule.market) {
@@ -5966,25 +5989,25 @@ function priceWatchMain(SCRIPT_VERSION) {
       const high = rule.max + sellHigh;
       const aboveTip = rule.ceiling && rule.market.price > rule.ceiling;
       info.append(
-        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · koop ≤ ${priceFormat.format(rule.max)}`),
-        el("div", "pt-run-sub", `markt ${priceFormat.format(rule.market.price)} (${rule.market.seen ? `${rule.market.count ? `${rule.market.count}× ` : ""}gezien ` : ""}${formatTime(rule.market.at)}) · ` +
-          `verkoop ${priceFormat.format(low)}–${priceFormat.format(high)} = ${formatSigned(flipNet(low, rule.max))}…${formatSigned(flipNet(high, rule.max))} na 5%` +
+        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · ${L("koop", "buy")} ≤ ${priceFormat.format(rule.max)}`),
+        el("div", "pt-run-sub", L(`markt ${priceFormat.format(rule.market.price)} (${rule.market.seen ? `${rule.market.count ? `${rule.market.count}× ` : ""}gezien ` : ""}${formatTime(rule.market.at)}) · `, `market ${priceFormat.format(rule.market.price)} (${rule.market.seen ? `${rule.market.count ? `${rule.market.count}× ` : ""}seen ` : ""}${formatTime(rule.market.at)}) · `) +
+          `${L("verkoop", "sell")} ${priceFormat.format(low)}–${priceFormat.format(high)} = ${formatSigned(flipNet(low, rule.max))}…${formatSigned(flipNet(high, rule.max))} ${L("na 5%", "after 5%")}` +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
       if (aboveTip) {
         info.appendChild(el("div", "pt-run-window pt-window-before",
-          `⚠ markt boven de tip (≤ ${priceFormat.format(rule.ceiling)}): meer risico, de tip raadt deze nu niet aan`));
+          L(`⚠ markt boven de tip (≤ ${priceFormat.format(rule.ceiling)}): meer risico, de tip raadt deze nu niet aan`, `⚠ market above the tip (≤ ${priceFormat.format(rule.ceiling)}): more risk, the tip doesn't recommend this now`)));
       }
     } else if (list.flip) {
       info.append(
-        el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · markt bekijken (geen max BIN)`),
-        el("div", "pt-run-sub", `Zoek: de goedkoopste BIN wordt de markt (of vul hem in) → koopfilter markt − ${priceFormat.format(list.flip.under)}` +
+        el("div", "pt-run-title", L(`${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · markt bekijken (geen max BIN)`, `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} · view market (no max BIN)`)),
+        el("div", "pt-run-sub", L(`Zoek: de goedkoopste BIN wordt de markt (of vul hem in) → koopfilter markt − ${priceFormat.format(list.flip.under)}`, `Search: the cheapest BIN becomes the market (or enter it) → buy filter market − ${priceFormat.format(list.flip.under)}`) +
           ` · ${list.name} · ${run.index + 1}/${rules.length}`)
       );
     } else {
       info.append(
         el("div", "pt-run-title", `${rule.club.teamName} · ${LEVEL_LABEL[rule.level]} ≤ ${priceFormat.format(rule.max)}`),
-        el("div", "pt-run-sub", `${list.name} · ${run.index + 1}/${rules.length}` + (rule.ideal ? ` · ideaal ≤ ${priceFormat.format(rule.ideal)}` : ""))
+        el("div", "pt-run-sub", `${list.name} · ${run.index + 1}/${rules.length}` + (rule.ideal ? L(` · ideaal ≤ ${priceFormat.format(rule.ideal)}`, ` · ideal ≤ ${priceFormat.format(rule.ideal)}`) : ""))
       );
     }
     const marketBox = runBar.querySelector(".pt-run-market");
@@ -5996,10 +6019,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     // Flip bid run: the max bid is your Flip buy price, so no "BIN markt" field (that would re-derive it).
     sellBox.style.display = (rule.filter || (massBidRule && !list.flipSheet)) && !runLoading ? "" : "none";
     sellBox.lastChild.style.display = rule.sell || (massBidRule && rule.player.sell) ? "" : "none";
-    sellBox.querySelector("input").placeholder = massBidRule ? "BIN markt" : "verkoop";
+    sellBox.querySelector("input").placeholder = massBidRule ? L("BIN markt", "BIN market") : L("verkoop", "sell");
     sellBox.querySelector("input").title = massBidRule
-      ? "Laagste BIN die je nu op de markt ziet: dat wordt je verkoopprijs, max bod = BIN − je %"
-      : "Prijs waarvoor de kaart direct verkoopt: max BIN = na 5% belasting min je winst-%";
+      ? L("Laagste BIN die je nu op de markt ziet: dat wordt je verkoopprijs, max bod = BIN − je %", "Lowest BIN you currently see on the market: that becomes your sell price, max bid = BIN − your %")
+      : L("Prijs waarvoor de kaart direct verkoopt: max BIN = na 5% belasting min je winst-%", "Price the card sells for instantly: max BIN = after 5% tax minus your profit %");
     sellBox.querySelector("button").textContent = massBidRule ? "OK" : "OK ▶";
     runBar.querySelector(".pt-run-again").style.display = massBidRule && !runLoading ? "" : "none";
     if (state) info.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
@@ -6007,8 +6030,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const nextButton = runBar.querySelector(".pt-run-next");
     const atEnd = run.index >= rules.length - 1;
     nextButton.disabled = runLoading || rules.length < 2;
-    nextButton.textContent = atEnd ? `↻ Opnieuw (1/${rules.length})` : "Volgende ▶";
-    nextButton.title = atEnd ? "Terug naar de eerste en opnieuw beginnen" : "Volgende klaarzetten (zoeken doe je zelf)";
+    nextButton.textContent = atEnd ? L(`↻ Opnieuw (1/${rules.length})`, `↻ Again (1/${rules.length})`) : L("Volgende ▶", "Next ▶");
+    nextButton.title = atEnd ? L("Terug naar de eerste en opnieuw beginnen", "Back to the first and start over") : L("Volgende klaarzetten (zoeken doe je zelf)", "Set up next (you search yourself)");
     runBar.querySelector(".pt-run-prev").disabled = runLoading || run.index <= 0;
   }
 
@@ -6036,12 +6059,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         ` · ${summary.net > 0 ? "+" : ""}${priceFormat.format(summary.net)}`));
     }
     detail.title = [
-      `${summary.owned} verhandelbaar` + (summary.untradeable ? ` (+${summary.untradeable} onverhandelbaar, niet meegeteld)` : ""),
-      summary.bought < summary.owned ? `${summary.owned - summary.bought} zonder bekende aankoopprijs (bijv. uit packs)` : "",
+      `${summary.owned} verhandelbaar` + (summary.untradeable ? L(` (+${summary.untradeable} onverhandelbaar, niet meegeteld)`, ` (+${summary.untradeable} untradeable, not counted)`) : ""),
+      summary.bought < summary.owned ? L(`${summary.owned - summary.bought} zonder bekende aankoopprijs (bijv. uit packs)`, `${summary.owned - summary.bought} without known purchase price (e.g. from packs)`) : "",
       summary.avgBuy ? `Gemiddelde aankoop: ${priceFormat.format(Math.round(summary.avgBuy))}` : "",
       summary.avgValue ? `Gemiddelde FUT Genie-waarde nu: ${priceFormat.format(Math.round(summary.avgValue))}` : "",
-      summary.breakEven ? `Winst vanaf verkoopprijs ≥ ${priceFormat.format(summary.breakEven)} (na 5% belasting)` : "",
-      summary.net !== null ? `Netto als je nu verkoopt: ${summary.net > 0 ? "+" : ""}${priceFormat.format(summary.net)}` : ""
+      summary.breakEven ? L(`Winst vanaf verkoopprijs ≥ ${priceFormat.format(summary.breakEven)} (na 5% belasting)`, `Profit from sell price ≥ ${priceFormat.format(summary.breakEven)} (after 5% tax)`) : "",
+      summary.net !== null ? L(`Netto als je nu verkoopt: ${summary.net > 0 ? "+" : ""}${priceFormat.format(summary.net)}`, `Net if you sell now: ${summary.net > 0 ? "+" : ""}${priceFormat.format(summary.net)}`) : ""
     ].filter(Boolean).join("\n");
     return detail;
   }
@@ -6075,7 +6098,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try {
       localStorage.setItem(FODDER_KEY, JSON.stringify(getFodder()));
     } catch (error) {
-      console.warn("Price Watch: fodder-instellingen konden niet worden opgeslagen.", error);
+      console.warn(L("Price Watch: fodder-instellingen konden niet worden opgeslagen.", "Price Watch: could not save fodder settings."), error);
     }
     listeners.forEach(listener => listener());
   }
@@ -6101,7 +6124,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const result = await Promise.race([g.getAveragePrices(), new Promise(resolve => window.setTimeout(() => resolve(null), 15000))]);
       if (result && result.prices) fodderMarket = { prices: result.prices, lastUpdated: result.lastUpdated, fetchedAt: Date.now() };
     } catch (error) {
-      console.warn("Price Watch: fodderprijzen ophalen mislukt.", error);
+      console.warn(L("Price Watch: fodderprijzen ophalen mislukt.", "Price Watch: fetching fodder prices failed."), error);
     } finally {
       fodderMarketLoading = false;
       listeners.forEach(listener => listener());
@@ -6148,7 +6171,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     futggCheapestTriedAt = Date.now();
     futggCheapestLoading = futggRequestJson(`${FUTGG_CHEAPEST_URL_BASE}${userPlatform() === "console" ? "ps" : "pc"}&_=${Date.now()}`).then(json => {
       const data = json && json.data;
-      if (!data || typeof data !== "object") throw new Error("FUT.GG cheapest-by-rating: geen data");
+      if (!data || typeof data !== "object") throw new Error(L("FUT.GG cheapest-by-rating: geen data", "FUT.GG cheapest-by-rating: no data"));
       const byRating = {};
       Object.entries(data).forEach(([rating, players]) => {
         if (!Array.isArray(players)) return;
@@ -6165,7 +6188,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       futggCheapest = { at: Date.now(), byRating };
       return true;
     }).catch(error => {
-      console.warn("Price Watch: FUT.GG cheapest-by-rating ophalen mislukt; eigen berekening blijft actief.", error);
+      console.warn(L("Price Watch: FUT.GG cheapest-by-rating ophalen mislukt; eigen berekening blijft actief.", "Price Watch: fetching FUT.GG cheapest-by-rating failed; own calculation stays active."), error);
       return false;
     }).finally(() => {
       futggCheapestLoading = null;
@@ -6266,7 +6289,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       fodderRating: ratings[0],
       fodderRatings: ratings,
       mode: state.mode,
-      name: `${ratings.join("+")}-rated ${ratings.some(rating => (state.targets[rating] || {}).max) ? "rond je doel" : "goedkoopste"}`,
+      name: L(`${ratings.join("+")}-rated ${ratings.some(rating => (state.targets[rating] || {}).max) ? "rond je doel" : "goedkoopste"}`, `${ratings.join("+")}-rated ${ratings.some(rating => (state.targets[rating] || {}).max) ? "around your target" : "cheapest"}`),
       createdAt: Date.now(),
       profit: null,
       windows: [],
@@ -6339,7 +6362,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try {
       await resolveWatchVersions();
     } catch (error) {
-      console.warn("Price Watch: versies opzoeken mislukt.", error);
+      console.warn(L("Price Watch: versies opzoeken mislukt.", "Price Watch: looking up versions failed."), error);
     }
     const players = getWatch().map(entry => ({
       definitionId: entry.definitionId,
@@ -6353,7 +6376,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const stock = getStock();
     const index = stock.findIndex(list => list.id === WATCH_RUN_ID);
     if (index >= 0) stock.splice(index, 1);
-    stock.push({ id: WATCH_RUN_ID, type: "players", watchRun: true, name: "Spelers", createdAt: Date.now(), profit: null, windows: [], players, done: {} });
+    stock.push({ id: WATCH_RUN_ID, type: "players", watchRun: true, name: L("Spelers", "Players"), createdAt: Date.now(), profit: null, windows: [], players, done: {} });
     saveStock();
     startRun(WATCH_RUN_ID);
     return true;
@@ -6386,7 +6409,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (fodderInventoryProgress) return;
     const ratings = fodderRatings();
     const rules = {};
-    fodderInventoryProgress = "lijsten…";
+    fodderInventoryProgress = L("lijsten…", "lists…");
     listeners.forEach(listener => listener());
     const transferPile = await itemsOutsideClub();
     let failed = false;
@@ -6443,26 +6466,26 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     const modeLabel = el("label", "pt-goal");
     const mode = el("select", "pt-stock-select pt-mode-select");
-    mode.append(new Option("Bieden (max bod)", "bid"), new Option("Direct kopen (max BIN)", "bin"));
+    mode.append(new Option(L("Bieden (max bod)", "Bid (max bid)"), "bid"), new Option("Direct kopen (max BIN)", "bin"));
     mode.addEventListener("change", () => { getFodder().mode = mode.value; saveFodder(); });
-    modeLabel.append(el("span", "pt-muted", "Zoeken op"), mode);
+    modeLabel.append(el("span", "pt-muted", L("Zoeken op", "Search by")), mode);
 
-    const refresh = el("button", "pt-watch-refresh", "↻ Prijzen");
-    const inventory = el("button", "pt-watch-refresh", "📦 Voorraad bijwerken");
+    const refresh = el("button", "pt-watch-refresh", L("↻ Prijzen", "↻ Prices"));
+    const inventory = el("button", "pt-watch-refresh", L("📦 Voorraad bijwerken", "📦 Update stock"));
     const futbin = el("a", "pt-link-btn pt-futbin", "FUTBIN ↗");
     futbin.href = FUTBIN_CHEAPEST_URL;
     futbin.target = "_blank";
     futbin.rel = "noopener";
-    futbin.title = "Goedkoopste spelers per rating op FUTBIN (met namen), om te vergelijken. Let op: zet FUTBIN op PC, anders zie je consoleprijzen.";
+    futbin.title = L("Goedkoopste spelers per rating op FUTBIN (met namen), om te vergelijken. Let op: zet FUTBIN op PC, anders zie je consoleprijzen.", "Cheapest players per rating on FUTBIN (with names), for comparison. Note: set FUTBIN to PC, otherwise you see console prices.");
     [refresh, inventory].forEach(button => { button.type = "button"; });
     refresh.addEventListener("click", () => {
       loadFodderMarket(true);
       loadFodderCheapest(true);
     });
-    inventory.title = "Telt je gewone kaarten per rating in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten.";
+    inventory.title = L("Telt je gewone kaarten per rating in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten.", "Counts your regular cards per rating in your club, transfer list, unassigned and won transfer targets. No transfer market searches.");
     inventory.addEventListener("click", () => updateFodderInventory());
     // Cycle several ratings in one go (the ticked rows), so "Volgende" runs on from 86 into 87.
-    const cycleAll = el("button", "pt-watch-refresh pt-cycle-btn", "🔄 Aangevinkte cyclen");
+    const cycleAll = el("button", "pt-watch-refresh pt-cycle-btn", L("🔄 Aangevinkte cyclen", "🔄 Ticked cycles"));
     cycleAll.type = "button";
     cycleAll.addEventListener("click", () => startFodderCycle(cycleSelection()));
     controls.append(range, modeLabel, cycleAll, refresh, inventory, futbin);
@@ -6479,8 +6502,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     const table = el("table", "pt-watch-table pt-fodder-table");
     const head = el("tr");
-    [["Rating", "pt-col-rating"], ["Goedkoopste spelers", "pt-col-cheapest"], ["Mediaan", "pt-col-price"], ["Jouw doel", "pt-col-target"],
-      ["Afstand", "pt-col-distance"], ["", "pt-col-level"], ["Voorraad", "pt-col-stock"]]
+    [["Rating", "pt-col-rating"], [L("Goedkoopste spelers", "Cheapest players"), "pt-col-cheapest"], [L("Mediaan", "Median"), "pt-col-price"], [L("Jouw doel", "Your target"), "pt-col-target"],
+      [L("Afstand", "Distance"), "pt-col-distance"], ["", "pt-col-level"], [L("Voorraad", "Stock"), "pt-col-stock"]]
       .forEach(([label, className]) => head.appendChild(el("th", className, label)));
     const thead = el("thead");
     thead.appendChild(head);
@@ -6503,22 +6526,22 @@ function priceWatchMain(SCRIPT_VERSION) {
       mode.value = state.mode === "bin" ? "bin" : "bid";
       refresh.disabled = fodderMarketLoading;
       inventory.disabled = !!fodderInventoryProgress;
-      inventory.textContent = fodderInventoryProgress ? `📦 ${fodderInventoryProgress}` : "📦 Voorraad bijwerken";
+      inventory.textContent = fodderInventoryProgress ? `📦 ${fodderInventoryProgress}` : L("📦 Voorraad bijwerken", "📦 Update stock");
       status.textContent = !genie()
-        ? `FUT.GG-prijzen (${futggPlatform === "console" ? "console" : "PC"}) per rating: laagste, mediaan en gemiddelde van de 10 goedkoopste gewone kaarten${futggPricesAt ? ` · ${formatTime(futggPricesAt)}` : ""}`
-        : fodderMarketLoading ? "Fodderprijzen ophalen bij FUT Genie…"
+        ? L(`FUT.GG-prijzen (${futggPlatform === "console" ? "console" : "PC"}) per rating: laagste, mediaan en gemiddelde van de 10 goedkoopste gewone kaarten${futggPricesAt ? ` · ${formatTime(futggPricesAt)}` : ""}`, `FUT.GG prices (${futggPlatform === "console" ? "console" : "PC"}) per rating: lowest, median and average of the 10 cheapest regular cards${futggPricesAt ? ` · ${formatTime(futggPricesAt)}` : ""}`)
+        : fodderMarketLoading ? L("Fodderprijzen ophalen bij FUT Genie…", "Fetching fodder prices from FUT Genie…")
           : fodderMarket
-            ? `FUT Genie-marktprijzen (PC) per rating, gewone kaarten · bijgewerkt ${fodderMarket.lastUpdated ? formatDayTime(new Date(fodderMarket.lastUpdated).getTime()) : "onbekend"}`
-            : "Nog geen fodderprijzen opgehaald.";
+            ? L(`FUT Genie-marktprijzen (PC) per rating, gewone kaarten · bijgewerkt ${fodderMarket.lastUpdated ? formatDayTime(new Date(fodderMarket.lastUpdated).getTime()) : "onbekend"}`, `FUT Genie market prices (PC) per rating, regular cards · updated ${fodderMarket.lastUpdated ? formatDayTime(new Date(fodderMarket.lastUpdated).getTime()) : "unknown"}`)
+            : L("Nog geen fodderprijzen opgehaald.", "No fodder prices fetched yet.");
 
       body.textContent = "";
-      const what = state.mode === "bin" ? "max BIN" : "max bod";
+      const what = state.mode === "bin" ? "max BIN" : L("max bod", "max bid");
       const selected = cycleSelection();
       const selectedPicks = selected.reduce((sum, rating) => sum + cyclePicks(rating).length, 0);
       cycleAll.disabled = !selectedPicks;
-      cycleAll.textContent = selected.length ? `🔄 Cyclen ${selected.join("+")} (${selectedPicks})` : "🔄 Aangevinkte cyclen";
-      cycleAll.title = "Loopt de goedkoopste spelers van alle aangevinkte ratings achter elkaar door (laagste rating eerst, per rating goedkoopste eerst), " +
-        "elk met het doel van zijn rating. Zoeken doe je zelf; Volgende ▶ in de balk rechtsonder.";
+      cycleAll.textContent = selected.length ? L(`🔄 Cyclen ${selected.join("+")} (${selectedPicks})`, `🔄 Cycle ${selected.join("+")} (${selectedPicks})`) : L("🔄 Aangevinkte cyclen", "🔄 Ticked cycles");
+      cycleAll.title = L("Loopt de goedkoopste spelers van alle aangevinkte ratings achter elkaar door (laagste rating eerst, per rating goedkoopste eerst), ", "Runs through the cheapest players of all ticked ratings back to back (lowest rating first, cheapest first per rating), ") +
+        L("elk met het doel van zijn rating. Zoeken doe je zelf; Volgende ▶ in de balk rechtsonder.", "each with the target of its rating. You search yourself; Next ▶ in the bar at the bottom right.");
       let totalOwned = 0;
       let totalValue = 0;
       fodderRatings().forEach(rating => {
@@ -6543,15 +6566,15 @@ function priceWatchMain(SCRIPT_VERSION) {
         const medCell = el("td", "pt-col-price pt-muted" + (market ? "" : " pt-no-med"), market ?`${priceFormat.format(market.med)}${lowSample ? " ⚠️" : ""}` : "—");
         if (market) {
           medCell.title = `Gemiddeld ${priceFormat.format(market.avg)} · ${market.n} waarnemingen` +
-            (lowSample ? "\nWeinig waarnemingen: mediaan is onbetrouwbaar, kijk naar het minimum of FUTBIN." : "");
+            (lowSample ? L("\nWeinig waarnemingen: mediaan is onbetrouwbaar, kijk naar het minimum of FUTBIN.", "\nFew observations: median is unreliable, look at the minimum or FUTBIN.") : "");
         }
 
         const targetCell = el("td", "pt-col-target");
         const input = el("input", "pt-target-input");
         input.inputMode = "numeric";
-        input.placeholder = cheapest ? `bijv. ${priceFormat.format(roundDownToStep(cheapest * 0.85))}` : "—";
+        input.placeholder = cheapest ? L(`bijv. ${priceFormat.format(roundDownToStep(cheapest * 0.85))}`, `e.g. ${priceFormat.format(roundDownToStep(cheapest * 0.85))}`) : "—";
         input.value = target.max || "";
-        input.title = `Je ${what} voor ${rating}-rated` + (target.ideal ? ` (ideaal ≤ ${priceFormat.format(target.ideal)})` : "");
+        input.title = L(`Je ${what} voor ${rating}-rated`, `Your ${what} for ${rating}-rated`) + (target.ideal ? L(` (ideaal ≤ ${priceFormat.format(target.ideal)})`, ` (ideal ≤ ${priceFormat.format(target.ideal)})`) : "");
         input.addEventListener("change", () => {
           const max = parsePrice(input.value);
           if (max) state.targets[rating] = { ...target, max };
@@ -6560,7 +6583,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         });
         targetCell.appendChild(input);
         if (target.max) {
-          targetCell.appendChild(el("div", "pt-level-detail pt-outlook pt-muted", `winst vanaf ≥ ${priceFormat.format(roundUpToStep(target.max / (1 - EA_TAX)))}`));
+          targetCell.appendChild(el("div", "pt-level-detail pt-outlook pt-muted", L(`winst vanaf ≥ ${priceFormat.format(roundUpToStep(target.max / (1 - EA_TAX)))}`, `profit from ≥ ${priceFormat.format(roundUpToStep(target.max / (1 - EA_TAX)))}`)));
         }
 
         // Distance: cheapest player vs your target (green = the market is at or under your target).
@@ -6568,7 +6591,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const state2 = distanceState(target.max || null, cheapest);
         const pill = el("span");
         distanceBar(pill, state2);
-        if (!target.max) pill.title = "Vul een doel in om de afstand te zien";
+        if (!target.max) pill.title = L("Vul een doel in om de afstand te zien", "Enter a target to see the distance");
         distanceCell.appendChild(pill);
         row.classList.toggle("pt-row-hit", !!target.max && state2.percent != null && state2.percent <= 0);
         row.classList.toggle("pt-row-near", !!target.max && state2.percent != null && state2.percent > 0 && state2.percent <= NEAR_PERCENT);
@@ -6576,18 +6599,18 @@ function priceWatchMain(SCRIPT_VERSION) {
         const buttonCell = el("td", "pt-col-level");
         const max = target.max || null;
         const cycleActive = activeCycleRatings().includes(rating);
-        const cycle = el("button", "pt-level-btn pt-cycle-btn" + (cycleActive ? " pt-current" : ""), picks.length ? `🔄 Cyclen (${picks.length})` : "🔄 Cyclen");
+        const cycle = el("button", "pt-level-btn pt-cycle-btn" + (cycleActive ? " pt-current" : ""), picks.length ? L(`🔄 Cyclen (${picks.length})`, `🔄 Cycle (${picks.length})`) : L("🔄 Cyclen", "🔄 Cycle"));
         cycle.type = "button";
         cycle.disabled = !picks.length;
         cycle.title = picks.length
-          ? `Loop de ${picks.length} goedkoopste ${rating}-rated spelers één voor één door (goedkoopste eerst) met ${max ? `${what} ${priceFormat.format(max)}` : "auto max (5% winst op de Genie-prijs)"}.\nPer speler worden de filters klaargezet; zoeken doe je zelf. Volgende ▶ in de balk rechtsonder.`
-          : "Nog geen spelersprijzen voor deze rating (FUT Genie laadt nog, of geen gewone kaarten met prijs).";
+          ? L(`Loop de ${picks.length} goedkoopste ${rating}-rated spelers één voor één door (goedkoopste eerst) met ${max ? `${what} ${priceFormat.format(max)}` : "auto max (5% winst op de Genie-prijs)"}.\nPer speler worden de filters klaargezet; zoeken doe je zelf. Volgende ▶ in de balk rechtsonder.`, `Go through the ${picks.length} cheapest ${rating}-rated players one by one (cheapest first) with ${max ? `${what} ${priceFormat.format(max)}` : "auto max (5% profit on the Genie price)"}.\nFilters are set up per player; you search yourself. Next ▶ in the bar at the bottom right.`)
+          : L("Nog geen spelersprijzen voor deze rating (FUT Genie laadt nog, of geen gewone kaarten met prijs).", "No player prices yet for this rating (FUT Genie is still loading, or no regular cards with a price).");
         cycle.addEventListener("click", () => startFodderCycle(rating));
         buttonCell.appendChild(cycle);
 
         const button = el("button", "pt-icon-btn pt-generic-btn", "🔍");
         button.type = "button";
-        button.title = `Algemeen: alle ${rating}-rated gewone kaarten · ${max ? `${what} ${priceFormat.format(max)}` : "geen max"} klaarzetten. Zoeken doe je zelf.`;
+        button.title = L(`Algemeen: alle ${rating}-rated gewone kaarten · ${max ? `${what} ${priceFormat.format(max)}` : "geen max"} klaarzetten. Zoeken doe je zelf.`, `General: all ${rating}-rated regular cards · set up ${max ? `${what} ${priceFormat.format(max)}` : "no max"}. You search yourself.`);
         button.addEventListener("click", () => {
           try {
             prepareFodderSearch(rating, max, state.mode);
@@ -6610,7 +6633,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const tick = el("input", "pt-cycle-tick");
         tick.type = "checkbox";
         tick.checked = selected.includes(rating);
-        tick.title = "Meenemen in \"Cyclen\" bovenaan";
+        tick.title = L("Meenemen in \"Cyclen\" bovenaan", "Include in \"Cycle\" at the top");
         tick.addEventListener("change", () => {
           const current = cycleSelection().filter(other => other !== rating);
           state.cycleWith = tick.checked ? current.concat(rating) : current;
@@ -6627,11 +6650,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (state.inventory) {
         totals.append(
           el("span", "", `📦 ${totalOwned} verhandelbare fodderkaarten`),
-          el("span", "pt-muted", ` · waarde op marktminimum ~${priceFormat.format(totalValue)} (na belasting ~${priceFormat.format(Math.round(totalValue * (1 - EA_TAX)))})`),
-          el("span", "pt-muted", ` · geteld om ${formatTime(state.inventory.updatedAt)}`)
+          el("span", "pt-muted", L(` · waarde op marktminimum ~${priceFormat.format(totalValue)} (na belasting ~${priceFormat.format(Math.round(totalValue * (1 - EA_TAX)))})`, ` · value at market minimum ~${priceFormat.format(totalValue)} (after tax ~${priceFormat.format(Math.round(totalValue * (1 - EA_TAX)))})`)),
+          el("span", "pt-muted", L(` · geteld om ${formatTime(state.inventory.updatedAt)}`, ` · counted at ${formatTime(state.inventory.updatedAt)}`))
         );
       } else {
-        totals.appendChild(el("span", "pt-muted", "📦 Klik op \"Voorraad bijwerken\" om je fodder per rating te tellen."));
+        totals.appendChild(el("span", "pt-muted", L("📦 Klik op \"Voorraad bijwerken\" om je fodder per rating te tellen.", "📦 Click \"Update stock\" to count your fodder per rating.")));
       }
     }
 
@@ -6660,10 +6683,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (state.minPct === 2) state.minPct = 5;
       state.minPct5 = true;
     }
-    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "nl", autoFutbin: true, source: "fodder" }, state || {});
+    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "en", autoFutbin: true, source: "fodder" }, state || {});
   }
   function saveFlip(state) {
     flipLangCache = null;
+    uiLangCache = null;
     try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
   }
   // --- Flip tab texts, Dutch and English (switch with the NL/EN button) -------------------------------
@@ -6969,8 +6993,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   };
   let flipLangCache = null;
   function flipLang() {
-    if (flipLangCache == null) flipLangCache = getFlip().lang === "en" ? "en" : "nl";
-    return flipLangCache;
+    return uiLang();
   }
   function ft(key, vars) {
     const entry = FLIP_TEXT[key];
@@ -7004,7 +7027,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     const text = chunks.join("");
     const start = text.indexOf("\"report\":{");
-    if (start < 0) throw new Error("fodder.gg: geen prijsdata in de pagina (verlopen of verkeerde link?)");
+    if (start < 0) throw new Error(L("fodder.gg: geen prijsdata in de pagina (verlopen of verkeerde link?)", "fodder.gg: no price data in the page (expired or wrong link?)"));
     let i = start + 9;
     let depth = 0;
     let inString = false;
@@ -7055,9 +7078,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         flipData = { ...parseFodderWatch(html), token: state.token, fetchedAt: Date.now() };
         try { localStorage.setItem(FLIP_DATA_KEY, JSON.stringify(flipData)); } catch (_) { /* memory only */ }
         recordFlipHistory(flipData);
-        checkFlipHits().catch(error => console.warn("Price Watch: flip-melding mislukt.", error))
+        checkFlipHits().catch(error => console.warn(L("Price Watch: flip-melding mislukt.", "Price Watch: flip notification failed."), error))
           .then(() => futbinAutoTop("fodder"))
-          .catch(error => console.warn("Price Watch: FUTBIN auto-check mislukt.", error));
+          .catch(error => console.warn(L("Price Watch: FUTBIN auto-check mislukt.", "Price Watch: FUTBIN auto-check failed."), error));
         return true;
       })
       .catch(error => {
@@ -7305,7 +7328,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     showToast(lines.join(" · "), true);
     // Push from the pc only (FUT Genie there), so a phone with the app open doesn't send it twice.
     if (pcDevice()) relayCall("notify", { title: fresh.length > 1 ? ft("hitTitleMany", { n: fresh.length }) : ft("hitTitleOne"), text: lines.join("\n") })
-      .catch(error => console.warn("Price Watch: ntfy-melding mislukt.", error));
+      .catch(error => console.warn(L("Price Watch: ntfy-melding mislukt.", "Price Watch: ntfy notification failed."), error));
   }
 
   // --- Flip price history (PC only, fodder.gg "now") ------------------------------------------------
@@ -8118,7 +8141,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (futbinAutoWaiting.size) {
       const source = [...futbinAutoWaiting][0];
       futbinAutoWaiting.delete(source);
-      window.setTimeout(() => futbinAutoTop(source).catch(error => console.warn("Price Watch: FUTBIN auto-check mislukt.", error)), 3000);
+      window.setTimeout(() => futbinAutoTop(source).catch(error => console.warn(L("Price Watch: FUTBIN auto-check mislukt.", "Price Watch: FUTBIN auto-check failed."), error)), 3000);
     }
     return { done: futbinState.done, error: futbinState.error };
   }
@@ -8242,7 +8265,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!list.length) throw new Error(ft("mEmptyFetch"));
       momentumData = { ...(momentumData || {}), [platform]: { at: Date.now(), cards: list } };
       try { localStorage.setItem(MOMENTUM_KEY, JSON.stringify(momentumData)); } catch (_) { /* memory only */ }
-      futbinAutoTop("futgg").catch(error => console.warn("Price Watch: FUTBIN auto-check (momentum) mislukt.", error));
+      futbinAutoTop("futgg").catch(error => console.warn(L("Price Watch: FUTBIN auto-check (momentum) mislukt.", "Price Watch: FUTBIN auto-check (momentum) failed."), error));
       return true;
     })()
       .catch(error => {
@@ -8266,7 +8289,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (state.token) loadFlipSheet(false);
       loadMomentum(false);
     } catch (error) {
-      console.warn("Price Watch: achtergrond-verversing mislukt.", error);
+      console.warn(L("Price Watch: achtergrond-verversing mislukt.", "Price Watch: background refresh failed."), error);
     }
   }, 60 * 1000);
 
@@ -8394,7 +8417,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const settingsButton = button("⚙");
     const helpButton = button("?");
     const langButton = button("", "pt-flip-lang");
-    langButton.addEventListener("click", () => update(state => { state.lang = state.lang === "en" ? "nl" : "en"; }));
+    langButton.addEventListener("click", () => {
+      update(state => { state.lang = uiLang() === "en" ? "nl" : "en"; });
+      showToast(L("Taal: Nederlands. De andere tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. The other tabs switch too when you reopen Price Watch."), true);
+    });
     const controls = el("div", "pt-stock-list-buttons");
     // Tick many cards at once (instead of one by one): presets for the shown rows.
     const SELECTIONS = ["default", "deals", "profit", "top10", "top20", "all", "none"];
@@ -9131,7 +9157,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const source = getFlip().source === "futgg" ? "futgg" : "fodder";
       Promise.resolve(source === "futgg" ? loadMomentum(false) : loadFlipSheet(false))
         .then(fetched => { if (!fetched) return futbinAutoTop(source); }) // a fetch starts its own round
-        .catch(error => console.warn("Price Watch: FUTBIN auto-check mislukt.", error));
+        .catch(error => console.warn(L("Price Watch: FUTBIN auto-check mislukt.", "Price Watch: FUTBIN auto-check failed."), error));
     };
     if (!flipTimer) {
       flipTimer = window.setInterval(() => {
@@ -9175,7 +9201,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         loadFodderCheapest(false);
       }
     };
-    [["flip", "Flip"], ["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["transfers", "Transfers"]].forEach(([key, label]) => {
+    [["flip", "Flip"], ["watch", L("Spelers", "Players")], ["fodder", "Fodder"], ["lists", L("Lijsten", "Lists")], ["transfers", "Transfers"]].forEach(([key, label]) => {
       const button = el("button", "pt-tab", label);
       button.type = "button";
       button.appendChild(el("em", "pt-tab-badge"));
@@ -9187,10 +9213,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const device = el("span", "pt-tab-device");
     bar.append(el("span", "pt-tab-spacer"), device);
     const drawDevice = () => {
-      device.textContent = `${pcDevice() ? "💻 Pc" : "📱 Telefoon"}${futggPricesAt ? ` · FUT.GG-prijzen ${formatTime(futggPricesAt)}` : ""}`;
+      device.textContent = `${pcDevice() ? "💻 Pc" : L("📱 Telefoon", "📱 Phone")}${futggPricesAt ? L(` · FUT.GG-prijzen ${formatTime(futggPricesAt)}`, ` · FUT.GG prices ${formatTime(futggPricesAt)}`) : ""}`;
       device.title = pcDevice()
-        ? "Dit apparaat is de pc: auto-check, historie, meldingen en sync naar je telefoon draaien hier. Prijzen van FUT.GG."
-        : "Dit apparaat leest mee met je pc (prijzen en lijsten via je gist).";
+        ? L("Dit apparaat is de pc: auto-check, historie, meldingen en sync naar je telefoon draaien hier. Prijzen van FUT.GG.", "This device is the PC: auto-check, history, notifications and sync to your phone run here. Prices from FUT.GG.")
+        : L("Dit apparaat leest mee met je pc (prijzen en lijsten via je gist).", "This device follows your PC (prices and lists via your gist).");
     };
     drawDevice();
     listeners.add(drawDevice);
@@ -9221,22 +9247,22 @@ function priceWatchMain(SCRIPT_VERSION) {
       box.append(el("span", "pt-muted", label), input);
       return { box, input };
     };
-    const ratingFrom = field("Rating van", "75", "Laagste rating (75+ = goud)");
-    const ratingTo = field("tot", "83", "Hoogste rating");
-    const priceFrom = field("Prijs van", "300", "Laagste FUT.GG PC-prijs");
-    const priceTo = field("tot", "1000", "Hoogste FUT.GG PC-prijs");
-    const count = field("Aantal", "15", "Hoeveel kaarten in de lijst (tip: 10–12+)");
-    const pct = field("% onder BIN", String(MASS_BID_DEFAULT_PCT), "Max bod = BIN − dit percentage (tip: 20–25%)");
+    const ratingFrom = field(L("Rating van", "Rating from"), "75", L("Laagste rating (75+ = goud)", "Lowest rating (75+ = gold)"));
+    const ratingTo = field(L("tot", "to"), "83", L("Hoogste rating", "Highest rating"));
+    const priceFrom = field(L("Prijs van", "Price from"), "300", L("Laagste FUT.GG PC-prijs", "Lowest FUT.GG PC price"));
+    const priceTo = field(L("tot", "to"), "1000", L("Hoogste FUT.GG PC-prijs", "Highest FUT.GG PC price"));
+    const count = field("Aantal", "15", L("Hoeveel kaarten in de lijst (tip: 10–12+)", "How many cards in the list (tip: 10–12+)"));
+    const pct = field(L("% onder BIN", "% below BIN"), String(MASS_BID_DEFAULT_PCT), L("Max bod = BIN − dit percentage (tip: 20–25%)", "Max bid = BIN − this percentage (tip: 20–25%)"));
     const make = el("button", "pt-watch-refresh", "Maken");
     make.type = "button";
-    make.title = "Kaarten binnen de rating én de prijsrange (FUT.GG PC), duurste eerst";
+    make.title = L("Kaarten binnen de rating én de prijsrange (FUT.GG PC), duurste eerst", "Cards within the rating and price range (FUT.GG PC), most expensive first");
     // Fodder bid list: per rating the same players as the fodder cycle (your target × 1.1 on the Fodder
     // screen, else the cheapest). Won ≥10% under the price → "hold" instead of "sell".
     const makeFodder = el("button", "pt-watch-refresh", "Fodder");
     makeFodder.type = "button";
-    makeFodder.title = "Per rating (van–tot) de fodderspelers van het Fodder-scherm (doel × 1,1, anders de goedkoopste); Aantal = max per rating. Prijsrange telt hier niet.";
+    makeFodder.title = L("Per rating (van–tot) de fodderspelers van het Fodder-scherm (doel × 1,1, anders de goedkoopste); Aantal = max per rating. Prijsrange telt hier niet.", "Per rating (from–to) the fodder players from the Fodder screen (target × 1.1, otherwise the cheapest); Count = max per rating. Price range doesn't apply here.");
     const note = el("div", "pt-watch-status",
-      "Kaarten uit packs met vraag (SBC/meta), duurste eerst. Check zelf de BIN op de markt (vul hem in de run-balk in) en haal kaarten weg die niet lopen. Zoeken, bieden en listen doe je zelf.");
+      L("Kaarten uit packs met vraag (SBC/meta), duurste eerst. Check zelf de BIN op de markt (vul hem in de run-balk in) en haal kaarten weg die niet lopen. Zoeken, bieden en listen doe je zelf.", "Cards from packs with demand (SBC/meta), most expensive first. Check the BIN on the market yourself (enter it in the run bar) and remove cards that don't sell. You search, bid and list yourself."));
     make.addEventListener("click", () => {
       const num = input => Number(String(input.value).replace(/\D/g, "")) || 0;
       const rLow = Math.max(45, Math.min(num(ratingFrom.input), num(ratingTo.input)));
@@ -9251,7 +9277,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         .sort((a, b) => b.price - a.price || b.entry.rating - a.entry.rating)
         .slice(0, size);
       if (!picks.length) {
-        showToast("Geen kaarten gevonden in die rating/prijs (zijn de FUT.GG-prijzen al geladen?).", false);
+        showToast(L("Geen kaarten gevonden in die rating/prijs (zijn de FUT.GG-prijzen al geladen?).", "No cards found in that rating/price (are the FUT.GG prices loaded yet?)."), false);
         return;
       }
       const percentage = Number(String(pct.input.value).replace(",", "."));
@@ -9260,7 +9286,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         type: "players",
         mode: "bid",
         massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT },
-        name: `🎯 Biedlijst ${rLow}–${rHigh} · ${priceFormat.format(pLow)}–${priceFormat.format(pHigh)}`,
+        name: L(`🎯 Biedlijst ${rLow}–${rHigh} · ${priceFormat.format(pLow)}–${priceFormat.format(pHigh)}`, `🎯 Bid list ${rLow}–${rHigh} · ${priceFormat.format(pLow)}–${priceFormat.format(pHigh)}`),
         createdAt: Date.now(),
         profit: null,
         windows: [],
@@ -9269,7 +9295,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
       saveStock();
       panel.style.display = "none";
-      showToast(`🎯 Biedlijst gemaakt met ${picks.length} kaarten. Start hem met ▶ Start.`, true);
+      showToast(L(`🎯 Biedlijst gemaakt met ${picks.length} kaarten. Start hem met ▶ Start.`, `🎯 Bid list created with ${picks.length} cards. Start it with ▶ Start.`), true);
       onCreated();
     });
     makeFodder.addEventListener("click", async () => {
@@ -9288,7 +9314,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         cyclePicks(rating).slice(0, size).forEach(item => players.push({ ...fodderCyclePlayer(item, rating, null), fixedMax: null }));
       }
       if (!players.length) {
-        showToast("Geen fodderspelers gevonden voor die ratings (zijn de FUT.GG-prijzen al geladen?).", false);
+        showToast(L("Geen fodderspelers gevonden voor die ratings (zijn de FUT.GG-prijzen al geladen?).", "No fodder players found for those ratings (are the FUT.GG prices loaded yet?)."), false);
         return;
       }
       const percentage = Number(String(pct.input.value).replace(",", "."));
@@ -9297,7 +9323,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         type: "players",
         mode: "bid",
         massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT, fodder: true },
-        name: `🎯 Fodder-biedlijst ${rLow === rHigh ? rLow : `${rLow}–${rHigh}`}`,
+        name: L(`🎯 Fodder-biedlijst ${rLow === rHigh ? rLow : `${rLow}–${rHigh}`}`, `🎯 Fodder bid list ${rLow === rHigh ? rLow : `${rLow}–${rHigh}`}`),
         createdAt: Date.now(),
         profit: null,
         windows: [],
@@ -9306,7 +9332,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
       saveStock();
       panel.style.display = "none";
-      showToast(`🎯 Fodder-biedlijst gemaakt met ${players.length} kaarten (≥${MASS_BID_HOLD_PCT}% onder de prijs gewonnen = houden).`, true);
+      showToast(L(`🎯 Fodder-biedlijst gemaakt met ${players.length} kaarten (≥${MASS_BID_HOLD_PCT}% onder de prijs gewonnen = houden).`, `🎯 Fodder bid list created with ${players.length} cards (won ≥${MASS_BID_HOLD_PCT}% under the price = keep).`), true);
       onCreated();
     });
     const row = el("div", "pt-stock-list-buttons");
@@ -9322,14 +9348,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     const toolbar = el("div", "pt-watch-toolbar");
     const heading = el("div", "pt-watch-heading");
     heading.append(
-      el("h2", "pt-watch-title", "Stock-lijsten"),
-      el("div", "pt-watch-status", "Plak een tip (clubs + prijzen) en loop de zoekopdrachten één voor één door. Zoeken en kopen doe je zelf.")
+      el("h2", "pt-watch-title", L("Stock-lijsten", "Stock lists")),
+      el("div", "pt-watch-status", L("Plak een tip (clubs + prijzen) en loop de zoekopdrachten één voor één door. Zoeken en kopen doe je zelf.", "Paste a tip (clubs + prices) and go through the searches one by one. You search and buy yourself."))
     );
-    const importButton = el("button", "pt-watch-refresh", "+ Tip plakken");
+    const importButton = el("button", "pt-watch-refresh", L("+ Tip plakken", "+ Paste tip"));
     importButton.type = "button";
-    const massBidButton = el("button", "pt-watch-refresh pt-primary", "🎯 Biedlijst maken");
+    const massBidButton = el("button", "pt-watch-refresh pt-primary", L("🎯 Biedlijst maken", "🎯 Create bid list"));
     massBidButton.type = "button";
-    massBidButton.title = "Mass bidding: kies kaarten op rating en FUT.GG PC-prijs";
+    massBidButton.title = L("Mass bidding: kies kaarten op rating en FUT.GG PC-prijs", "Mass bidding: pick cards by rating and FUT.GG PC price");
     toolbar.append(heading, massBidButton, importButton);
 
     const importPanel = el("div", "pt-stock-import");
@@ -9343,7 +9369,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     let lastTipText = "";
 
     function switchLink(toPlayers) {
-      const link = el("button", "pt-link-btn", toPlayers ? "Dit is een spelerslijst →" : "Dit is een clublijst →");
+      const link = el("button", "pt-link-btn", toPlayers ? L("Dit is een spelerslijst →", "This is a player list →") : L("Dit is een clublijst →", "This is a club list →"));
       link.type = "button";
       link.addEventListener("click", () => (toPlayers ? showPlayerReviewStep(parsePlayerTip(lastTipText)) : showReviewStep(parseTip(lastTipText))));
       return link;
@@ -9371,14 +9397,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         start.value = toLocalInput(from);
         end.value = toLocalInput(span ? span.end : from + 15 * 60 * 1000);
         [start, end].forEach(input => input.addEventListener("input", () => { check.checked = true; }));
-        row.append(check, el("span", "pt-stock-level-name", "Venster"), start, el("span", "pt-muted", "tot"), end);
+        row.append(check, el("span", "pt-stock-level-name", L("Venster", "Window")), start, el("span", "pt-muted", L("tot", "to")), end);
         if (span && span.timeZone && span.timeZone !== Intl.DateTimeFormat().resolvedOptions().timeZone) {
           row.appendChild(el("span", "pt-muted", `(omgerekend vanuit ${span.timeZone})`));
         }
         rows.push({ check, start, end });
         element.insertBefore(row, add);
       };
-      const add = el("button", "pt-link-btn", "+ venster");
+      const add = el("button", "pt-link-btn", L("+ venster", "+ window"));
       add.type = "button";
       add.addEventListener("click", () => addRow(null, true));
       element.appendChild(add);
@@ -9400,15 +9426,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       const settings = el("div", "pt-stock-levels");
       const modeLabel = el("label", "pt-stock-level");
       const mode = el("select", "pt-stock-select pt-mode-select");
-      mode.append(new Option("Bieden (max bod)", "bid"), new Option("Direct kopen (max BIN)", "bin"));
+      mode.append(new Option(L("Bieden (max bod)", "Bid (max bid)"), "bid"), new Option("Direct kopen (max BIN)", "bin"));
       mode.value = parsed.mode;
-      modeLabel.append(el("span", "pt-stock-level-name", "Zoeken op"), mode);
+      modeLabel.append(el("span", "pt-stock-level-name", L("Zoeken op", "Search by")), mode);
       const windows = windowsEditor(parsed.windows, true);
       settings.append(modeLabel, windows.element);
 
       const table = el("table", "pt-watch-table pt-stock-review");
       const head = el("tr");
-      [["", "pt-col-check"], ["Rating", "pt-col-raw"], ["Max", "pt-col-match"], ["Ideaal", "pt-col-league"], ["", "pt-col-status"]]
+      [["", "pt-col-check"], ["Rating", "pt-col-raw"], ["Max", "pt-col-match"], [L("Ideaal", "Ideal"), "pt-col-league"], ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
       thead.appendChild(head);
@@ -9441,15 +9467,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       nameInput.value = `Fodder ${new Date().toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
       const actions = el("div", "pt-stock-actions");
       const applyToScreen = el("button", "pt-watch-refresh", "Doelen invullen in Fodder-scherm");
-      const save = el("button", "pt-link-btn", "Als aparte fodder-lijst opslaan");
-      const back = el("button", "pt-link-btn", "← Terug");
+      const save = el("button", "pt-link-btn", L("Als aparte fodder-lijst opslaan", "Save as separate fodder list"));
+      const back = el("button", "pt-link-btn", L("← Terug", "← Back"));
       [applyToScreen, save, back].forEach(button => { button.type = "button"; });
       const message = el("span", "pt-muted");
       back.addEventListener("click", showPasteStep);
       applyToScreen.addEventListener("click", () => {
         const chosen = rows.filter(row => row.check.checked && parsePrice(row.max.value));
         if (!chosen.length) {
-          message.textContent = "Kies minstens één rating met een max-prijs.";
+          message.textContent = L("Kies minstens één rating met een max-prijs.", "Pick at least one rating with a max price.");
           return;
         }
         const state = getFodder();
@@ -9467,13 +9493,13 @@ function priceWatchMain(SCRIPT_VERSION) {
           .filter(row => row.check.checked && parsePrice(row.max.value))
           .map(row => ({ rating: row.entry.rating, max: parsePrice(row.max.value), ideal: parsePrice(row.ideal.value), enabled: true }));
         if (!ratings.length) {
-          message.textContent = "Kies minstens één rating met een max-prijs.";
+          message.textContent = L("Kies minstens één rating met een max-prijs.", "Pick at least one rating with a max price.");
           return;
         }
         getStock().unshift({
           id: `s${Date.now()}`,
           type: "fodder",
-          name: nameInput.value.trim() || "Fodder-lijst",
+          name: nameInput.value.trim() || L("Fodder-lijst", "Fodder list"),
           createdAt: Date.now(),
           mode: mode.value,
           windows: windows.read(),
@@ -9483,11 +9509,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         saveStock();
         importPanel.style.display = "none";
       });
-      actions.append(applyToScreen, el("span", "pt-muted", "of"), el("span", "pt-muted", "naam"), nameInput, save, back, message);
+      actions.append(applyToScreen, el("span", "pt-muted", L("of", "or")), el("span", "pt-muted", "naam"), nameInput, save, back, message);
 
-      const column = parsed.columnUsed ? ` · prijzen uit de ${parsed.columnUsed}-kolom (jouw platform)` : "";
+      const column = parsed.columnUsed ? L(` · prijzen uit de ${parsed.columnUsed}-kolom (jouw platform)`, ` · prices from the ${parsed.columnUsed} column (your platform)`) : "";
       importPanel.append(
-        el("div", "pt-stock-summary", `${parsed.ratings.length} ratings gevonden${column} · bedragen in coins (6 = 6.000) · alleen gewone gouden kaarten, geen specials.`),
+        el("div", "pt-stock-summary", L(`${parsed.ratings.length} ratings gevonden${column} · bedragen in coins (6 = 6.000) · alleen gewone gouden kaarten, geen specials.`, `${parsed.ratings.length} ratings found${column} · amounts in coins (6 = 6,000) · regular gold cards only, no specials.`)),
         settings, table, actions
       );
     }
@@ -9498,8 +9524,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       const listRow = el("div", "pt-stock-actions");
       const listSelect = el("select", "pt-stock-select pt-list-select");
-      snipeLists.forEach(list => listSelect.appendChild(new Option(`🎯 ${list.name} (${list.players.length} spelers)`, list.id)));
-      listRow.append(el("span", "pt-muted", "Toepassen op"), listSelect);
+      snipeLists.forEach(list => listSelect.appendChild(new Option(L(`🎯 ${list.name} (${list.players.length} spelers)`, `🎯 ${list.name} (${list.players.length} players)`), list.id)));
+      listRow.append(el("span", "pt-muted", L("Toepassen op", "Apply to")), listSelect);
 
       const windowsBox = el("div");
       const tableBox = el("div");
@@ -9512,7 +9538,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
         windowsBox.textContent = "";
         if (windows.length) {
-          windowsBox.appendChild(el("div", "pt-muted pt-small", "Vensters uit de post (worden toegevoegd aan de lijst; vink uit wat je niet wilt):"));
+          windowsBox.appendChild(el("div", "pt-muted pt-small", L("Vensters uit de post (worden toegevoegd aan de lijst; vink uit wat je niet wilt):", "Windows from the post (added to the list; untick what you don't want):")));
         }
         editor = windowsEditor(windows, false);
         windowsBox.appendChild(editor.element);
@@ -9520,7 +9546,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         tableBox.textContent = "";
         const table = el("table", "pt-watch-table pt-stock-review");
         const head = el("tr");
-        [["", "pt-col-check"], ["Uit de post", "pt-col-raw"], ["Speler", "pt-col-match"], ["Max BIN", "pt-col-league"], ["", "pt-col-status"]]
+        [["", "pt-col-check"], [L("Uit de post", "From the post"), "pt-col-raw"], [L("Speler", "Player"), "pt-col-match"], ["Max BIN", "pt-col-league"], ["", "pt-col-status"]]
           .forEach(([label, className]) => head.appendChild(el("th", className, label)));
         const thead = el("thead");
         thead.appendChild(head);
@@ -9542,8 +9568,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           max.inputMode = "numeric";
           max.value = pick ? pick.coins : targetCoins(target, null);
           const status = el("td", "pt-col-status", pick ? (sure ? "✓" : "?") : "✗");
-          status.title = !pick ? "Geen passende speler in deze lijst"
-            : sure ? `Gekoppeld op ${pick.reason}` : "Twijfel: gekoppeld op prijsniveau, controleer de speler";
+          status.title = !pick ? L("Geen passende speler in deze lijst", "No matching player in this list")
+            : sure ? L(`Gekoppeld op ${pick.reason}`, `Matched on ${pick.reason}`) : L("Twijfel: gekoppeld op prijsniveau, controleer de speler", "Doubtful: matched on price level, check the player");
           select.addEventListener("change", () => {
             check.checked = !!select.value;
             const chosen = ranked.find(candidate => String(candidate.player.definitionId) === select.value);
@@ -9568,8 +9594,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       const actions = el("div", "pt-stock-actions");
       const apply = el("button", "pt-watch-refresh", "Toepassen");
-      const back = el("button", "pt-link-btn", "← Terug");
-      const asNew = el("button", "pt-link-btn", "Toch als nieuwe spelerslijst →");
+      const back = el("button", "pt-link-btn", L("← Terug", "← Back"));
+      const asNew = el("button", "pt-link-btn", L("Toch als nieuwe spelerslijst →", "Still as a new player list →"));
       [apply, back, asNew].forEach(button => { button.type = "button"; });
       const message = el("span", "pt-muted");
       back.addEventListener("click", showPasteStep);
@@ -9589,7 +9615,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         list.windows = listWindows(list).concat(added).sort((a, b) => a.start - b.start);
         delete list.window;
         if (!applied && !added.length) {
-          message.textContent = "Niets geselecteerd om toe te passen.";
+          message.textContent = L("Niets geselecteerd om toe te passen.", "Nothing selected to apply.");
           return;
         }
         saveStock();
@@ -9598,7 +9624,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       actions.append(apply, back, asNew, message);
 
       importPanel.append(
-        el("div", "pt-stock-summary", `${targets.length} prijsdoel(en) gevonden. Koppeling op naam, of op vlag + prijs als de nationaliteit bekend is, anders op prijsniveau (controleer de oranje regels).`),
+        el("div", "pt-stock-summary", L(`${targets.length} prijsdoel(en) gevonden. Koppeling op naam, of op vlag + prijs als de nationaliteit bekend is, anders op prijsniveau (controleer de oranje regels).`, `${targets.length} price target(s) found. Matched by name, or by flag + price if the nationality is known, otherwise by price level (check the orange lines).`)),
         listRow, windowsBox, tableBox, actions
       );
       render();
@@ -9619,15 +9645,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       profit.inputMode = "numeric";
       profit.placeholder = "auto";
       profit.style.width = "64px";
-      profitLabelEl.append(el("span", "pt-stock-level-name", "Winst"), profit,
-        el("span", "pt-muted", `% na 5% belasting, bij verkoop op de FUT Genie-prijs · leeg = ${DEFAULT_PROFIT}%`));
+      profitLabelEl.append(el("span", "pt-stock-level-name", L("Winst", "Profit")), profit,
+        el("span", "pt-muted", L(`% na 5% belasting, bij verkoop op de FUT Genie-prijs · leeg = ${DEFAULT_PROFIT}%`, `% after 5% tax, when selling at the FUT Genie price · empty = ${DEFAULT_PROFIT}%`)));
       // Holo snipe: the holo version of each card, for the normal card's price.
       let holoMode = false;
       const holoLabel = el("label", "pt-stock-level");
       const holoCheck = el("input");
       holoCheck.type = "checkbox";
       holoLabel.append(holoCheck, el("span", "pt-stock-level-name", "✨ Holo's"),
-        el("span", "pt-muted", "op de prijs van de normale kaart (max BIN = Genie-prijs van de normale versie)"));
+        el("span", "pt-muted", L("op de prijs van de normale kaart (max BIN = Genie-prijs van de normale versie)", "on the price of the normal card (max BIN = Genie price of the normal version)")));
       holoCheck.addEventListener("change", () => {
         holoMode = holoCheck.checked;
         rows.forEach(row => row.applyHolo());
@@ -9639,7 +9665,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const head = el("tr");
       const priced = parsed.players.some(item => item.priced);
       if (priced) table.classList.add("pt-stock-priced");
-      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Kaartversie · Genie (PC)", "pt-col-league"],
+      [["", "pt-col-check"], [L("Uit de tip", "From the tip"), "pt-col-raw"], [L("Herkend als", "Recognised as"), "pt-col-match"], ["Kaartversie · Genie (PC)", "pt-col-league"],
         ...(priced ? [[`Max BIN (${parsed.platform === "pc" ? "PC" : "console"})`, "pt-col-level"]] : []), ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
@@ -9678,7 +9704,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             const chosen = versionSelect.value;
             versionSelect.textContent = "";
             // No version with the tip rating (yet): search quality Special for that player.
-            if (special) versionSelect.appendChild(new Option(`Speciaal ${item.tipRating} · versie onbekend`, ""));
+            if (special) versionSelect.appendChild(new Option(L(`Speciaal ${item.tipRating} · versie onbekend`, `Special ${item.tipRating} · version unknown`), ""));
             versionState.versions.forEach(version => versionSelect.appendChild(new Option(versionLabel(version, player.id), String(version.definitionId))));
             versionSelect.value = chosen;
             if (versionSelect.selectedIndex < 0) versionSelect.selectedIndex = 0;
@@ -9691,7 +9717,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             priceCell.textContent = special ? `special ${item.tipRating} (gewoon ${player.rating})${item.priced ? " · versies…" : ""}` : entry ? priceFormat.format(entry.price) : player ? "…" : "";
           }
           statusCell.textContent = !player ? "✗" : item.status === "sure" ? "✓" : "?";
-          statusCell.title = !player ? "Niet herkend / overgeslagen" : item.status === "sure" ? "Zeker" : "Twijfel: controleer of dit de juiste speler is";
+          statusCell.title = !player ? L("Niet herkend / overgeslagen", "Not recognised / skipped") : item.status === "sure" ? "Zeker" : L("Twijfel: controleer of dit de juiste speler is", "Doubtful: check this is the right player");
           return player;
         };
         select.addEventListener("change", () => {
@@ -9760,7 +9786,7 @@ function priceWatchMain(SCRIPT_VERSION) {
               if (normalPrice) maxInput.value = roundDownToStep(normalPrice);
               versionSelect.title = "";
             } else {
-              versionSelect.title = "Geen holo-versie van deze kaart gevonden";
+              versionSelect.title = L("Geen holo-versie van deze kaart gevonden", "No holo version of this card found");
               check.checked = false;
             }
           } else {
@@ -9807,8 +9833,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const nameInput = el("input", "pt-target-input pt-stock-name");
       nameInput.value = `Snipe ${new Date(parsed.windows.length ? parsed.windows[0].start : Date.now()).toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
       const actions = el("div", "pt-stock-actions");
-      const save = el("button", "pt-watch-refresh", "Opslaan als snipe-lijst");
-      const back = el("button", "pt-link-btn", "← Terug");
+      const save = el("button", "pt-watch-refresh", L("Opslaan als snipe-lijst", "Save as snipe list"));
+      const back = el("button", "pt-link-btn", L("← Terug", "← Back"));
       [save, back].forEach(button => { button.type = "button"; });
       const message = el("span", "pt-muted");
       back.addEventListener("click", showPasteStep);
@@ -9837,7 +9863,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             return { definitionId: player.id, name: player.display, rating: player.rating, fixedMax };
           });
         if (!players.length) {
-          message.textContent = "Kies minstens één speler.";
+          message.textContent = L("Kies minstens één speler.", "Pick at least one player.");
           return;
         }
         const price = player => player.fixedMax || (geniePrice(player.definitionId) || { price: 0 }).price;
@@ -9846,7 +9872,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         getStock().unshift({
           id: `s${Date.now()}`,
           type: "players",
-          name: nameInput.value.trim() || "Snipe-lijst",
+          name: nameInput.value.trim() || L("Snipe-lijst", "Snipe list"),
           createdAt: Date.now(),
           profit: Number.isFinite(profitValue) ? profitValue : null,
           windows: windows.read(),
@@ -9857,16 +9883,16 @@ function priceWatchMain(SCRIPT_VERSION) {
         });
         saveStock();
         const added = addPlayersToWatch(players);
-        showToast(`Snipe-lijst opgeslagen · ${added} speler(s) ook op de Spelers-tab gezet`, true);
+        showToast(L(`Snipe-lijst opgeslagen · ${added} speler(s) ook op de Spelers-tab gezet`, `Snipe list saved · ${added} player(s) also added to the Players tab`), true);
         importPanel.style.display = "none";
       });
-      actions.append(el("span", "pt-muted", "Naam"), nameInput, save, back, message);
+      actions.append(el("span", "pt-muted", L("Naam", "Name")), nameInput, save, back, message);
 
       const recognised = parsed.players.filter(item => item.status === "sure").length;
       const doubtful = parsed.players.filter(item => item.status === "maybe").length;
-      const summary = el("div", "pt-stock-summary", `${parsed.players.length} spelers gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje)` +
-        (parsed.skipped ? ` · ${parsed.skipped} regel(s) zonder speler overgeslagen` : "") + " · gewone kaart, duurste eerst. " +
-        (parsed.discard ? "🗑️ Discard-tip: bied-lijst, max bod = quick-sell-waarde van de rating (goud nooit onder 600, de laagste marktprijs); duurdere kaarten (> quick-sell + 200) prijs − 150. " : ""));
+      const summary = el("div", "pt-stock-summary", L(`${parsed.players.length} spelers gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje)`, `${parsed.players.length} players found · ${recognised} certain · ${doubtful} doubtful (orange)`) +
+        (parsed.skipped ? L(` · ${parsed.skipped} regel(s) zonder speler overgeslagen`, ` · ${parsed.skipped} line(s) without a player skipped`) : "") + L(" · gewone kaart, duurste eerst. ", " · regular card, most expensive first. ") +
+        (parsed.discard ? L("🗑️ Discard-tip: bied-lijst, max bod = quick-sell-waarde van de rating (goud nooit onder 600, de laagste marktprijs); duurdere kaarten (> quick-sell + 200) prijs − 150. ", "🗑️ Discard tip: bid list, max bid = quick-sell value of the rating (gold never below 600, the lowest market price); more expensive cards (> quick-sell + 200) price − 150. ") : ""));
       summary.appendChild(switchLink(false));
       importPanel.append(summary, settings, table, actions);
     }
@@ -9879,7 +9905,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     function showPasteStep() {
       importPanel.textContent = "";
       const area = el("textarea", "pt-stock-textarea");
-      area.placeholder = "Plak hier het bericht, bijv.\n\nMLS\nChicago Fire\nLA Galaxy\n\nGolds <650-700\nSilvers <600-700";
+      area.placeholder = L("Plak hier het bericht, bijv.\n\nMLS\nChicago Fire\nLA Galaxy\n\nGolds <650-700\nSilvers <600-700", "Paste the message here, e.g.\n\nMLS\nChicago Fire\nLA Galaxy\n\nGolds <650-700\nSilvers <600-700");
       const actions = el("div", "pt-stock-actions");
       const analyse = el("button", "pt-watch-refresh", "Analyseren");
       const cancel = el("button", "pt-link-btn", "Annuleren");
@@ -9935,9 +9961,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         max.placeholder = "max BIN";
         const ideal = el("input", "pt-target-input");
         ideal.value = parsed.levels[level].ideal || "";
-        ideal.placeholder = "ideaal";
+        ideal.placeholder = L("ideaal", "ideal");
         [max, ideal].forEach(input => { input.inputMode = "numeric"; input.addEventListener("input", () => { check.checked = !!parsePrice(max.value); }); });
-        box.append(check, el("span", "pt-stock-level-name", LEVEL_LABEL[level]), el("span", "pt-muted", "max"), max, el("span", "pt-muted", "ideaal"), ideal);
+        box.append(check, el("span", "pt-stock-level-name", LEVEL_LABEL[level]), el("span", "pt-muted", "max"), max, el("span", "pt-muted", L("ideaal", "ideal")), ideal);
         levelInputs[level] = { check, max, ideal };
         levelBox.appendChild(box);
       });
@@ -9957,16 +9983,16 @@ function priceWatchMain(SCRIPT_VERSION) {
       const flipUnder = flipInput(flipValues.under);
       const flipLow = flipInput(flipValues.sellLow);
       const flipHigh = flipInput(flipValues.sellHigh);
-      flipBox.title = "Eerst zie je de markt (filter tot de max BIN hierboven). Vul de goedkoopste BIN in de balk in; " +
-        "daarna wordt het filter markt min dit bedrag en zie je je verkoopprijzen.";
-      flipBox.append(flipCheck, el("span", "pt-stock-level-name", "Lazy flip"), el("span", "pt-muted", "markt −"), flipUnder,
-        el("span", "pt-muted", "verkoop +"), flipLow, el("span", "pt-muted", "tot +"), flipHigh);
+      flipBox.title = L("Eerst zie je de markt (filter tot de max BIN hierboven). Vul de goedkoopste BIN in de balk in; ", "First you see the market (filtered up to the max BIN above). Enter the cheapest BIN in the bar; ") +
+        L("daarna wordt het filter markt min dit bedrag en zie je je verkoopprijzen.", "then the filter becomes market minus this amount and you see your sell prices.");
+      flipBox.append(flipCheck, el("span", "pt-stock-level-name", "Lazy flip"), el("span", "pt-muted", L("markt −", "market −")), flipUnder,
+        el("span", "pt-muted", L("verkoop +", "sell +")), flipLow, el("span", "pt-muted", L("tot +", "to +")), flipHigh);
       levelBox.appendChild(flipBox);
 
       // Clubs
       const table = el("table", "pt-watch-table pt-stock-review");
       const head = el("tr");
-      [["", "pt-col-check"], ["Uit de tip", "pt-col-raw"], ["Herkend als", "pt-col-match"], ["Competitie", "pt-col-league"],
+      [["", "pt-col-check"], [L("Uit de tip", "From the tip"), "pt-col-raw"], [L("Herkend als", "Recognised as"), "pt-col-match"], [L("Competitie", "League"), "pt-col-league"],
         ...(parsed.sections ? [["Kwaliteit", "pt-col-level"]] : []), ["", "pt-col-status"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
@@ -9995,7 +10021,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           league.textContent = club ? club.leagueName : "";
           if (!club) check.checked = false;
           statusCell.textContent = !club ? "✗" : item.status === "sure" ? "✓" : "?";
-          statusCell.title = !club ? "Niet herkend / overgeslagen" : item.status === "sure" ? "Zeker" : "Twijfel: controleer of dit de juiste club is";
+          statusCell.title = !club ? L("Niet herkend / overgeslagen", "Not recognised / skipped") : item.status === "sure" ? "Zeker" : L("Twijfel: controleer of dit de juiste club is", "Unsure: check that this is the right club");
           return club;
         };
         select.addEventListener("change", () => { check.checked = !!select.value; item.status = select.value ? "sure" : "none"; row.className = `pt-match-${item.status}`; sync(); });
@@ -10005,7 +10031,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         selectCell.appendChild(select);
         // Tip with "SILVER OPTIONS" / "BRONZE OPTIONS" blocks: the club only gets its block's quality.
         const level = el("select", "pt-stock-select");
-        level.appendChild(new Option("Alle", ""));
+        level.appendChild(new Option(L("Alle", "All"), ""));
         LEVELS.forEach(value => level.appendChild(new Option(LEVEL_LABEL[value], value)));
         level.value = item.level || "";
         const levelCell = el("td", "pt-col-level");
@@ -10019,8 +10045,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const nameInput = el("input", "pt-target-input pt-stock-name");
       nameInput.value = `Tip ${new Date().toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
       const actions = el("div", "pt-stock-actions");
-      const save = el("button", "pt-watch-refresh", "Opslaan als stock-lijst");
-      const back = el("button", "pt-link-btn", "← Terug");
+      const save = el("button", "pt-watch-refresh", L("Opslaan als stock-lijst", "Save as stock list"));
+      const back = el("button", "pt-link-btn", L("← Terug", "← Back"));
       [save, back].forEach(button => { button.type = "button"; });
       const message = el("span", "pt-muted");
       back.addEventListener("click", showPasteStep);
@@ -10046,12 +10072,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         });
         const clubs = [...byTeam.values()];
         if (!clubs.length || !LEVELS.some(level => levels[level].enabled)) {
-          message.textContent = "Kies minstens één club en één kwaliteit met een max BIN.";
+          message.textContent = L("Kies minstens één club en één kwaliteit met een max BIN.", "Pick at least one club and one quality with a max BIN.");
           return;
         }
         const missing = LEVELS.filter(level => !levels[level].enabled && clubs.some(club => club.levels && club.levels.includes(level)));
         if (missing.length) {
-          message.textContent = `Vul ook een max BIN in voor ${missing.map(level => LEVEL_LABEL[level]).join(" en ")}.`;
+          message.textContent = L(`Vul ook een max BIN in voor ${missing.map(level => LEVEL_LABEL[level]).join(" en ")}.`, `Also enter a max BIN for ${missing.map(level => LEVEL_LABEL[level]).join(" and ")}.`);
           return;
         }
         const under = parsePrice(flipUnder.value);
@@ -10059,16 +10085,16 @@ function priceWatchMain(SCRIPT_VERSION) {
         const flip = flipCheck.checked && under && sellLow
           ? { under, sellLow, sellHigh: Math.max(sellLow, parsePrice(flipHigh.value) || sellLow) }
           : null;
-        getStock().unshift({ id: `s${Date.now()}`, name: nameInput.value.trim() || "Stock-lijst", createdAt: Date.now(), levels, clubs, done: {},
+        getStock().unshift({ id: `s${Date.now()}`, name: nameInput.value.trim() || L("Stock-lijst", "Stock list"), createdAt: Date.now(), levels, clubs, done: {},
           ...(flip ? { flip, market: {} } : {}) });
         saveStock();
         importPanel.style.display = "none";
       });
-      actions.append(el("span", "pt-muted", "Naam"), nameInput, save, back, message);
+      actions.append(el("span", "pt-muted", L("Naam", "Name")), nameInput, save, back, message);
 
       const recognised = parsed.clubs.filter(item => item.status === "sure").length;
       const doubtful = parsed.clubs.filter(item => item.status === "maybe").length;
-      const summary = el("div", "pt-stock-summary", `${parsed.clubs.length} clubs gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje) · controleer en sla op. `);
+      const summary = el("div", "pt-stock-summary", L(`${parsed.clubs.length} clubs gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje) · controleer en sla op. `, `${parsed.clubs.length} clubs found · ${recognised} sure · ${doubtful} unsure (orange) · check and save. `));
       summary.appendChild(switchLink(true));
       importPanel.append(summary, levelBox, table, actions);
     }
@@ -10078,7 +10104,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const box = el("div", "pt-filter-edit");
 
       const level = el("select", "pt-stock-select pt-mode-select");
-      if (rule.kind === "manager") level.appendChild(new Option("Alle kwaliteiten", ""));
+      if (rule.kind === "manager") level.appendChild(new Option(L("Alle kwaliteiten", "All qualities"), ""));
       LEVELS.forEach(value => level.appendChild(new Option(LEVEL_LABEL[value], value)));
       level.value = rule.level || "";
       let discardHint = () => {};
@@ -10086,8 +10112,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       const positions = el("input", "pt-target-input pt-filter-positions");
       positions.value = rule.positions.join("/");
-      positions.placeholder = "alle posities";
-      positions.title = "Posities, gescheiden door / (bijv. GK/LB/RB). Leeg = alle posities.";
+      positions.placeholder = L("alle posities", "all positions");
+      positions.title = L("Posities, gescheiden door / (bijv. GK/LB/RB). Leeg = alle posities.", "Positions, separated by / (e.g. GK/LB/RB). Empty = all positions.");
       positions.addEventListener("change", () => {
         rule.positions = [...new Set((positions.value.toUpperCase().match(POSITION_WORD) || []))];
         positions.value = rule.positions.join("/");
@@ -10095,7 +10121,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
 
       const nation = el("select", "pt-stock-select pt-filter-nation");
-      nation.appendChild(new Option("— alle landen —", ""));
+      nation.appendChild(new Option(L("— alle landen —", "— all countries —"), ""));
       getNations().forEach(item => nation.appendChild(new Option(item.label, String(item.id))));
       nation.value = rule.nation ? String(rule.nation.id) : "";
       nation.addEventListener("change", () => {
@@ -10120,7 +10146,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           leagues.appendChild(chip);
         });
         const add = el("select", "pt-stock-select pt-filter-add");
-        add.appendChild(new Option(rule.leagues.length ? "+ competitie" : "alle competities (+ kiezen)", ""));
+        add.appendChild(new Option(rule.leagues.length ? "+ competitie" : L("alle competities (+ kiezen)", "all leagues (+ pick)"), ""));
         getClubIndex().leagues.filter(league => !rule.leagues.some(other => other.id === league.id))
           .forEach(league => add.appendChild(new Option(league.label.replace(/\s*\(.*\)/, ""), String(league.id))));
         add.addEventListener("change", () => {
@@ -10137,8 +10163,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           optional.type = "checkbox";
           optional.checked = !!rule.leaguesOptional;
           optional.addEventListener("change", () => { rule.leaguesOptional = optional.checked; onChange(); });
-          optionalLabel.title = "Aan = eerst in deze competitie(s) zoeken, daarna nog één keer zonder competitie (\"ideally prem\")";
-          optionalLabel.append(optional, document.createTextNode(" ideaal, ook zonder"));
+          optionalLabel.title = L("Aan = eerst in deze competitie(s) zoeken, daarna nog één keer zonder competitie (\"ideally prem\")", "On = search these league(s) first, then once more without a league (\"ideally prem\")");
+          optionalLabel.append(optional, document.createTextNode(L(" ideaal, ook zonder", " ideal, also without")));
           leagues.appendChild(optionalLabel);
         }
       };
@@ -10154,17 +10180,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         const learned = rule.kind !== "manager" && rule.level ? discardFor(rule.level) : null;
         max.placeholder = learned ? `discard ${priceFormat.format(learned)}` : "quick-sell";
         max.title = learned
-          ? `"At discard": leeg = quick-sell-waarde van de laagste ${LEVEL_LABEL[rule.level].toLowerCase()}e rating (${priceFormat.format(learned)}, geleerd uit kaarten die je zag). Vul zelf iets in om dat te overschrijven.`
-          : "\"At discard\": quick-sell-waarde nog onbekend. Zoek één keer op de markt naar deze kwaliteit (laagste rating, bv. 75 goud) of vul hem zelf in.";
+          ? L(`"At discard": leeg = quick-sell-waarde van de laagste ${LEVEL_LABEL[rule.level].toLowerCase()}e rating (${priceFormat.format(learned)}, geleerd uit kaarten die je zag). Vul zelf iets in om dat te overschrijven.`, `"At discard": empty = quick-sell value of the lowest ${LEVEL_LABEL[rule.level].toLowerCase()} rating (${priceFormat.format(learned)}, learned from cards you saw). Enter something yourself to override it.`)
+          : L("\"At discard\": quick-sell-waarde nog onbekend. Zoek één keer op de markt naar deze kwaliteit (laagste rating, bv. 75 goud) of vul hem zelf in.", "\"At discard\": quick-sell value not known yet. Search the market once for this quality (lowest rating, e.g. 75 gold) or enter it yourself.");
       };
       discardHint();
       ideal.value = rule.ideal || "";
-      ideal.placeholder = "ideaal";
+      ideal.placeholder = L("ideaal", "ideal");
       max.addEventListener("change", () => { rule.max = parsePrice(max.value); onChange(); });
       ideal.addEventListener("change", () => { rule.ideal = parsePrice(ideal.value); onChange(); });
 
       if (rule.kind === "manager") positions.style.display = "none";
-      box.append(level, positions, nation, leagues, el("span", "pt-muted", "max"), max, el("span", "pt-muted", "ideaal"), ideal);
+      box.append(level, positions, nation, leagues, el("span", "pt-muted", "max"), max, el("span", "pt-muted", L("ideaal", "ideal")), ideal);
       return box;
     }
 
@@ -10186,9 +10212,9 @@ function priceWatchMain(SCRIPT_VERSION) {
           const updateSteps = () => {
             const count = filterSteps(rule).length;
             steps.textContent = `${count} zoekopdracht${count === 1 ? "" : "en"}: ` + filterSteps(rule).map(filterStepLabel).join(" · ") +
-              (rule.unknown && rule.unknown.length ? ` · niet herkend: "${rule.unknown.join("\", \"")}"` : "") +
-              (rule.max ? "" : ruleMax(rule) ? ` · max = discard ${priceFormat.format(ruleMax(rule))} (quick-sell, nooit onder de laagste marktprijs)` : " · geen max BIN: je ziet de hele markt") +
-              (rule.priceNote === "discard" && !ruleMax(rule) ? " · ⚠ \"at discard\": quick-sell-waarde nog onbekend — zoek één keer naar deze kwaliteit op de markt, of vul hem zelf in" : "") +
+              (rule.unknown && rule.unknown.length ? L(` · niet herkend: "${rule.unknown.join("\", \"")}"`, ` · not recognised: "${rule.unknown.join("\", \"")}"`) : "") +
+              (rule.max ? "" : ruleMax(rule) ? L(` · max = discard ${priceFormat.format(ruleMax(rule))} (quick-sell, nooit onder de laagste marktprijs)`, ` · max = discard ${priceFormat.format(ruleMax(rule))} (quick-sell, never below the lowest market price)`) : L(" · geen max BIN: je ziet de hele markt", " · no max BIN: you see the whole market")) +
+              (rule.priceNote === "discard" && !ruleMax(rule) ? L(" · ⚠ \"at discard\": quick-sell-waarde nog onbekend — zoek één keer naar deze kwaliteit op de markt, of vul hem zelf in", " · ⚠ \"at discard\": quick-sell value not known yet — search the market once for this quality, or enter it yourself") : "") +
               (rule.note ? ` · ${rule.note}` : "");
           };
           updateSteps();
@@ -10201,8 +10227,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const nameInput = el("input", "pt-target-input pt-stock-name");
       nameInput.value = `Filters ${new Date().toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
       const actions = el("div", "pt-stock-actions");
-      const save = el("button", "pt-watch-refresh", "Opslaan als filterlijst");
-      const back = el("button", "pt-link-btn", "← Terug");
+      const save = el("button", "pt-watch-refresh", L("Opslaan als filterlijst", "Save as filter list"));
+      const back = el("button", "pt-link-btn", L("← Terug", "← Back"));
       [save, back].forEach(button => { button.type = "button"; });
       const message = el("span", "pt-muted");
       back.addEventListener("click", showPasteStep);
@@ -10210,7 +10236,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         // Without a max BIN the filter shows the whole market (tips like "if buy now isn't profitable, move on").
         const chosen = rules.filter(rule => rule.enabled !== false && (rule.nation || rule.leagues.length));
         if (!chosen.length) {
-          message.textContent = "Kies minstens één regel met een land (of competitie).";
+          message.textContent = L("Kies minstens één regel met een land (of competitie).", "Pick at least one rule with a country (or league).");
           return;
         }
         chosen.forEach(rule => { delete rule.unknown; });
@@ -10226,12 +10252,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         saveStock();
         importPanel.style.display = "none";
       });
-      actions.append(el("span", "pt-muted", "Naam"), nameInput, save, back, message);
+      actions.append(el("span", "pt-muted", L("Naam", "Name")), nameInput, save, back, message);
 
-      const summary = el("div", "pt-stock-summary", `${rules.length} filterregel(s) gevonden · per positie en competitie wordt één transfermarkt-filter klaargezet (zoeken doe je zelf) · controleer en sla op.`);
+      const summary = el("div", "pt-stock-summary", L(`${rules.length} filterregel(s) gevonden · per positie en competitie wordt één transfermarkt-filter klaargezet (zoeken doe je zelf) · controleer en sla op.`, `${rules.length} filter rule(s) found · one transfer market filter is prepared per position and league (you search yourself) · check and save.`));
       importPanel.append(summary);
       if (parsed.platform === "console" && userPlatform() === "pc") {
-        importPanel.appendChild(el("div", "pt-stock-summary pt-loss", "⚠ Deze prijzen zijn voor console (@console). Op PC liggen ze vaak anders: pas max/ideaal zo nodig aan."));
+        importPanel.appendChild(el("div", "pt-stock-summary pt-loss", L("⚠ Deze prijzen zijn voor console (@console). Op PC liggen ze vaak anders: pas max/ideaal zo nodig aan.", "⚠ These prices are for console (@console). On PC they often differ: adjust max/ideal if needed.")));
       }
       importPanel.append(container, actions);
     }
@@ -10244,7 +10270,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const check = el("input");
         check.type = "checkbox";
         check.checked = rule.enabled !== false;
-        check.title = "Regel meenemen in de ronde";
+        check.title = L("Regel meenemen in de ronde", "Include rule in the round");
         check.addEventListener("change", () => { rule.enabled = check.checked; saveStock(); });
         head.append(check, el("span", "pt-watch-name", ` ${filterRuleTitle(rule)}`));
         const detail = inventoryDetail(summarizeBucket(list.inventory && list.inventory.rules[`f${rule.id}`]), list.goal);
@@ -10258,8 +10284,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""),
             `${done ? "✓ " : "🔍 "}${filterStepLabel(step)}`);
           button.type = "button";
-          button.title = `${filterRuleTitle(rule)} · ${filterStepLabel(step)} · max BIN ${ruleMax(rule) ? priceFormat.format(ruleMax(rule)) : "—"}${!rule.max && ruleMax(rule) ? " (quick-sell)" : ""} klaarzetten` +
-            (done ? ` (eerder om ${formatTime(done)})` : "");
+          button.title = L(`${filterRuleTitle(rule)} · ${filterStepLabel(step)} · max BIN ${ruleMax(rule) ? priceFormat.format(ruleMax(rule)) : "—"}${!rule.max && ruleMax(rule) ? " (quick-sell)" : ""} klaarzetten`, `${filterRuleTitle(rule)} · ${filterStepLabel(step)} · max BIN ${ruleMax(rule) ? priceFormat.format(ruleMax(rule)) : "—"}${!rule.max && ruleMax(rule) ? " (quick-sell)" : ""} ready`) +
+            (done ? L(` (eerder om ${formatTime(done)})`, ` (earlier at ${formatTime(done)})`) : "");
           button.addEventListener("click", () => goToRule(list.id, index));
           steps.appendChild(button);
         });
@@ -10272,8 +10298,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     function buildFodderGrid(list, rules, active) {
       const grid = el("table", "pt-watch-table pt-stock-grid pt-snipe-grid");
       const head = el("tr");
-      const what = list.mode === "bid" ? "Max bod" : "Max BIN";
-      [["Rating", "pt-col-name"], [what, "pt-col-target"], ["Ideaal", "pt-col-price"], ["", "pt-col-level"], ["Voorraad", "pt-col-stock"]]
+      const what = list.mode === "bid" ? L("Max bod", "Max bid") : "Max BIN";
+      [["Rating", "pt-col-name"], [what, "pt-col-target"], [L("Ideaal", "Ideal"), "pt-col-price"], ["", "pt-col-level"], [L("Voorraad", "Stock"), "pt-col-stock"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
       thead.appendChild(head);
@@ -10290,7 +10316,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         maxInput.addEventListener("change", () => { fodder.max = parsePrice(maxInput.value); saveStock(); });
         maxCell.appendChild(maxInput);
         if (fodder.max) {
-          maxCell.appendChild(el("div", "pt-level-detail pt-outlook pt-muted", `winst vanaf verkoop ≥ ${priceFormat.format(roundUpToStep(fodder.max / (1 - EA_TAX)))}`));
+          maxCell.appendChild(el("div", "pt-level-detail pt-outlook pt-muted", L(`winst vanaf verkoop ≥ ${priceFormat.format(roundUpToStep(fodder.max / (1 - EA_TAX)))}`, `profit from sale ≥ ${priceFormat.format(roundUpToStep(fodder.max / (1 - EA_TAX)))}`)));
         }
 
         const idealCell = el("td", "pt-col-price");
@@ -10304,9 +10330,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         const done = list.done && list.done[rule.key];
         const current = active && run.index === index;
         const buttonCell = el("td", "pt-col-level");
-        const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""), done ? "✓ klaargezet" : "🔍 klaarzetten");
+        const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""), done ? L("✓ klaargezet", "✓ ready") : L("🔍 klaarzetten", "🔍 set up"));
         button.type = "button";
-        button.title = `${fodder.rating}-rated goud · ${what.toLowerCase()} ${fodder.max ? priceFormat.format(fodder.max) : "—"} klaarzetten` + (done ? ` (eerder om ${formatTime(done)})` : "");
+        button.title = L(`${fodder.rating}-rated goud · ${what.toLowerCase()} ${fodder.max ? priceFormat.format(fodder.max) : "—"} klaarzetten`, `${fodder.rating}-rated gold · ${what.toLowerCase()} ${fodder.max ? priceFormat.format(fodder.max) : "—"} set up`) + (done ? L(` (eerder om ${formatTime(done)})`, ` (earlier at ${formatTime(done)})`) : "");
         button.addEventListener("click", () => goToRule(list.id, index));
         buttonCell.appendChild(button);
 
@@ -10325,7 +10351,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     function buildPlayerGrid(list, rules, active) {
       const grid = el("table", "pt-watch-table pt-stock-grid pt-snipe-grid");
       const head = el("tr");
-      [["Speler", "pt-col-name"], ["Rating", "pt-col-rating"], ["Prijs (PC)", "pt-col-price"], [list.massBid ? "BIN → max bod" : "Max BIN", "pt-col-target"], ["", "pt-col-level"], ["Voorraad", "pt-col-stock"]]
+      [[L("Speler", "Player"), "pt-col-name"], ["Rating", "pt-col-rating"], [L("Prijs (PC)", "Price (PC)"), "pt-col-price"], [list.massBid ? L("BIN → max bod", "BIN → max bid") : "Max BIN", "pt-col-target"], ["", "pt-col-level"], [L("Voorraad", "Stock"), "pt-col-stock"]]
         .forEach(([label, className]) => head.appendChild(el("th", className, label)));
       const thead = el("thead");
       thead.appendChild(head);
@@ -10345,29 +10371,29 @@ function priceWatchMain(SCRIPT_VERSION) {
           const fallback = (geniePrice(player.definitionId) || {}).price || 0;
           maxInput.value = player.sell || "";
           maxInput.placeholder = fallback ? `BIN ${priceFormat.format(fallback)}` : "BIN";
-          maxInput.title = "Laagste BIN die je op de markt ziet (leeg = FUT.GG PC-prijs). Max bod = BIN − je %.";
+          maxInput.title = L("Laagste BIN die je op de markt ziet (leeg = FUT.GG PC-prijs). Max bod = BIN − je %.", "Lowest BIN you see on the market (empty = FUT.GG PC price). Max bid = BIN − your %.");
           maxInput.addEventListener("change", () => { player.sell = parsePrice(maxInput.value); saveStock(); });
           maxCell.append(maxInput, el("div", "pt-level-detail pt-outlook", rule.max
-            ? `max bod ${priceFormat.format(rule.max)} · ${formatSigned(flipNet(massBidSell(player), rule.max))} na 5%`
-            : "geen prijs"));
+            ? L(`max bod ${priceFormat.format(rule.max)} · ${formatSigned(flipNet(massBidSell(player), rule.max))} na 5%`, `max bid ${priceFormat.format(rule.max)} · ${formatSigned(flipNet(massBidSell(player), rule.max))} after 5%`)
+            : L("geen prijs", "no price")));
         } else {
         maxInput.value = player.fixedMax || "";
         maxInput.placeholder = rule.max && !player.fixedMax ? `auto ${priceFormat.format(rule.max)}` : "auto";
-        maxInput.title = `Leeg = automatisch (zodat verkoop op de FUT Genie-prijs ${profitFor(list)}% winst geeft na belasting). Vul een bedrag in om het vast te zetten.`;
+        maxInput.title = L(`Leeg = automatisch (zodat verkoop op de FUT Genie-prijs ${profitFor(list)}% winst geeft na belasting). Vul een bedrag in om het vast te zetten.`, `Empty = automatic (so selling at the FUT Genie price gives ${profitFor(list)}% profit after tax). Enter an amount to fix it.`);
         maxInput.addEventListener("change", () => { player.fixedMax = parsePrice(maxInput.value); saveStock(); });
         maxCell.appendChild(maxInput);
         const outlook = snipeOutlook(rule);
         if (outlook) {
           const line = el("div", "pt-level-detail pt-outlook");
-          line.appendChild(el("span", "pt-muted", `winst vanaf ≥ ${priceFormat.format(outlook.breakEven)}`));
+          line.appendChild(el("span", "pt-muted", L(`winst vanaf ≥ ${priceFormat.format(outlook.breakEven)}`, `profit from ≥ ${priceFormat.format(outlook.breakEven)}`)));
           if (outlook.atGenie !== null) {
             line.appendChild(el("span", outlook.atGenie > 0 ? "pt-profit" : "pt-loss",
-              ` · ${outlook.atGenie > 0 ? "+" : ""}${priceFormat.format(outlook.atGenie)} op Genie`));
+              L(` · ${outlook.atGenie > 0 ? "+" : ""}${priceFormat.format(outlook.atGenie)} op Genie`, ` · ${outlook.atGenie > 0 ? "+" : ""}${priceFormat.format(outlook.atGenie)} at Genie`)));
           }
           line.title = [
-            `Kopen voor ${priceFormat.format(rule.max)}: je moet minimaal ${priceFormat.format(outlook.breakEven)} vragen om na 5% belasting quitte te spelen.`,
-            outlook.atGenie !== null ? `Verkoop je op de huidige FUT Genie-prijs (${priceFormat.format(rule.genie.price)}), dan is dat ${outlook.atGenie > 0 ? "+" : ""}${priceFormat.format(outlook.atGenie)} na belasting.` : "",
-            "Let op: de Genie-prijs kan achterlopen op de markt als prijzen snel bewegen."
+            L(`Kopen voor ${priceFormat.format(rule.max)}: je moet minimaal ${priceFormat.format(outlook.breakEven)} vragen om na 5% belasting quitte te spelen.`, `Buy for ${priceFormat.format(rule.max)}: you need to ask at least ${priceFormat.format(outlook.breakEven)} to break even after 5% tax.`),
+            outlook.atGenie !== null ? L(`Verkoop je op de huidige FUT Genie-prijs (${priceFormat.format(rule.genie.price)}), dan is dat ${outlook.atGenie > 0 ? "+" : ""}${priceFormat.format(outlook.atGenie)} na belasting.`, `If you sell at the current FUT Genie price (${priceFormat.format(rule.genie.price)}), that is ${outlook.atGenie > 0 ? "+" : ""}${priceFormat.format(outlook.atGenie)} after tax.`) : "",
+            L("Let op: de Genie-prijs kan achterlopen op de markt als prijzen snel bewegen.", "Note: the Genie price can lag behind the market when prices move fast.")
           ].filter(Boolean).join("\n");
           maxCell.appendChild(line);
         }
@@ -10376,9 +10402,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         const done = list.done && list.done[rule.key];
         const current = active && run.index === index;
         const buttonCell = el("td", "pt-col-level");
-        const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""), done ? "✓ klaargezet" : "🔍 klaarzetten");
+        const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""), done ? L("✓ klaargezet", "✓ ready") : L("🔍 klaarzetten", "🔍 set up"));
         button.type = "button";
-        button.title = `${player.name} · ${list.mode === "bid" ? "max bod" : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"} klaarzetten` + (done ? ` (eerder om ${formatTime(done)})` : "");
+        button.title = L(`${player.name} · ${list.mode === "bid" ? L("max bod", "max bid") : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"} klaarzetten`, `${player.name} · ${list.mode === "bid" ? L("max bod", "max bid") : "max BIN"} ${rule.max ? priceFormat.format(rule.max) : "—"} set up`) + (done ? L(` (eerder om ${formatTime(done)})`, ` (earlier at ${formatTime(done)})`) : "");
         button.addEventListener("click", () => goToRule(list.id, index));
         buttonCell.appendChild(button);
 
@@ -10402,7 +10428,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Fodder cycles live on the Fodder tab, not between your own lists.
       const all = getStock().filter(list => !list.fodderRating && !list.watchRun);
       if (!all.length) {
-        lists.appendChild(el("div", "pt-watch-empty", "Nog geen stock-lijsten. Klik op \"+ Tip plakken\"."));
+        lists.appendChild(el("div", "pt-watch-empty", L("Nog geen stock-lijsten. Klik op \"+ Tip plakken\".", "No stock lists yet. Click \"+ Paste tip\".")));
         return;
       }
 
@@ -10421,14 +10447,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         title.append(
           el("div", "pt-stock-list-name", (isFodder ? "🧱 " : isPlayers ? "🎯 " : isFilters ? "🔎 " : "📦 ") + list.name),
           el("div", "pt-watch-status", isFilters
-            ? `${list.rules.length} filterregels · ${rules.length} zoekopdrachten` + (list.platform === "console" ? " · prijzen uit een console-tip" : "") + ` · ${doneCount}/${rules.length} klaargezet`
+            ? `${list.rules.length} filterregels · ${rules.length} zoekopdrachten` + (list.platform === "console" ? L(" · prijzen uit een console-tip", " · prices from a console tip") : "") + L(` · ${doneCount}/${rules.length} klaargezet`, ` · ${doneCount}/${rules.length} set up`)
             : isFodder
-            ? `${rules.length} ratings · ${list.mode === "bid" ? "bieden (max bod)" : "direct kopen (max BIN)"} · ${doneCount}/${rules.length} klaargezet`
+            ? L(`${rules.length} ratings · ${list.mode === "bid" ? L("bieden (max bod)", "bid (max bid)") : "direct kopen (max BIN)"} · ${doneCount}/${rules.length} klaargezet`, `${rules.length} ratings · ${list.mode === "bid" ? L("bieden (max bod)", "bid (max bid)") : "buy now (max BIN)"} · ${doneCount}/${rules.length} set up`)
             : isPlayers
-            ? `${list.players.length} spelers · winst ${profitLabel(list)} na belasting · ${doneCount}/${rules.length} klaargezet`
+            ? L(`${list.players.length} spelers · winst ${profitLabel(list)} na belasting · ${doneCount}/${rules.length} klaargezet`, `${list.players.length} players · profit ${profitLabel(list)} after tax · ${doneCount}/${rules.length} set up`)
             : `${list.clubs.length} clubs · ${levels.map(level => `${LEVEL_LABEL[level]} ≤ ${priceFormat.format(list.levels[level].max)}`).join(" · ")}` +
-              (list.flip ? ` · lazy flip: markt − ${priceFormat.format(list.flip.under)}, verkoop +${priceFormat.format(list.flip.sellLow)}–${priceFormat.format(list.flip.sellHigh)}` : "") +
-              ` · ${doneCount}/${rules.length} klaargezet`)
+              (list.flip ? L(` · lazy flip: markt − ${priceFormat.format(list.flip.under)}, verkoop +${priceFormat.format(list.flip.sellLow)}–${priceFormat.format(list.flip.sellHigh)}`, ` · lazy flip: market − ${priceFormat.format(list.flip.under)}, sell +${priceFormat.format(list.flip.sellLow)}–${priceFormat.format(list.flip.sellHigh)}`) : "") +
+              L(` · ${doneCount}/${rules.length} klaargezet`, ` · ${doneCount}/${rules.length} set up`))
         );
         const state = listWindowState(list);
         if (state) title.appendChild(el("div", `pt-run-window pt-window-${state.state}`, state.text));
@@ -10446,13 +10472,13 @@ function priceWatchMain(SCRIPT_VERSION) {
           const netValues = summaries.filter(s => s.net !== null);
           const net = netValues.reduce((sum, s) => sum + s.net, 0);
           stockLine.append(
-            el("span", "", `📦 ${owned} kaarten · geïnvesteerd ${priceFormat.format(cost)}`),
-            el("span", "pt-muted", " · netto bij verkoop nu (na 5% belasting): "),
+            el("span", "", L(`📦 ${owned} kaarten · geïnvesteerd ${priceFormat.format(cost)}`, `📦 ${owned} cards · invested ${priceFormat.format(cost)}`)),
+            el("span", "pt-muted", L(" · netto bij verkoop nu (na 5% belasting): ", " · net if sold now (after 5% tax): ")),
             el("span", net > 0 ? "pt-profit" : net < 0 ? "pt-loss" : "", netValues.length ? `${net > 0 ? "+" : ""}${priceFormat.format(net)}` : "—"),
-            el("span", "pt-muted", ` · bijgewerkt om ${formatTime(list.inventory.updatedAt)}`)
+            el("span", "pt-muted", L(` · bijgewerkt om ${formatTime(list.inventory.updatedAt)}`, ` · updated at ${formatTime(list.inventory.updatedAt)}`))
           );
         } else {
-          stockLine.appendChild(el("span", "pt-muted", "📦 Nog geen voorraad geteld. Klik op \"Voorraad bijwerken\"."));
+          stockLine.appendChild(el("span", "pt-muted", L("📦 Nog geen voorraad geteld. Klik op \"Voorraad bijwerken\".", "📦 No stock counted yet. Click \"Update stock\".")));
         }
         title.appendChild(stockLine);
 
@@ -10464,70 +10490,70 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (isFodder) {
           // Fodder lists: switch between bidding and buy now.
           const mode = el("select", "pt-stock-select pt-mode-select");
-          mode.append(new Option("Bieden", "bid"), new Option("Direct kopen", "bin"));
+          mode.append(new Option(L("Bieden", "Bid"), "bid"), new Option("Direct kopen", "bin"));
           mode.value = list.mode === "bin" ? "bin" : "bid";
-          mode.title = "Bieden zet het max bod-filter, direct kopen het max BIN-filter";
+          mode.title = L("Bieden zet het max bod-filter, direct kopen het max BIN-filter", "Bid sets the max bid filter, buy now sets the max BIN filter");
           mode.addEventListener("change", () => { list.mode = mode.value; saveStock(); });
-          goalLabel.append(el("span", "pt-muted", "Zoeken op"), mode);
+          goalLabel.append(el("span", "pt-muted", L("Zoeken op", "Search by")), mode);
         } else if (isPlayers && list.massBid) {
           goal.placeholder = String(MASS_BID_DEFAULT_PCT);
           goal.value = list.massBid.pct || "";
-          goal.title = "Hoeveel procent je onder de laagste BIN biedt (tip: 20–25%, liever nog lager)";
+          goal.title = L("Hoeveel procent je onder de laagste BIN biedt (tip: 20–25%, liever nog lager)", "How many percent below the lowest BIN you bid (tip: 20–25%, preferably even lower)");
           goal.addEventListener("change", () => {
             const value = Number(goal.value.replace(",", "."));
             list.massBid.pct = value > 0 && value < 90 ? value : MASS_BID_DEFAULT_PCT;
             saveStock();
           });
-          goalLabel.append(el("span", "pt-muted", "% onder BIN"), goal);
+          goalLabel.append(el("span", "pt-muted", L("% onder BIN", "% below BIN")), goal);
         } else if (isPlayers) {
           goal.placeholder = "auto";
           goal.value = Number.isFinite(list.profit) ? list.profit : "";
-          goal.title = `Gewenste winst na 5% EA-belasting als je verkoopt op de FUT Genie-prijs (leeg = ${DEFAULT_PROFIT}%). Vaste max BIN per speler gaat altijd voor.`;
+          goal.title = L(`Gewenste winst na 5% EA-belasting als je verkoopt op de FUT Genie-prijs (leeg = ${DEFAULT_PROFIT}%). Vaste max BIN per speler gaat altijd voor.`, `Desired profit after 5% EA tax when you sell at the FUT Genie price (empty = ${DEFAULT_PROFIT}%). A fixed max BIN per player always takes priority.`);
           goal.addEventListener("change", () => {
             const value = goal.value.trim() === "" ? null : Number(goal.value.replace(",", "."));
             list.profit = Number.isFinite(value) ? value : null;
             saveStock();
           });
-          goalLabel.append(el("span", "pt-muted", "Winst %"), goal);
+          goalLabel.append(el("span", "pt-muted", L("Winst %", "Profit %")), goal);
         } else {
           goal.placeholder = "—";
           goal.value = list.goal || "";
-          goal.title = isFilters ? "Hoeveel kaarten je per filterregel wilt stocken" : "Hoeveel kaarten je per club en kwaliteit wilt stocken";
+          goal.title = isFilters ? L("Hoeveel kaarten je per filterregel wilt stocken", "How many cards you want to stock per filter rule") : L("Hoeveel kaarten je per club en kwaliteit wilt stocken", "How many cards you want to stock per club and quality");
           goal.addEventListener("change", () => { list.goal = parsePrice(goal.value); saveStock(); });
-          goalLabel.append(el("span", "pt-muted", isFilters ? "Doel per regel" : "Doel per vakje"), goal);
+          goalLabel.append(el("span", "pt-muted", isFilters ? L("Doel per regel", "Target per rule") : L("Doel per vakje", "Target per slot")), goal);
         }
-        const inventory = el("button", "pt-watch-refresh", progress ? `📦 ${progress}` : "📦 Voorraad bijwerken");
+        const inventory = el("button", "pt-watch-refresh", progress ? `📦 ${progress}` : L("📦 Voorraad bijwerken", "📦 Update stock"));
         inventory.disabled = !!progress;
         inventory.title = isFodder
-          ? "Telt je gewone gouden kaarten per rating in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten."
+          ? L("Telt je gewone gouden kaarten per rating in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten.", "Counts your regular gold cards per rating in your club, transfer list, unassigned and won transfer targets. No transfer market searches.")
           : isFilters
-          ? "Telt per filterregel je kaarten (land, kwaliteit, competitie, positie) in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten."
+          ? L("Telt per filterregel je kaarten (land, kwaliteit, competitie, positie) in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten.", "Counts your cards per filter rule (country, quality, league, position) in your club, transfer list, unassigned and won transfer targets. No transfer market searches.")
           : isPlayers
-          ? "Zoekt deze spelers in je club, transferlijst, unassigned en gewonnen transfer targets (met korte pauzes). Geen transfermarkt-zoekopdrachten."
-          : "Doorzoekt je club per club in deze lijst, plus transferlijst, unassigned en gewonnen transfer targets (met korte pauzes). Geen transfermarkt-zoekopdrachten.";
+          ? L("Zoekt deze spelers in je club, transferlijst, unassigned en gewonnen transfer targets (met korte pauzes). Geen transfermarkt-zoekopdrachten.", "Looks up these players in your club, transfer list, unassigned and won transfer targets (with short pauses). No transfer market searches.")
+          : L("Doorzoekt je club per club in deze lijst, plus transferlijst, unassigned en gewonnen transfer targets (met korte pauzes). Geen transfermarkt-zoekopdrachten.", "Searches your club per club in this list, plus transfer list, unassigned and won transfer targets (with short pauses). No transfer market searches.");
         inventory.addEventListener("click", () => updateInventory(list));
         const start = el("button", "pt-watch-refresh", active ? "▶ Verder" : doneCount ? "▶ Verder" : "▶ Start");
         const reset = el("button", "pt-link-btn", "↺ Reset");
-        const remove = el("button", "pt-link-btn pt-danger", "Verwijderen");
+        const remove = el("button", "pt-link-btn pt-danger", L("Verwijderen", "Delete"));
         // Snipe lists: put the players on the Spelers tab (your max BIN as their target).
-        const toWatch = el("button", "pt-link-btn", "➕ Naar Spelers");
-        toWatch.title = "Zet deze spelers op de Spelers-tab, met de vaste max BIN als PC-instapdoel";
+        const toWatch = el("button", "pt-link-btn", L("➕ Naar Spelers", "➕ To Players"));
+        toWatch.title = L("Zet deze spelers op de Spelers-tab, met de vaste max BIN als PC-instapdoel", "Put these players on the Players tab, with the fixed max BIN as the PC entry target");
         toWatch.addEventListener("click", () => {
           const added = addPlayersToWatch(list.players);
-          flashButton(toWatch, `✓ ${added} erbij`, true, "Op de Spelers-tab gezet", "➕ Naar Spelers", toWatch.title);
+          flashButton(toWatch, `✓ ${added} erbij`, true, L("Op de Spelers-tab gezet", "Put on the Players tab"), L("➕ Naar Spelers", "➕ To Players"), toWatch.title);
         });
         // Holo snipe: only holographic cards, max BIN = the normal card's FUT Genie price.
-        const holo = el("button", "pt-link-btn" + (list.holo ? " pt-holo-on" : ""), list.holo ? "✨ Alleen holo: aan" : "✨ Alleen holo");
-        holo.title = "Zoekt alleen holografische kaarten, met de prijs van de normale kaart (FUT Genie) als max BIN. " +
-          "Zelfde extra zoekfilter als FUT Genie's \"Holographic only\"; die zit niet in EA's eigen app.";
+        const holo = el("button", "pt-link-btn" + (list.holo ? " pt-holo-on" : ""), list.holo ? L("✨ Alleen holo: aan", "✨ Holo only: on") : L("✨ Alleen holo", "✨ Holo only"));
+        holo.title = L("Zoekt alleen holografische kaarten, met de prijs van de normale kaart (FUT Genie) als max BIN. ", "Searches only holographic cards, using the price of the regular card (FUT Genie) as max BIN. ") +
+          L("Zelfde extra zoekfilter als FUT Genie's \"Holographic only\"; die zit niet in EA's eigen app.", "Same extra search filter as FUT Genie's \"Holographic only\"; it isn't in EA's own app.");
         holo.addEventListener("click", () => {
           list.holo = !list.holo;
-          if (list.holo) showToast("✨ Alleen holo staat aan. Let op: dit filter zit niet in EA's eigen app (FUT Genie waarschuwt er ook voor); gebruik het met mate.", true);
+          if (list.holo) showToast(L("✨ Alleen holo staat aan. Let op: dit filter zit niet in EA's eigen app (FUT Genie waarschuwt er ook voor); gebruik het met mate.", "✨ Holo only is on. Note: this filter isn't in EA's own app (FUT Genie warns about it too); use it sparingly."), true);
           saveStock();
         });
         // Mass bid on/off: bid mode, max bid = BIN - %.
-        const massBid = el("button", "pt-link-btn" + (list.massBid ? " pt-holo-on" : ""), list.massBid ? "🎯 Mass bid: aan" : "🎯 Mass bid");
-        massBid.title = "Biedlijst: zoekt op max bod = laagste BIN − je %, en laat bij elke veiling zien of je bod nog past. Bieden doe je zelf.";
+        const massBid = el("button", "pt-link-btn" + (list.massBid ? " pt-holo-on" : ""), list.massBid ? L("🎯 Mass bid: aan", "🎯 Mass bid: on") : "🎯 Mass bid");
+        massBid.title = L("Biedlijst: zoekt op max bod = laagste BIN − je %, en laat bij elke veiling zien of je bod nog past. Bieden doe je zelf.", "Bid list: searches on max bid = lowest BIN − your %, and shows on each auction whether your bid still fits. You place the bids yourself.");
         massBid.addEventListener("click", () => {
           if (list.massBid) {
             delete list.massBid;
@@ -10555,7 +10581,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           window.setTimeout(() => {
             if (!remove.isConnected) return;
             remove.dataset.armed = "";
-            remove.textContent = "Verwijderen";
+            remove.textContent = L("Verwijderen", "Delete");
           }, 3000);
         });
         buttons.append(goalLabel, inventory, start, ...(isPlayers ? [toWatch] : []), ...(isPlayers && !list.fodderRating ? [massBid] : []),
@@ -10580,7 +10606,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
         const grid = el("table", "pt-watch-table pt-stock-grid");
         const head = el("tr");
-        head.append(el("th", "", "Club"), el("th", "", "Competitie"));
+        head.append(el("th", "", "Club"), el("th", "", L("Competitie", "League")));
         levels.forEach(level => head.appendChild(el("th", "pt-col-level", LEVEL_LABEL[level])));
         const thead = el("thead");
         thead.appendChild(head);
@@ -10601,15 +10627,15 @@ function priceWatchMain(SCRIPT_VERSION) {
             const rule = rules[index];
             const aboveTip = rule.market && rule.ceiling && rule.market.price > rule.ceiling;
             const label = !list.flip ? `≤ ${priceFormat.format(rule.max)}`
-              : rule.market ? `${aboveTip ? "⚠ " : ""}koop ≤ ${priceFormat.format(rule.max)}` : "👀 markt";
+              : rule.market ? L(`${aboveTip ? "⚠ " : ""}koop ≤ ${priceFormat.format(rule.max)}`, `${aboveTip ? "⚠ " : ""}buy ≤ ${priceFormat.format(rule.max)}`) : L("👀 markt", "👀 market");
             const button = el("button", "pt-level-btn" + (done ? " pt-done" : "") + (current ? " pt-current" : ""),
               `${done ? "✓ " : list.flip && !rule.market ? "" : "🔍 "}${label}`);
             button.type = "button";
             button.title = `${club.teamName} · ${LEVEL_LABEL[level]} · ` +
-              (rule.max ? `max BIN ${priceFormat.format(rule.max)} klaarzetten` : "markt bekijken (zonder max BIN)") +
-              (rule.market ? ` (markt ${priceFormat.format(rule.market.price)} om ${formatTime(rule.market.at)})` : "") +
-              (aboveTip ? ` – boven de tip (≤ ${priceFormat.format(rule.ceiling)})` : "") +
-              (done ? ` (eerder klaargezet om ${formatTime(done)})` : "");
+              (rule.max ? L(`max BIN ${priceFormat.format(rule.max)} klaarzetten`, `Set up max BIN ${priceFormat.format(rule.max)}`) : L("markt bekijken (zonder max BIN)", "view market (without max BIN)")) +
+              (rule.market ? L(` (markt ${priceFormat.format(rule.market.price)} om ${formatTime(rule.market.at)})`, ` (market ${priceFormat.format(rule.market.price)} at ${formatTime(rule.market.at)})`) : "") +
+              (aboveTip ? L(` – boven de tip (≤ ${priceFormat.format(rule.ceiling)})`, ` – above the tip (≤ ${priceFormat.format(rule.ceiling)})`) : "") +
+              (done ? L(` (eerder klaargezet om ${formatTime(done)})`, ` (earlier set up at ${formatTime(done)})`) : "");
             button.addEventListener("click", () => goToRule(list.id, index));
             cell.appendChild(button);
 
@@ -10770,7 +10796,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const watched = !!findWatched(item.definitionId);
     button.textContent = watched ? "✓ In Price Watch" : "+ Price Watch";
     button.classList.toggle("pt-watching", watched);
-    button.title = watched ? "Klik om uit je Price Watch te halen" : "Voeg deze kaart toe aan je Price Watch";
+    button.title = watched ? L("Klik om uit je Price Watch te halen", "Click to remove from your Price Watch") : L("Voeg deze kaart toe aan je Price Watch", "Add this card to your Price Watch");
   }
 
   function addWatchButton(panel, item) {
@@ -10820,9 +10846,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     let wrap = root.querySelector(".pt-lowest-wrap");
     if (!wrap) {
       wrap = el("div", "pt-lowest-wrap");
-      const button = el("button", "btn-standard pt-lowest-panel", "🏷️ Laagste prijs");
+      const button = el("button", "btn-standard pt-lowest-panel", L("🏷️ Laagste prijs", "🏷️ Lowest price"));
       button.type = "button";
-      button.title = "Handmatige live BIN-scan: maximaal 3 EA-zoekopdrachten met 12–18s pauze. Bij de apparaatlimiet: klik binnen 30s nogmaals voor een eenmalige bevestigde uitzondering.";
+      button.title = L("Handmatige live BIN-scan: maximaal 3 EA-zoekopdrachten met 12–18s pauze. Bij de apparaatlimiet: klik binnen 30s nogmaals voor een eenmalige bevestigde uitzondering.", "Manual live BIN scan: at most 3 EA searches with a 12–18s pause. At the device limit: click again within 30s for a one-time confirmed exception.");
       const out = el("div", "pt-lowest-out");
       wrap.append(button, out);
       wrap.__ptShow = () => {
@@ -10830,7 +10856,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const result = current && lastLowest[current.definitionId];
         out.textContent = !result ? "" : result.counts.length
           ? `${formatLowestCounts(current.definitionId)} · ${formatDayTime(result.at)}`
-          : `Niets te koop gevonden · ${formatDayTime(result.at)}`;
+          : L(`Niets te koop gevonden · ${formatDayTime(result.at)}`, `Nothing for sale found · ${formatDayTime(result.at)}`);
       };
       let lastClick = 0;
       button.addEventListener("click", async event => {
@@ -10840,18 +10866,18 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (!current || Date.now() - lastClick < 600) return;
         lastClick = Date.now();
         if (marketBusy) {
-          showToast("Er loopt nog een zoekopdracht – even wachten", false);
+          showToast(L("Er loopt nog een zoekopdracht – even wachten", "A search is still running – wait a moment"), false);
           return;
         }
         button.disabled = true;
-        out.textContent = "Zoeken…";
+        out.textContent = L("Zoeken…", "Searching…");
         try {
-          await findLowestPrice(current.definitionId, search => { out.textContent = `Zoeken ${search}…`; });
+          await findLowestPrice(current.definitionId, search => { out.textContent = L(`Zoeken ${search}…`, `Searching ${search}…`); });
           if (wrap.__ptItem === current) wrap.__ptShow();
           listeners.forEach(listener => listener());
         } catch (error) {
-          console.warn("Price Watch: laagste prijs zoeken mislukt.", error);
-          out.textContent = `Zoeken mislukt: ${error.message}`;
+          console.warn(L("Price Watch: laagste prijs zoeken mislukt.", "Price Watch: searching lowest price failed."), error);
+          out.textContent = L(`Zoeken mislukt: ${error.message}`, `Search failed: ${error.message}`);
         } finally {
           button.disabled = false;
         }
@@ -10872,12 +10898,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         try {
           addWatchButton(this, item);
         } catch (error) {
-          console.warn("Price Watch: knop toevoegen mislukt.", error);
+          console.warn(L("Price Watch: knop toevoegen mislukt.", "Price Watch: adding button failed."), error);
         }
         try {
           if (className === "UTAuctionActionPanelView") addMassBidPanel(this, item);
         } catch (error) {
-          console.warn("Price Watch: biedlijst-regel bij bieden mislukt.", error);
+          console.warn(L("Price Watch: biedlijst-regel bij bieden mislukt.", "Price Watch: bid list row on bidding failed."), error);
         }
         return result;
       };
@@ -10892,7 +10918,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         try {
           addQuickListMarkup(this);
         } catch (error) {
-          console.warn("Price Watch: opslag-knoppen bij listen mislukt.", error);
+          console.warn(L("Price Watch: opslag-knoppen bij listen mislukt.", "Price Watch: save buttons on listing failed."), error);
         }
         return result;
       };
@@ -10907,12 +10933,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         try {
           addTransferRowInfo(this, (typeof this.getData === "function" && this.getData()) || data);
         } catch (error) {
-          console.warn("Price Watch: winst bij kaart op transferlijst mislukt.", error);
+          console.warn(L("Price Watch: winst bij kaart op transferlijst mislukt.", "Price Watch: profit on transfer list card failed."), error);
         }
         try {
           addMassBidBadge(this, (typeof this.getData === "function" && this.getData()) || data);
         } catch (error) {
-          console.warn("Price Watch: biedlijst-badge mislukt.", error);
+          console.warn(L("Price Watch: biedlijst-badge mislukt.", "Price Watch: bid list badge failed."), error);
         }
         return result;
       };
@@ -10928,7 +10954,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           transferListController = this;
           addTransferSummary(this);
         } catch (error) {
-          console.warn("Price Watch: transferlijst-overzicht mislukt.", error);
+          console.warn(L("Price Watch: transferlijst-overzicht mislukt.", "Price Watch: transfer list overview failed."), error);
         }
         return result;
       };
@@ -10995,15 +11021,15 @@ function priceWatchMain(SCRIPT_VERSION) {
     const openProfit = sum(openKnown, row => row.net);
     const soldProfit = sum(soldKnown, row => row.net);
     const noPrice = open.filter(row => !row.price).length;
-    const missing = (part, all) => (part.length < all.length ? `${part.length} van ${all.length} met aankoopprijs` : "na tax");
+    const missing = (part, all) => (part.length < all.length ? L(`${part.length} van ${all.length} met aankoopprijs`, `${part.length} of ${all.length} with purchase price`) : "na tax");
     box.textContent = "";
     box.append(
-      tile("Mogelijke opbrengst", priceFormat.format(sum(open, row => after(row.price))), null, noPrice ? `na tax · ${noPrice} zonder prijs` : "na tax"),
-      tile("Mogelijke winst", signedCoins(openProfit), openProfit, missing(openKnown, open)),
-      tile("Verkocht (opbrengst)", priceFormat.format(sum(sold, row => after(row.price))), null, `${sold.length} kaart(en), na tax`),
-      tile("Verkocht (winst)", signedCoins(soldProfit), soldProfit, missing(soldKnown, sold)),
+      tile("Mogelijke opbrengst", priceFormat.format(sum(open, row => after(row.price))), null, noPrice ? L(`na tax · ${noPrice} zonder prijs`, `after tax · ${noPrice} without price`) : "na tax"),
+      tile(L("Mogelijke winst", "Possible profit"), signedCoins(openProfit), openProfit, missing(openKnown, open)),
+      tile(L("Verkocht (opbrengst)", "Sold (revenue)"), priceFormat.format(sum(sold, row => after(row.price))), null, L(`${sold.length} kaart(en), na tax`, `${sold.length} card(s), after tax`)),
+      tile(L("Verkocht (winst)", "Sold (profit)"), signedCoins(soldProfit), soldProfit, missing(soldKnown, sold)),
       tile("Quick sell totaal", priceFormat.format(sum(rows, row => row.quickSell))),
-      tile("Quick sell niet verkocht", priceFormat.format(sum(open, row => row.quickSell))));
+      tile(L("Quick sell niet verkocht", "Quick sell not sold"), priceFormat.format(sum(open, row => row.quickSell))));
   }
 
   // "35.3k", like FUT Genie's list.
@@ -11029,8 +11055,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       profit.appendChild(coin());
       badge.appendChild(profit);
     }
-    if ((row.listed || row.sold) && row.market) badge.append(el("div", over ? "pt-tl-badge-sub pt-neg" : "pt-tl-badge-sub", `${over ? "⚠ boven " : ""}Genie ${shortCoins(row.market)}`));
-    if ((row.listed || row.sold) && !row.bought) badge.append(el("div", "pt-tl-badge-sub", "aankoopprijs onbekend"));
+    if ((row.listed || row.sold) && row.market) badge.append(el("div", over ? "pt-tl-badge-sub pt-neg" : "pt-tl-badge-sub", `${over ? L("⚠ boven ", "⚠ above ") : ""}Genie ${shortCoins(row.market)}`));
+    if ((row.listed || row.sold) && !row.bought) badge.append(el("div", "pt-tl-badge-sub", L("aankoopprijs onbekend", "purchase price unknown")));
     if (badge.childNodes.length) {
       if (getComputedStyle(root).position === "static") root.style.position = "relative";
       root.appendChild(badge);
@@ -11038,7 +11064,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (row.listed || row.sold) return;
     const line = el("div", "pt-tl-row");
     if (row.market) line.append(el("span", "pt-tl-genie", shortCoins(row.market)), coin(), " Genie");
-    if (row.bought) line.append(row.market ? " · " : "", `gekocht ${shortCoins(row.bought)}`);
+    if (row.bought) line.append(row.market ? " · " : "", L(`gekocht ${shortCoins(row.bought)}`, `bought ${shortCoins(row.bought)}`));
     if (line.childNodes.length) (root.querySelector(".entityContainer") || root).appendChild(line);
   }
 
@@ -11061,10 +11087,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     row = el("div", "panelActionRow pt-ql pt-ql-mb");
     row.__ptItem = item;
     const hold = massBidHold(info, bought);
-    const button = el("button", "pt-ql-btn pt-ql-gold", `${hold ? "📦 Liever houden · " : "🎯 "}Verkoop ${priceFormat.format(info.sell)}${bought ? ` (${formatSigned(flipNet(info.sell, bought))})` : ""}`);
+    const button = el("button", "pt-ql-btn pt-ql-gold", `${hold ? L("📦 Liever houden · ", "📦 Better to keep · ") : "🎯 "}Verkoop ${priceFormat.format(info.sell)}${bought ? ` (${formatSigned(flipNet(info.sell, bought))})` : ""}`);
     button.type = "button";
-    button.title = (hold ? `Fodder ≥${MASS_BID_HOLD_PCT}% onder de prijs gekocht: de tip zegt houden. ` : "") +
-      `Buy Now = verkoopprijs van "${info.list.name}" (${info.player.sell ? "jouw BIN" : "FUT.GG PC"}). Check eerst de markt; list één kaart tegelijk.`;
+    button.title = (hold ? L(`Fodder ≥${MASS_BID_HOLD_PCT}% onder de prijs gekocht: de tip zegt houden. `, `Fodder bought ≥${MASS_BID_HOLD_PCT}% below the price: the tip says keep. `) : "") +
+      L(`Buy Now = verkoopprijs van "${info.list.name}" (${info.player.sell ? "jouw BIN" : "FUT.GG PC"}). Check eerst de markt; list één kaart tegelijk.`, `Buy Now = sell price of "${info.list.name}" (${info.player.sell ? "your BIN" : "FUT.GG PC"}). Check the market first; list one card at a time.`);
     button.addEventListener("click", event => {
       event.preventDefault();
       event.stopPropagation();
@@ -11108,7 +11134,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const bin = binNow();
       if (!bin || !bought || !full) return;
       const net = netProfit(bin, bought);
-      profit.append(`Winst na tax bij BIN ${priceFormat.format(bin)}: `, el("span", net >= 0 ? "pt-pos" : "pt-neg", signedCoins(net)));
+      profit.append(L(`Winst na tax bij BIN ${priceFormat.format(bin)}: `, `Profit after tax at BIN ${priceFormat.format(bin)}: `), el("span", net >= 0 ? "pt-pos" : "pt-neg", signedCoins(net)));
     };
     const setBin = price => {
       const bin = Math.max(200, roundUpToStep(price));
@@ -11149,11 +11175,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (marketBusy) return;
         node.disabled = true;
         try {
-          const lowest = await findLowestPrice(item.definitionId, search => { node.textContent = `Zoeken ${search}…`; });
+          const lowest = await findLowestPrice(item.definitionId, search => { node.textContent = L(`Zoeken ${search}…`, `Searching ${search}…`); });
           if (lowest) setBin(Math.max(200, priceStepBelow(lowest)));
-          else showToast("Geen enkele listing gevonden voor deze kaart.", false);
+          else showToast(L("Geen enkele listing gevonden voor deze kaart.", "No listing found for this card."), false);
         } catch (error) {
-          showToast(`Laagste BIN zoeken mislukt: ${error.message}`, false);
+          showToast(L(`Laagste BIN zoeken mislukt: ${error.message}`, `Lowest BIN search failed: ${error.message}`), false);
         } finally {
           node.disabled = false;
           refreshPrice();
@@ -11163,24 +11189,24 @@ function priceWatchMain(SCRIPT_VERSION) {
       refreshPrice = () => {
         const entry = geniePrice(item.definitionId, item.resourceId);
         if (entry) {
-          const source = entry._market ? "Laagste BIN" : "Genie-prijs";
+          const source = entry._market ? L("Laagste BIN", "Lowest BIN") : L("Genie-prijs", "Genie price");
           priceButton.textContent = `${source} ${priceFormat.format(entry.price)}`;
           priceButton.title = `Buy Now = ${source.toLowerCase()} (${formatDayTime(Number(entry._fetchedAt) || Date.now())})`;
         } else {
-          priceButton.textContent = "🏷️ Laagste BIN zoeken";
-          button.title = "Gebruikt beschikbare referentieprijs; zonder prijs kun je handmatig een live BIN-scan starten (max 3 EA-zoekopdrachten).";
+          priceButton.textContent = L("🏷️ Laagste BIN zoeken", "🏷️ Search lowest BIN");
+          button.title = L("Gebruikt beschikbare referentieprijs; zonder prijs kun je handmatig een live BIN-scan starten (max 3 EA-zoekopdrachten).", "Uses the available reference price; without a price you can start a manual live BIN scan (max 3 EA searches).");
         }
       };
       refreshPrice();
-      const breakEven = button("Break even", "Buy Now waarbij je na 5% tax precies je aankoopprijs terugkrijgt", () => setBin(bought / (1 - EA_TAX)));
+      const breakEven = button("Break even", L("Buy Now waarbij je na 5% tax precies je aankoopprijs terugkrijgt", "Buy Now at which you get exactly your purchase price back after 5% tax"), () => setBin(bought / (1 - EA_TAX)));
       breakEven.classList.add("pt-ql-gold");
       row.appendChild(bought ? grid(2, priceButton, breakEven) : grid(1, priceButton));
       row.appendChild(grid(3, ...[[-10, 0.9], [5, 1.05], [10, 1.1]].map(([pct, factor]) =>
-        button(`${pct > 0 ? "+" : ""}${pct}%`, `Buy Now in het veld ${pct > 0 ? "+" : ""}${pct}%`, () => { if (binNow()) setBin(binNow() * factor); }))));
+        button(`${pct > 0 ? "+" : ""}${pct}%`, L(`Buy Now in het veld ${pct > 0 ? "+" : ""}${pct}%`, `Buy Now in the field ${pct > 0 ? "+" : ""}${pct}%`), () => { if (binNow()) setBin(binNow() * factor); }))));
     }
 
     if (bought) {
-      const pcts = QUICK_LIST_PCTS.map(pct => button(`+${pct}%`, `Buy Now = aankoopprijs + ${pct}%`, () => setBin(bought * (1 + pct / 100))));
+      const pcts = QUICK_LIST_PCTS.map(pct => button(`+${pct}%`, L(`Buy Now = aankoopprijs + ${pct}%`, `Buy Now = purchase price + ${pct}%`), () => setBin(bought * (1 + pct / 100))));
       // Own %: applied when you finish typing (Enter / Done / leaving the field).
       const customBox = el("label", "pt-ql-btn pt-ql-custom-box");
       const custom = el("input", "pt-ql-custom");
@@ -11203,7 +11229,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         custom.blur();
         applyCustom();
       });
-      row.append(el("div", "pt-ql-title", `Op je aankoopprijs (${priceFormat.format(bought)})`), grid(4, ...pcts, customBox));
+      row.append(el("div", "pt-ql-title", L(`Op je aankoopprijs (${priceFormat.format(bought)})`, `On your purchase price (${priceFormat.format(bought)})`)), grid(4, ...pcts, customBox));
     }
     row.appendChild(profit);
 
@@ -11261,7 +11287,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const classes = hotkeyClasses(node);
     return classes.length ? `#${classes.join(".")}` : "";
   };
-  const HOTKEY_ICON_NAMES = { "#ut-navigation-button-control": "‹ Terug" };
+  const HOTKEY_ICON_NAMES = { "#ut-navigation-button-control": L("‹ Terug", "‹ Back") };
   const hotkeyName = node => {
     const text = String(node.textContent || node.title || "").replace(/\s+/g, " ").trim().slice(0, 40);
     return text || HOTKEY_ICON_NAMES[hotkeyLabel(node)] || "Icoonknop";
@@ -11379,19 +11405,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     const draw = () => {
       panel.textContent = "";
       const head = el("div", "pt-hk-head");
-      head.append(el("b", "", "⌨ Sneltoetsen"), el("span", "pt-hk-sub", "Rechtsklik op een knop → Toets toewijzen"));
+      head.append(el("b", "", L("⌨ Sneltoetsen", "⌨ Hotkeys")), el("span", "pt-hk-sub", L("Rechtsklik op een knop → Toets toewijzen", "Right-click a button → Assign key")));
       const close = el("button", "pt-hk-x", "✕");
       close.type = "button";
       close.addEventListener("click", () => panel.remove());
       head.appendChild(close);
       panel.appendChild(head);
       const list = getHotkeys();
-      if (!list.length) panel.appendChild(el("div", "pt-hk-empty", "Nog geen sneltoetsen."));
+      if (!list.length) panel.appendChild(el("div", "pt-hk-empty", L("Nog geen sneltoetsen.", "No hotkeys yet.")));
       list.forEach((binding, i) => {
         const line = el("div", "pt-hk-line");
         const remove = el("button", "pt-hk-x", "✕");
         remove.type = "button";
-        remove.title = "Verwijderen";
+        remove.title = L("Verwijderen", "Delete");
         remove.addEventListener("click", () => { const next = getHotkeys(); next.splice(i, 1); saveHotkeys(next); draw(); });
         line.append(el("kbd", "", hotkeyShow(binding.combo)), el("span", "", binding.name || binding.label), remove);
         panel.appendChild(line);
@@ -11453,7 +11479,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const same = hotkeySiblings(label, classes);
     const inDialog = node => !!node.closest(HOTKEY_DIALOGS);
     const nth = same.length > 1 && !same.some(inDialog) ? same.indexOf(target) : -1;
-    const name = hotkeyName(target) + (nth >= 0 ? ` (${nth + 1} van ${same.length})` : "");
+    const name = hotkeyName(target) + (nth >= 0 ? L(` (${nth + 1} van ${same.length})`, ` (${nth + 1} of ${same.length})`) : "");
     const bound = getHotkeys().filter(binding => binding.label === label && (binding.nth ?? null) === (nth >= 0 ? nth : null));
     hotkeyMenu = el("div", "pt-hk-menu");
     hotkeyMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 230)}px`;
@@ -11467,10 +11493,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     hotkeyMenu.appendChild(el("div", "pt-hk-title", name || label));
     item(bound.length ? `⌨ Andere toets (nu ${bound.map(b => hotkeyShow(b.combo)).join(", ")})` : "⌨ Toets toewijzen", () => {
       hotkeyCapture = { label, classes, name, nth: nth >= 0 ? nth : null, of: nth >= 0 ? same.length : null };
-      showToast(`Druk nu op de toets voor "${name || label}" (Esc = annuleren)`, true);
+      showToast(L(`Druk nu op de toets voor "${name || label}" (Esc = annuleren)`, `Press the key for "${name || label}" now (Esc = cancel)`), true);
     });
-    if (bound.length) item("✕ Toets verwijderen", () => { saveHotkeys(getHotkeys().filter(binding => !bound.some(b => b.combo === binding.combo))); showToast("Sneltoets verwijderd", true); });
-    item("☰ Alle sneltoetsen…", openHotkeyPanel);
+    if (bound.length) item(L("✕ Toets verwijderen", "✕ Remove key"), () => { saveHotkeys(getHotkeys().filter(binding => !bound.some(b => b.combo === binding.combo))); showToast(L("Sneltoets verwijderd", "Hotkey removed"), true); });
+    item(L("☰ Alle sneltoetsen…", "☰ All hotkeys…"), openHotkeyPanel);
     document.body.appendChild(hotkeyMenu);
   }
   document.addEventListener("mousedown", event => {
@@ -11493,7 +11519,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       next.push({ combo, label: capture.label, classes: capture.classes, name: capture.name, nth: capture.nth, of: capture.of });
       saveHotkeys(next);
       drawHotkeyTags();
-      showToast(`"${capture.name || capture.label}" = ${hotkeyShow(combo)}${genie() ? " · deze toets gaat nu voor op FUT Genie" : ""}`, true);
+      showToast(`"${capture.name || capture.label}" = ${hotkeyShow(combo)}${genie() ? L(" · deze toets gaat nu voor op FUT Genie", " · this key now takes priority over FUT Genie") : ""}`, true);
       return;
     }
     if (event.repeat || event.metaKey) return; // held key: never a second click
@@ -11513,7 +11539,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     event.preventDefault();
     event.stopPropagation();
     if (priceField && focus) focus.blur();
-    if (!button) return void showToast(`${hotkeyShow(combo)}: "${binding.name || binding.label}" staat niet op dit scherm`, false);
+    if (!button) return void showToast(L(`${hotkeyShow(combo)}: "${binding.name || binding.label}" staat niet op dit scherm`, `${hotkeyShow(combo)}: "${binding.name || binding.label}" is not on this screen`), false);
     hotkeyPress(button);
   }, true);
 
@@ -11525,6 +11551,17 @@ function priceWatchMain(SCRIPT_VERSION) {
   min-height: 100%;
   padding: 24px;
   overflow-y: auto;
+}
+
+// Language for the Tampermonkey part below (gist, ntfy, QR, request bridge): same setting as the page
+// (pt_flip_v1.lang, English by default). priceWatchMain has its own L inside.
+function L(nl, en) {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("pt_flip_v1") || "null");
+    return saved && saved.lang === "nl" ? nl : en;
+  } catch (_) {
+    return en;
+  }
 }
 
 .pt-watch-card {
@@ -12546,7 +12583,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       if (Date.now() - lastBlockReport < 5000) return;
       lastBlockReport = Date.now();
       const name = `${hit.tagName.toLowerCase()}${hit.className && typeof hit.className === "string" ? "." + hit.className.trim().split(/\s+/).join(".") : ""}`;
-      showToast(`Tik geblokkeerd door ${name} – opgeruimd, probeer opnieuw`, false);
+      showToast(L(`Tik geblokkeerd door ${name} – opgeruimd, probeer opnieuw`, `Tap blocked by ${name} – cleared, try again`), false);
     }, true);
   }
 
@@ -12557,7 +12594,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   function report(text, ok) {
     if (IS_PHONE && !tabReported) showToast(`Price Watch v${SCRIPT_VERSION}: ${text}`, ok);
   }
-  report("geladen, wacht op de web app…", true);
+  report(L("geladen, wacht op de web app…", "loaded, waiting for the web app…"), true);
 
   function tick() {
     // Pc with FUT Genie: prices to the gist (and target pushes) also while EA isn't logged in, e.g. after a
@@ -12570,7 +12607,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       // Stuck on the login screen with listings running: nobody is watching them.
       if (Date.now() - startedAt > 2 * 60 * 1000 && getListingEnds().length) noteLoggedOut();
       if (Date.now() - startedAt > 45000 && !waitReported) {
-        report("EA-app nog niet gevonden (nog niet ingelogd?)", false);
+        report(L("EA-app nog niet gevonden (nog niet ingelogd?)", "EA app not found yet (not logged in yet?)"), false);
         waitReported = true;
       }
       return;
@@ -12587,26 +12624,26 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
         const parent = tabNode.parentElement;
         const siblings = parent ? [...parent.children].map(child => child.textContent.trim() || child.className).join("|") : "?";
         report(`knop onderin verborgen (${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}, ` +
-          `${getComputedStyle(tabNode).display}, in ${parent ? parent.className : "?"}: ${siblings}). Staat Paletools aan? Dat tekent de balk opnieuw.`, false);
+          L(`${getComputedStyle(tabNode).display}, in ${parent ? parent.className : "?"}: ${siblings}). Staat Paletools aan? Dat tekent de balk opnieuw.`, `${getComputedStyle(tabNode).display}, in ${parent ? parent.className : "?"}: ${siblings}). Is Paletools on? It redraws the bar.`), false);
         waitReported = true;
       }
       if (installed && visible && !tabReported) {
-        report("tab \"Watch\" staat onderin na Transfers", true);
+        report(L("tab \"Watch\" staat onderin na Transfers", "tab \"Watch\" is at the bottom after Transfers"), true);
         tabReported = true;
       } else if (installed && !visible && !waitReported && Date.now() - startedAt > 20000) {
         // Diagnose for the phone: what is in the bottom bar instead?
         const bar = [...document.querySelectorAll(".ut-tab-bar-item, nav button")]
           .map(button => button.textContent.trim()).filter(Boolean).join(", ");
-        report(`tab gemaakt maar niet zichtbaar. Balk: ${bar || "?"}`, false);
+        report(L(`tab gemaakt maar niet zichtbaar. Balk: ${bar || "?"}`, `tab created but not visible. Bar: ${bar || "?"}`), false);
         waitReported = true;
       } else if (!installed && !waitReported && Date.now() - startedAt > 60000) {
-        report("tabbalk van de app niet gevonden", false);
+        report(L("tabbalk van de app niet gevonden", "app tab bar not found"), false);
         waitReported = true;
       }
     } catch (error) {
-      console.warn("Price Watch: tab toevoegen mislukt.", error);
+      console.warn(L("Price Watch: tab toevoegen mislukt.", "Price Watch: adding tab failed."), error);
       if (!tabReported && Date.now() - startedAt > 45000) {
-        report(`tab toevoegen mislukt – ${error.message}`, false);
+        report(L(`tab toevoegen mislukt – ${error.message}`, `adding tab failed – ${error.message}`), false);
         tabReported = true;
       }
     }
@@ -12623,7 +12660,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.
       startRelay();
-      migrateFromPaletools().catch(error => console.warn("Price Watch: overnemen uit Paletools mislukt.", error));
+      migrateFromPaletools().catch(error => console.warn(L("Price Watch: overnemen uit Paletools mislukt.", "Price Watch: importing from Paletools failed."), error));
     }
   }
 
@@ -12654,7 +12691,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   }
 
   function setValue(key, value) {
-    if (typeof GM_setValue !== "function") throw new Error("Tampermonkey-opslag niet beschikbaar");
+    if (typeof GM_setValue !== "function") throw new Error(L("Tampermonkey-opslag niet beschikbaar", "Tampermonkey storage not available"));
     if (value == null && typeof GM_deleteValue === "function") GM_deleteValue(key);
     else GM_setValue(key, value);
   }
@@ -12662,7 +12699,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   function request(method, url, body, headers) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== "function") {
-        reject(new Error("Tampermonkey staat geen verzoeken toe (GM_xmlhttpRequest ontbreekt)"));
+        reject(new Error(L("Tampermonkey staat geen verzoeken toe (GM_xmlhttpRequest ontbreekt)", "Tampermonkey doesn't allow requests (GM_xmlhttpRequest missing)")));
         return;
       }
       GM_xmlhttpRequest({
@@ -12680,8 +12717,8 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
           }
           resolve({ status: response.status, json, text: String(response.responseText || "") });
         },
-        onerror: () => reject(new Error("GitHub niet bereikbaar")),
-        ontimeout: () => reject(new Error("GitHub antwoordt niet (time-out)"))
+        onerror: () => reject(new Error(L("GitHub niet bereikbaar", "GitHub not reachable"))),
+        ontimeout: () => reject(new Error(L("GitHub antwoordt niet (time-out)", "GitHub not responding (timeout)")))
       });
     });
   }
@@ -12703,17 +12740,17 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
         data: String(text || ""),
         timeout: 15000,
         onload: response => (response.status < 300 ? resolve(true) : reject(new Error(`ntfy ${response.status}`))),
-        onerror: () => reject(new Error("ntfy.sh niet bereikbaar")),
-        ontimeout: () => reject(new Error("ntfy.sh antwoordt niet (time-out)"))
+        onerror: () => reject(new Error(L("ntfy.sh niet bereikbaar", "ntfy.sh not reachable"))),
+        ontimeout: () => reject(new Error(L("ntfy.sh antwoordt niet (time-out)", "ntfy.sh not responding (timeout)")))
       });
     });
   }
 
   function githubError(response) {
     const message = response.json && response.json.message;
-    if (response.status === 401) return "token ongeldig of verlopen";
-    if (response.status === 404) return "gist niet gevonden (of token mist het recht \"gist\")";
-    if (response.status === 403 && /rate limit/i.test(message || "")) return "te veel verzoeken bij GitHub, even wachten";
+    if (response.status === 401) return L("token ongeldig of verlopen", "token invalid or expired");
+    if (response.status === 404) return L("gist niet gevonden (of token mist het recht \"gist\")", "gist not found (or token lacks the \"gist\" permission)");
+    if (response.status === 403 && /rate limit/i.test(message || "")) return L("te veel verzoeken bij GitHub, even wachten", "too many requests to GitHub, wait a moment");
     return `${response.status}${message ? ` ${message}` : ""}`;
   }
 
@@ -12721,18 +12758,18 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   const gistUrl = gistId => `https://api.github.com/gists/${encodeURIComponent(gistId)}`;
 
   async function setToken(token, gistId) {
-    if (!/^(ghp_|github_pat_)\w+$/.test(token || "")) throw new Error("Dat lijkt geen GitHub-token (begint met ghp_ of github_pat_)");
+    if (!/^(ghp_|github_pat_)\w+$/.test(token || "")) throw new Error(L("Dat lijkt geen GitHub-token (begint met ghp_ of github_pat_)", "That doesn't look like a GitHub token (starts with ghp_ or github_pat_)"));
     const response = await request("GET", gistUrl(gistId), undefined, auth(token));
-    if (response.status !== 200) throw new Error(`Token werkt niet met deze gist: ${githubError(response)}`);
+    if (response.status !== 200) throw new Error(L(`Token werkt niet met deze gist: ${githubError(response)}`, `Token doesn't work with this gist: ${githubError(response)}`));
     setValue(TOKEN_KEY, token);
   }
 
   async function push(gistId, file, content) {
     const token = getValue(TOKEN_KEY);
-    if (!token) throw new Error("geen token op dit apparaat");
+    if (!token) throw new Error(L("geen token op dit apparaat", "no token on this device"));
     const response = await request("PATCH", gistUrl(gistId), { files: { [file]: { content } } },
       { ...auth(token), "Content-Type": "application/json" });
-    if (response.status !== 200) throw new Error(`versturen mislukt: ${githubError(response)}`);
+    if (response.status !== 200) throw new Error(L(`versturen mislukt: ${githubError(response)}`, `sending failed: ${githubError(response)}`));
     const sent = response.json && response.json.files && response.json.files[file];
     if (sent && sent.raw_url) setValue(RAW_KEY, rawBase(sent.raw_url));
   }
@@ -12753,24 +12790,24 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       if (!found.truncated) return found.content;
       const raw = await request("GET", found.raw_url);
       if (raw.status === 200) return raw.text;
-      throw new Error(`ophalen mislukt: ${githubError(raw)}`);
+      throw new Error(L(`ophalen mislukt: ${githubError(raw)}`, `fetching failed: ${githubError(raw)}`));
     }
     const rawUrl = rawBase(getValue(RAW_KEY));
     if (response.status === 403 && rawUrl) {
       const raw = await request("GET", `${rawUrl}${encodeURIComponent(file)}?t=${Date.now()}`);
       if (raw.status === 200) return raw.text;
     }
-    throw new Error(`ophalen mislukt: ${githubError(response)}`);
+    throw new Error(L(`ophalen mislukt: ${githubError(response)}`, `fetching failed: ${githubError(response)}`));
   }
 
   // Pc → phone: the token as a QR code linking to "…/web-app/#pwt=TOKEN&pwg=GIST". Drawn here into the
   // page's empty box, so the token doesn't pass through the page's events.
   function drawTokenQr(targetId, base, gistId) {
     const token = getValue(TOKEN_KEY);
-    if (!token) throw new Error("geen token op deze pc");
-    if (typeof qrcode !== "function") throw new Error("QR-bibliotheek niet geladen");
+    if (!token) throw new Error(L("geen token op deze pc", "no token on this PC"));
+    if (typeof qrcode !== "function") throw new Error(L("QR-bibliotheek niet geladen", "QR library not loaded"));
     const box = document.getElementById(targetId);
-    if (!box || !/^https:\/\/www\.(ea|easports)\.com\//.test(base || "")) throw new Error("onbekende pagina");
+    if (!box || !/^https:\/\/www\.(ea|easports)\.com\//.test(base || "")) throw new Error(L("onbekende pagina", "unknown page"));
     const qr = qrcode(0, "L");
     qr.addData(`${base}#pwt=${token}${gistId ? `&pwg=${encodeURIComponent(gistId)}` : ""}`);
     qr.make();
@@ -12789,7 +12826,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
     }
     const tell = data => document.dispatchEvent(new CustomEvent("pt-relay-token", { detail: JSON.stringify(data) }));
     const gistId = tokenLink[2] || "";
-    (gistId ? setToken(tokenLink[1], gistId) : Promise.reject(new Error("geen gist in de link"))).then(() => tell({ ok: true, gistId }), error => tell({ ok: false, error: error.message }));
+    (gistId ? setToken(tokenLink[1], gistId) : Promise.reject(new Error(L("geen gist in de link", "no gist in the link")))).then(() => tell({ ok: true, gistId }), error => tell({ ok: false, error: error.message }));
   }
 
   async function handle(message) {
@@ -12813,14 +12850,14 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
         return { topic: getValue(NTFY_KEY) || "" };
       case "setNtfy": {
         const topic = String(message.topic || "").trim();
-        if (topic && !NTFY_TOPIC.test(topic)) throw new Error("topic: 8–64 tekens, alleen letters, cijfers, - en _");
+        if (topic && !NTFY_TOPIC.test(topic)) throw new Error(L("topic: 8–64 tekens, alleen letters, cijfers, - en _", "topic: 8–64 characters, only letters, digits, - and _"));
         setValue(NTFY_KEY, topic || null);
         return { topic };
       }
       case "notify":
         return notify(message.title, message.text);
       default:
-        throw new Error(`onbekend verzoek ${message.type}`);
+        throw new Error(L(`onbekend verzoek ${message.type}`, `unknown request ${message.type}`));
     }
   }
 

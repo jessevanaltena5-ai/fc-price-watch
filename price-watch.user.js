@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.52.0
+// @version      2.52.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6777,6 +6777,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     d_coverage: ["Verkoopdata", "Sales data"],
     d_coverageValue: ["{hours}u van 72u · {days} dagprijzen", "{hours}h of 72h · {days} daily prices"],
     d_noData: ["?", "?"],
+    d_oldCheck: ["Oudere check zonder 72-uursdata: check opnieuw.", "Older check without 72-hour data: check again."],
     // FUTBIN checks and alerts
     fbAllFresh: ["FUTBIN: alles is al gecheckt (minder dan 45 min geleden)", "FUTBIN: everything was already checked (less than 45 min ago)"],
     fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
@@ -7096,7 +7097,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     let fresh = greens.filter(row => !previous.has(row.card.id));
     if (!fresh.length) return;
     // Check new greens against real FUTBIN sales first; only notify what is still green after that.
-    const unchecked = fresh.filter(row => !futbinSalesFor(row.card, state.platform)).map(row => row.card).slice(0, 5);
+    const unchecked = fresh.filter(row => futbinNeedsCheck(row.card, state.platform)).map(row => row.card).slice(0, 5);
     if (unchecked.length && !futbinState.busy) {
       await futbinCheckCards(unchecked, state.platform);
       const still = new Set(flipRows(flipData, state).filter(row => row.calc.status === "buy").map(row => row.card.id));
@@ -7527,6 +7528,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     return entry && Date.now() - entry.fetchedAt < FUTBIN_FRESH_MS ? entry : null;
   }
 
+  // Version of the stored analysis: a check made by an older version (e.g. without the 72 h data of v2) is
+  // still shown and used until it expires, but counts as "to check again" for 📊 and for the 🔔 alert.
+  const FUTBIN_STATS_VERSION = 2;
+  function futbinNeedsCheck(card, platform) {
+    const entry = futbinSalesFor(card, platform);
+    return !entry || entry.v !== FUTBIN_STATS_VERSION;
+  }
+
   function futbinHtml(url) {
     return futggRequestJson(url, true).then(text => new DOMParser().parseFromString(text, "text/html"));
   }
@@ -7749,7 +7758,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const store = futbinStore(FUTBIN_SALES_KEY);
     // Keep the store small: drop entries older than a day.
     Object.keys(store).forEach(key => { if (Date.now() - store[key].fetchedAt > 86400000) delete store[key]; });
-    store[`${card.id}|${futbinPlatform(platform)}`] = { ...stats, path: salesPath, fetchedAt: Date.now() };
+    store[`${card.id}|${futbinPlatform(platform)}`] = { ...stats, v: FUTBIN_STATS_VERSION, path: salesPath, fetchedAt: Date.now() };
     futbinSave(FUTBIN_SALES_KEY, store);
     return stats;
   }
@@ -7757,7 +7766,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Check cards one by one (cached ones skipped); stops on the first FUTBIN error (blocked/rate limit).
   async function futbinCheckCards(cards, platform) {
     if (futbinState.busy) return;
-    const todo = cards.filter(card => !futbinSalesFor(card, platform)).slice(0, FUTBIN_BATCH_MAX);
+    const todo = cards.filter(card => futbinNeedsCheck(card, platform)).slice(0, FUTBIN_BATCH_MAX);
     if (!todo.length) {
       showToast(ft("fbAllFresh"), true);
       return;
@@ -8085,6 +8094,13 @@ function priceWatchMain(SCRIPT_VERSION) {
         } else {
           pair(sales, ft("d_p90"), money(fb.p90));
           if (fb.trend != null) pair(sales, ft("d_vsYesterday"), pctOf(fb.trend), fb.trend < 0 ? "pt-flip-minus" : "pt-flip-plus");
+        }
+        if (futbinNeedsCheck(item, getFlip().platform) && !futbinState.busy) {
+          sales.appendChild(el("div", "pt-flip-note", ft("d_oldCheck")));
+          const again = button(ft("d_checkButton"), "pt-flip-small-btn");
+          again.title = ft("d_checkTitle");
+          again.addEventListener("click", () => futbinCheckCards([item], getFlip().platform));
+          sales.appendChild(again);
         }
         pair(sales, ft("d_checkedAt"), formatTime(fb.fetchedAt));
         sales.appendChild(externalLink(ft("d_salesLink"), `https://www.futbin.com${fb.path}?platform=${futbinPlatform(getFlip().platform)}`));

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.42.1
+// @version      2.42.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6682,7 +6682,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const pct = buy > 0 ? profit / buy * 100 : 0;
     const gap = buy > 0 ? card.now / buy - 1 : 1;
     const warnings = [];
-    if (lowOdd) warnings.push(`low ${priceFormat.format(card.low)} los van de trend`);
+    if (lowOdd) warnings.push(`low ${priceFormat.format(card.low)} was eenmalig (genegeerd)`);
     if (highOdd) warnings.push(`high ${priceFormat.format(card.high)} los van de trend (te weinig data?)`);
     if (avgOdd) warnings.push(`gemiddelde ${priceFormat.format(card.avg)} scheef`);
     const sparse = card.trend.length < 12;
@@ -6788,6 +6788,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     [refresh, runButton, watchButton].forEach(button => { button.type = "button"; });
     runButton.title = "Run-lijst van de aangevinkte kaarten: per kaart het marktfilter met max BIN = koopprijs. Zoeken en kopen doe je zelf.";
     watchButton.title = "Aangevinkte kaarten op de Spelers-tab, doel = koopprijs";
+    maxPrice.input.classList.add("pt-flip-max");
     controls.append(link, platform, maxPrice.box, minPct.box, dealsBox, refresh, runButton, watchButton);
     toolbar.append(heading, controls);
     card.appendChild(toolbar);
@@ -6809,7 +6810,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     wrap.appendChild(table);
     card.appendChild(wrap);
 
-    const ticked = new Map(); // id -> bool (user's own choice; default = 🟢/🟡)
+    // Only the cards you ticked/unticked yourself are remembered; all others follow the current signal
+    // (🟢/🟡 on, the rest off), also after a refresh or a changed filter.
+    const ticked = new Map(); // id -> bool, your own clicks
+    const isTicked = row => (ticked.has(row.card.id) ? ticked.get(row.card.id) : row.calc.status === "buy" || row.calc.status === "near");
     let shown = [];
 
     const update = mutate => {
@@ -6837,7 +6841,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     onlyDeals.addEventListener("change", () => update(state => { state.onlyDeals = onlyDeals.checked; }));
     refresh.addEventListener("click", () => loadFlipSheet(true));
 
-    const selectedRows = () => shown.filter(row => ticked.get(row.card.id));
+    const selectedRows = () => shown.filter(isTicked);
     runButton.addEventListener("click", async () => {
       const rows = selectedRows();
       if (!rows.length) return showToast("Vink eerst kaarten aan.", false);
@@ -6901,13 +6905,13 @@ function priceWatchMain(SCRIPT_VERSION) {
             : flipError ? `Ophalen mislukt: ${flipError}` : "Nog geen data · klik ↻ Ophalen";
 
       tbody.textContent = "";
-      shown.forEach(({ card: item, calc }) => {
-        if (!ticked.has(item.id)) ticked.set(item.id, (calc.status === "buy" || calc.status === "near") && !calc.risky);
+      shown.forEach(row => {
+        const { card: item, calc } = row;
         const tr = el("tr", `pt-flip-row-${calc.status}`);
         const tickCell = el("td", "pt-col-tick");
         const tick = el("input");
         tick.type = "checkbox";
-        tick.checked = ticked.get(item.id);
+        tick.checked = isTicked(row);
         tick.addEventListener("change", () => { ticked.set(item.id, tick.checked); updateCount(); });
         tickCell.appendChild(tick);
         const [icon, label] = FLIP_STATUS[calc.status];
@@ -6921,7 +6925,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         const nowCell = k(item.now);
         nowCell.classList.add("pt-flip-now");
         const profitCell = el("td", "pt-col-num " + (calc.profit > 0 ? "pt-flip-plus" : "pt-flip-minus"),
-          `${calc.profit > 0 ? "+" : ""}${priceFormat.format(calc.profit)} (${calc.pct.toFixed(1)}%)`);
+          `${calc.profit > 0 ? "+" : ""}${priceFormat.format(calc.profit)}`);
+        profitCell.appendChild(el("div", "pt-flip-pct", `${calc.pct.toFixed(1)}%`));
         profitCell.title = `Koop ${priceFormat.format(calc.buy)} → verkoop ${priceFormat.format(calc.sell)} − 5% belasting`;
         const spark = el("td", "pt-col-spark");
         spark.appendChild(flipSparkline(item.trend, item.trend.length < 2 || item.trend[item.trend.length - 1] >= item.trend[0]));
@@ -9508,6 +9513,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 /* Flip sheet (fodder.gg) */
 .pt-watch-view .pt-flip-card { margin-top: 0; }
 .pt-watch-view .pt-flip-link { width: 300px; }
+.pt-watch-view .pt-flip-max { width: 90px; }
+.pt-flip-pct { font-size: 12px; font-weight: 600; opacity: .8; }
 .pt-flip-wrap { overflow-x: auto; }
 .pt-flip-table { min-width: 980px; font-size: 14px; }
 .pt-flip-table td { height: auto; padding-top: 6px; padding-bottom: 6px; }

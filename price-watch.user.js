@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.51.0
+// @version      2.52.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6738,10 +6738,45 @@ function priceWatchMain(SCRIPT_VERSION) {
     help_pricesText: ["Blauw = berekend uit echte FUTBIN-verkopen. Wit = berekend uit de vraagprijzen op fodder.gg (minder zeker).", "Blue = based on real FUTBIN sales. White = based on asking prices on fodder.gg (less certain)."],
     help_trend: ["Trend", "Trend"],
     help_trendText: ["De PC-prijs van de laatste 72 uur, elke 15 min opgeslagen door je pc. Gele stip = nu. Nog geen historie? Dan de lijn van vandaag van fodder.gg.", "The PC price of the last 72 hours, saved by your pc every 15 min. Yellow dot = now. No history yet? Then today's line from fodder.gg."],
+    help_futbin: ["Echte verkopen", "Real sales"],
+    help_futbinText: ["Uit FUTBIN (PC): verkopen en mediaan per 24 uur over de laatste 72 uur (nieuwste eerst), plus de dagprijzen van de laatste weken. Dalen de echte verkoopprijzen al langer, dan telt een lage prijs niet als kans. ? = geen data voor die periode (dat is iets anders dan 0 verkopen).", "From FUTBIN (PC): sales and median per 24 hours over the last 72 hours (newest first), plus the daily prices of the last weeks. If real sale prices keep falling, a low price doesn't count as a chance. ? = no data for that period (not the same as 0 sales)."],
     help_details: ["Details", "Details"],
     help_detailsText: ["Klik op een rij voor alles: waarom deze score, de prijzen, de echte verkopen en alle waarschuwingen.", "Click a row for everything: why this score, the prices, the real sales and all warnings."],
     help_self: ["Zelf doen", "You decide"],
     help_selfText: ["Zoeken, kopen en verkopen doe je altijd zelf. Let op content en leaks (rond 19:00).", "You always search, buy and sell yourself. Watch out for content and leaks (around 19:00)."],
+    // FUTBIN 72 h
+    w_fbDownLong: ["Echte verkoopprijzen dalen al langer (FUTBIN)", "Real sale prices have been falling for a while (FUTBIN)"],
+    w_fbDemand: ["Minder verkopen dan de dagen ervoor ({pct})", "Fewer sales than the days before ({pct})"],
+    cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
+    miss_fbHistory: ["verloop van de echte verkopen (te weinig verkopen of data)", "course of the real sales (too few sales or data)"],
+    pos_cheapStable: ["Goedkoop, terwijl de echte verkoopprijzen stabiel blijven", "Cheap, while real sale prices hold"],
+    pos_salesRecovering: ["Echte verkoopprijzen herstellen", "Real sale prices are recovering"],
+    d_used: ["Gebruikt: {list}", "Used: {list}"],
+    src_history: ["fodder.gg-historie {span}", "fodder.gg history {span}"],
+    src_today: ["fodder.gg vandaag ({hours}u)", "fodder.gg today ({hours}h)"],
+    src_noFodder: ["geen fodder.gg-historie", "no fodder.gg history"],
+    src_h72: ["FUTBIN-verkopen {hours}u ({sales}×) + {days} dagprijzen", "FUTBIN sales {hours}h ({sales}×) + {days} daily prices"],
+    src_basic: ["FUTBIN-verkopen {window}", "FUTBIN sales {window}"],
+    src_noFutbin: ["nog geen FUTBIN", "no FUTBIN yet"],
+    d_salesWin: ["Verkopen per 24u", "Sales per 24h"],
+    d_medianWin: ["Mediaan per 24u", "Median per 24h"],
+    d_winTitle: ["Nieuwste eerst: laatste 24u · 24–48u geleden · 48–72u geleden. ? = geen (volledige) data voor die periode", "Newest first: last 24h · 24–48h ago · 48–72h ago. ? = no (complete) data for that period"],
+    d_course: ["Verloop verkoopprijs", "Sale price course"],
+    course_downLong: ["daalt al langer", "falling for a while"],
+    course_down: ["daalt", "falling"],
+    course_stable: ["stabiel", "stable"],
+    course_recovering: ["herstelt", "recovering"],
+    course_up: ["stijgt", "rising"],
+    course_unknown: ["onbekend (te weinig verkopen)", "unknown (too few sales)"],
+    d_demand: ["Vraag", "Demand"],
+    demand_falling: ["daalt: {now} vs {before}/dag ervoor", "falling: {now} vs {before}/day before"],
+    demand_rising: ["stijgt: {now} vs {before}/dag ervoor", "rising: {now} vs {before}/day before"],
+    demand_steady: ["normaal: {now} vs {before}/dag", "normal: {now} vs {before}/day"],
+    demand_unknown: ["onbekend", "unknown"],
+    d_week: ["Dagprijs: week vs week ervoor", "Daily price: week vs week before"],
+    d_coverage: ["Verkoopdata", "Sales data"],
+    d_coverageValue: ["{hours}u van 72u · {days} dagprijzen", "{hours}h of 72h · {days} daily prices"],
+    d_noData: ["?", "?"],
     // FUTBIN checks and alerts
     fbAllFresh: ["FUTBIN: alles is al gecheckt (minder dan 45 min geleden)", "FUTBIN: everything was already checked (less than 45 min ago)"],
     fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
@@ -6891,7 +6926,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       buy = roundDownToStep(futbin.p10);
       sell = roundDownToStep(futbin.p75);
       if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
-      if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(ft("w_saleFalling", { pct: flipPct(futbin.trend * 100) })); fbRisky = true; }
+      const fh = futbin.h72;
+      if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
+      else if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(ft("w_saleFalling", { pct: flipPct(futbin.trend * 100) })); fbRisky = true; }
+      if (fh && fh.demand === "falling") warnings.push(ft("w_fbDemand", { pct: flipPct(fh.volume * 100) }));
       if (futbin.listings24 >= 10 && futbin.sellThrough < 0.1) warnings.push(ft("w_lowSellThrough", { pct: `${Math.round(futbin.sellThrough * 100)}%` }));
       if (futbin.outliers.length) warnings.push(ft("w_outlierSale", { list: futbin.outliers.map(flipShort).join(", ") }));
     } else {
@@ -7313,20 +7351,31 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (platform !== "pc") return null; // the history and the score are PC-only
     const hist = calculateHistoricalMetrics(card.id);
     const fb = calc.futbin; // fresh FUTBIN sales (≥ 3) or null
+    const fh = fb && fb.h72 ? fb.h72 : null; // FUTBIN 72 h: course of real sale prices and demand
+    const fbState = fh ? fh.state : null;
     const now = card.now;
     const missing = [];
+    const positives = [];
     const useHist = !!hist && hist.samples >= 4 && hist.spanMs >= 3 * HOUR_MS;
     const today = card.trend; // fodder.gg hourly PC prices since 00:00 UTC (same source as the history)
 
     // A. Price position: now vs the normal level (72 h history, else today's hourly trend).
     let ref = null;
-    if (useHist) ref = { median: hist.median, low: hist.low, high: hist.high, basis: `historie ${formatSpan(hist.spanMs)}` };
-    else if (today.length >= 6) ref = { median: median(today), low: Math.min(...today), high: Math.max(...today), basis: `fodder-trend vandaag (${today.length} u)` };
+    if (useHist) ref = { median: hist.median, low: hist.low, high: hist.high };
+    else if (today.length >= 6) ref = { median: median(today), low: Math.min(...today), high: Math.max(...today) };
     let price = null;
     if (ref && ref.median > 0) {
       const sMedian = clamp100(50 - (now / ref.median - 1) * 500); // −10% → 100, +10% → 0
       const sRange = ref.high > ref.low ? clamp100((1 - (now - ref.low) / (ref.high - ref.low)) * 100) : 50;
       price = 0.65 * sMedian + 0.35 * sRange;
+      // A low fodder.gg price alone is no deal: if the real sale prices keep falling, "cheap" is just the
+      // market going down. Cheap while real sales hold or recover is what we look for.
+      if (fbState === "downLong") price = Math.min(price, 40);
+      else if (fbState === "down") price = Math.min(price, 60);
+      else if ((fbState === "stable" || fbState === "recovering") && price >= 60) {
+        price = Math.min(100, price + 10);
+        positives.push("cheapStable");
+      }
     } else missing.push("price");
 
     // B. Profit potential: buy/sell of the flip calc (FUTBIN P10/P75 when checked), 5% tax. Scored on
@@ -7354,7 +7403,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (fb) {
       const sSales = clamp100(fb.sales24 / 15 * 100);
       liquidity = fb.listings24 >= 3 ? 0.65 * sSales + 0.35 * clamp100(fb.sellThrough / 0.4 * 100) : sSales;
+      // Demand over 72 h: clearly fewer sales than the days before counts against, more sales for.
+      if (fh && fh.demand === "falling") liquidity *= 0.75;
+      else if (fh && fh.demand === "rising") liquidity = Math.min(100, liquidity * 1.1);
     } else missing.push("liquidity");
+    if (fb && !fbState) missing.push("fbHistory");
 
     // D. Trend & stability: 24 h / 72 h change, temporary dip vs structural fall, swings, FUTBIN sales trend.
     const change24 = useHist && hist.change24 != null ? hist.change24 : card.change / 100;
@@ -7372,9 +7425,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     else if (belowNormal && recovering) trend += 15;
     else if (belowNormal && change24 > -0.05) trend += 5;
     if (volatility != null) trend -= Math.max(0, Math.min(30, (volatility - 0.08) * 150));
-    if (fb && fb.trend != null) trend += fb.trend <= -0.05 ? -15 : fb.trend >= 0.03 ? 5 : 0;
+    // Real sale prices over 72 h (FUTBIN); older cached checks only have the day-vs-day trend.
+    if (fbState) trend += { downLong: -25, down: -12, stable: 5, recovering: 10, up: 5 }[fbState];
+    else if (fb && !fh && fb.trend != null) trend += fb.trend <= -0.05 ? -15 : fb.trend >= 0.03 ? 5 : 0;
+    if (fbState === "recovering") positives.push("salesRecovering");
     trend = clamp100(trend);
-    const direction = structural || change24 <= -0.05 || (change72 != null && change72 <= -0.1) ? "neg" : change24 >= 0.03 ? "pos" : "neutral";
+    const direction = structural || fbState === "downLong" || change24 <= -0.05 || (change72 != null && change72 <= -0.1) ? "neg" : change24 >= 0.03 ? "pos" : "neutral";
 
     // E. Data reliability: snapshots, span, age of the last snapshot, real sales, hourly points today.
     let reliability = 0;
@@ -7384,7 +7440,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const age = Date.now() - hist.lastAt;
       reliability += age < 30 * 60000 ? 10 : age < 2 * HOUR_MS ? 5 : 0;
     }
-    if (fb) reliability += Math.min(25, fb.salesInBase / 10 * 25) + 5;
+    // Real sales: how many (72 h when known) and how many of the 72 hours the sales data covers.
+    if (fb) reliability += fh ? Math.min(20, fh.sales72 / 15 * 20) + Math.min(10, fh.coverH / 72 * 10) : Math.min(25, fb.salesInBase / 10 * 25) + 5;
     reliability += Math.min(10, today.length / 12 * 10);
     reliability = clamp100(reliability);
 
@@ -7397,6 +7454,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (net <= 0) cap(25, "noProfit");
     else if (calc.status === "skip") cap(25, "underMin");
     else if (netNow <= 0) cap(35, "tooExpensive");
+    if (fbState === "downLong") cap(50, "fbDownLong");
     if (calc.risky) cap(60, "risky");
     if (reliability < 40) cap(55, "lowData");
     const restless = volatility != null && volatility > 0.2;
@@ -7406,14 +7464,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     const warnings = [];
     if (reliability < 40) warnings.push("lowData");
     if (restless) warnings.push("restless");
-    if (direction === "neg") warnings.push(structural ? "structural" : "negTrend");
+    if (direction === "neg" && fbState !== "downLong") warnings.push(structural ? "structural" : "negTrend");
     return {
       score,
       level: score >= 70 ? "high" : score >= 45 ? "mid" : "low",
       parts: { price, profit, liquidity, trend, reliability },
       missing, caps, warnings, direction,
       dip: belowNormal ? (structural ? "structural" : recovering ? "recovering" : "below") : "",
-      basis: ref ? ref.basis : "",
+      // Which data was really used (shown under the score in the details).
+      sources: {
+        fodder: useHist ? { kind: "history", spanMs: hist.spanMs } : today.length ? { kind: "today", hours: today.length } : null,
+        futbin: fb ? (fh ? { kind: "h72", hours: fh.coverH, sales: fh.sales72, days: fh.dailyDays } : { kind: "basic", window: fb.window }) : null
+      },
+      positives, fbState, fh,
       net, roi, netNow, roiNow, volatility, change24, change72, hist
     };
   }
@@ -7539,7 +7602,112 @@ function priceWatchMain(SCRIPT_VERSION) {
     };
   }
 
-  function futbinAnalyse(doc) {
+  // --- 72 h of real FUTBIN sales, from the same sales page (no extra request) -------------------------
+  // Next to the auctions table (last ~500 auctions, sold or not) the page carries two charts per platform:
+  // "live" = the last 500 real sales with exact times (the same sales as the table's "Sold for", but they
+  // reach further back) and "daily" = the average sale price per full day (~7 weeks). Only the chart of
+  // the requested platform is read (PC for PC). A 24 h window counts only when the data really reaches
+  // back that far; otherwise it is unknown (null), never "0 sales".
+  const FUTBIN_LIVE_CAP = 500;
+  function futbinCharts(doc, platform) {
+    const charts = {};
+    doc.querySelectorAll(".sales-graph-wrapper").forEach(wrapper => {
+      const kind = wrapper.classList.contains("live") ? "live" : wrapper.classList.contains("daily") ? "daily" : "";
+      if (!kind || !wrapper.classList.contains(futbinPlatform(platform))) return;
+      const script = wrapper.querySelector("script");
+      const text = script ? script.textContent : "";
+      const start = text.indexOf("{");
+      const end = text.lastIndexOf("}");
+      if (start < 0 || end <= start) return;
+      try {
+        const config = JSON.parse(text.slice(start, end + 1));
+        const data = config.series && config.series[0] && Array.isArray(config.series[0].data) ? config.series[0].data : [];
+        charts[kind] = data.map(point => [Number(point.x), Number(point.y)])
+          .filter(([x, y]) => x > 0 && y > 0).sort((a, b) => a[0] - b[0]);
+      } catch (_) { /* this chart is left out */ }
+    });
+    return charts;
+  }
+
+  // Windows 0–24 h, 24–48 h and 48–72 h back from now: sales count and median sale price (live chart),
+  // listings and sell-through (table); then the course of the real sale prices and of demand.
+  function futbinHistory72(doc, platform, rows, now) {
+    const charts = futbinCharts(doc, platform);
+    const live = charts.live || [];
+    const daily = charts.daily || [];
+    if (!live.length && !daily.length) return null;
+    const H = 60 * 60 * 1000;
+    const complete = live.length > 0 && live.length < FUTBIN_LIVE_CAP; // fewer than 500: every sale FUTBIN has
+    const oldest = live.length ? live[0][0] : now;
+    const middle = values => {
+      const sorted = [...values].sort((a, b) => a - b);
+      const mid = futbinPct(sorted, 0.5);
+      const kept = sorted.length >= 5 ? sorted.filter(value => value >= mid * 0.75 && value <= mid * 1.35) : sorted;
+      return kept.length >= 3 ? futbinPct(kept, 0.5) : null;
+    };
+    // Table times are read as local time: its windows are counted back from its own newest row.
+    const tableEnd = rows.length ? Math.max(...rows.map(row => row.at)) + 60000 : 0;
+    const tableOldest = rows.length ? Math.min(...rows.map(row => row.at)) : Infinity;
+    const windows = [0, 1, 2].map(k => {
+      const from = now - (k + 1) * 24 * H;
+      const to = now - k * 24 * H;
+      const covered = live.length > 0 && (complete || oldest <= from);
+      // Partly covered (busy card, 500 sales reach back into this window): its sale prices are real and
+      // count for the median (≥ 5 sales), but the number of sales is incomplete, so that stays unknown.
+      const partial = !covered && live.length > 0 && oldest < to;
+      const prices = covered || partial ? live.filter(([x]) => x >= from && x < to).map(point => point[1]) : [];
+      const tableFrom = tableEnd - (k + 1) * 24 * H;
+      const inTable = rows.filter(row => row.at >= tableFrom && row.at < tableEnd - k * 24 * H);
+      const tableCovered = rows.length > 0 && tableOldest <= tableFrom;
+      return {
+        covered,
+        partial,
+        sales: covered ? prices.length : null,
+        median: covered || (partial && prices.length >= 5) ? middle(prices) : null,
+        listings: tableCovered ? inTable.length : null,
+        sellThrough: tableCovered && inTable.length ? inTable.filter(row => row.sold > 0).length / inTable.length : null
+      };
+    });
+    const [w0, w1, w2] = windows;
+    const ratio = (a, b) => (a != null && b != null && b > 0 ? a / b - 1 : null);
+    const vs24 = ratio(w0.median, w1.median); // last 24 h vs the 24 h before
+    const older = w1.median != null ? middle(live.filter(([x]) => x >= now - 72 * H && x < now - 24 * H).map(point => point[1])) : null;
+    const vs48 = ratio(w0.median, older); // last 24 h vs the 48 h before
+    const step = ratio(w1.median, w2.median); // 24–48 h vs 48–72 h
+    const before = w1.covered && w2.covered ? (w1.sales + w2.sales) / 2 : w1.covered ? w1.sales : null;
+    const volume = w0.covered && before != null && before >= 2 ? w0.sales / before - 1 : null;
+    // Daily averages (full days only): days in a row lower than the day before, and last week vs the week before.
+    let daysDown = 0;
+    for (let i = daily.length - 1; i > 0 && daily[i][1] < daily[i - 1][1] * 0.99; i--) daysDown++;
+    const mean = list => list.reduce((sum, value) => sum + value, 0) / list.length;
+    const week = daily.length >= 14 ? mean(daily.slice(-7).map(point => point[1])) / mean(daily.slice(-14, -7).map(point => point[1])) - 1 : null;
+    const dailyLong = daysDown >= 3 && week != null && week <= -0.08;
+    let state = null; // null = too few sales or too little data (unknown, not negative)
+    if (w0.median != null && w1.median != null) {
+      const longDown = (step != null && vs24 <= -0.02 && step <= -0.02 && ratio(w0.median, w2.median) <= -0.06)
+        || dailyLong
+        || (vs48 != null && vs48 <= -0.1 && volume != null && volume <= -0.3);
+      if (longDown) state = "downLong";
+      else if (vs24 <= -0.05 || (vs48 != null && vs48 <= -0.06)) state = "down";
+      else if (step != null && step <= -0.03 && vs24 >= 0.02) state = "recovering";
+      else if (vs24 >= 0.05) state = "up";
+      else state = "stable";
+    } else if (dailyLong) {
+      state = "downLong"; // too few recent sales, but the daily averages clearly keep falling
+    }
+    return {
+      coverH: live.length ? Math.min(72, complete ? 72 : Math.max(0, (now - oldest) / H)) : 0,
+      liveCount: live.length,
+      liveSince: live.length ? oldest : null,
+      dailyDays: daily.length,
+      windows, vs24, vs48, step, volume, week, daysDown, state,
+      demand: volume == null ? null : volume <= -0.4 ? "falling" : volume >= 0.4 ? "rising" : "steady",
+      salesBefore: before,
+      sales72: windows.reduce((sum, w) => sum + (w.sales || 0), 0)
+    };
+  }
+
+  function futbinAnalyse(doc, platform = "pc", now = Date.now()) {
     const rows = [...doc.querySelectorAll("table.auctions-table tbody tr")].map(tr => {
       const cells = tr.querySelectorAll("td");
       if (cells.length < 3) return null;
@@ -7565,7 +7733,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       p10: base.p10, p25: base.p25, median: base.median, p75: base.p75, p90: base.p90,
       outliers: base.outliers,
       salesInBase: base.sales,
-      newest
+      newest,
+      h72: futbinHistory72(doc, platform, rows, now)
     };
   }
 
@@ -7575,7 +7744,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     await new Promise(resolve => window.setTimeout(resolve, 1200 + Math.random() * 800));
     const salesPath = path.replace("/player/", "/sales/");
     const doc = await futbinHtml(`https://www.futbin.com${salesPath}?platform=${futbinPlatform(platform)}`);
-    const stats = futbinAnalyse(doc);
+    const stats = futbinAnalyse(doc, platform);
     if (!stats) return { notFound: true };
     const store = futbinStore(FUTBIN_SALES_KEY);
     // Keep the store small: drop entries older than a day.
@@ -7739,7 +7908,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       minPct.input.title = ft("minPctTitle");
       HEADERS.forEach(([key], i) => { headCells[i].textContent = key ? ft(key) : ""; });
       help.textContent = "";
-      ["score", "dot", "prices", "trend", "details", "self"].forEach(key => {
+      ["score", "dot", "prices", "trend", "futbin", "details", "self"].forEach(key => {
         const line = el("div", "pt-flip-help-line");
         line.append(el("b", "", ft(`help_${key}`)), el("span", "", ft(`help_${key}Text`)));
         help.appendChild(line);
@@ -7830,10 +7999,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       return box;
     };
     // One label + value per line, never wrapped (long text is cut off with … and shown on hover).
-    const pair = (box, label, value, className) => {
+    const pair = (box, label, value, className, title) => {
       const line = el("div", "pt-flip-kv");
       const left = el("span", "pt-muted pt-flip-kv-label", label);
-      left.title = label;
+      left.title = title || label;
+      if (title) line.title = title;
       line.append(left, el("span", "pt-flip-kv-value" + (className ? ` ${className}` : ""), value));
       box.appendChild(line);
     };
@@ -7861,6 +8031,15 @@ function priceWatchMain(SCRIPT_VERSION) {
         });
         if (opp.missing.length) box.appendChild(el("div", "pt-flip-note", ft("d_unknown", { list: opp.missing.map(code => ft(`miss_${code}`)).join(", ") })));
         if (opp.caps.length) box.appendChild(el("div", "pt-flip-note", ft("d_capped", { list: opp.caps.map(code => ft(`cap_${code}`)).join(", ") })));
+        opp.positives.forEach(code => box.appendChild(el("div", "pt-flip-note pt-flip-plus-note", `✓ ${ft(`pos_${code}`)}`)));
+        const src = opp.sources;
+        const used = [
+          !src.fodder ? ft("src_noFodder") : src.fodder.kind === "history" ? ft("src_history", { span: formatSpan(src.fodder.spanMs) }) : ft("src_today", { hours: src.fodder.hours }),
+          !src.futbin ? ft("src_noFutbin") : src.futbin.kind === "h72"
+            ? ft("src_h72", { hours: Math.round(src.futbin.hours), sales: src.futbin.sales, days: src.futbin.days })
+            : ft("src_basic", { window: src.futbin.window })
+        ];
+        box.appendChild(el("div", "pt-flip-note", ft("d_used", { list: used.join(" · ") })));
         grid.appendChild(box);
       }
 
@@ -7891,8 +8070,22 @@ function priceWatchMain(SCRIPT_VERSION) {
         pair(sales, ft("d_p10"), money(fb.p10), "pt-flip-fbval");
         pair(sales, ft("d_median"), money(fb.median));
         pair(sales, ft("d_p75"), money(fb.p75), "pt-flip-fbval");
-        pair(sales, ft("d_p90"), money(fb.p90));
-        if (fb.trend != null) pair(sales, ft("d_vsYesterday"), pctOf(fb.trend), fb.trend < 0 ? "pt-flip-minus" : "pt-flip-plus");
+        const fh = fb.h72;
+        if (fh) {
+          const cell = (w, value) => (value != null ? value : ft("d_noData")); // ? = no (complete) data for that window
+          pair(sales, ft("d_salesWin"), fh.windows.map(w => cell(w, w.sales)).join(" · "), "", ft("d_winTitle"));
+          pair(sales, ft("d_medianWin"), fh.windows.map(w => cell(w, w.median != null ? flipShort(w.median) : null)).join(" · "), "", ft("d_winTitle"));
+          const course = fh.state || "unknown";
+          pair(sales, ft("d_course"), ft(`course_${course}`),
+            course === "downLong" || course === "down" ? "pt-flip-minus" : course === "recovering" || course === "up" ? "pt-flip-plus" : "");
+          pair(sales, ft("d_demand"), fh.demand ? ft(`demand_${fh.demand}`, { now: fh.windows[0].sales, before: String(Math.round(fh.salesBefore * 10) / 10).replace(".", flipLang() === "en" ? "." : ",") }) : ft("demand_unknown"),
+            fh.demand === "falling" ? "pt-flip-minus" : fh.demand === "rising" ? "pt-flip-plus" : "");
+          if (fh.week != null) pair(sales, ft("d_week"), pctOf(fh.week), fh.week < 0 ? "pt-flip-minus" : "pt-flip-plus");
+          pair(sales, ft("d_coverage"), ft("d_coverageValue", { hours: Math.round(fh.coverH), days: fh.dailyDays }), fh.coverH < 72 ? "pt-flip-warn-text" : "");
+        } else {
+          pair(sales, ft("d_p90"), money(fb.p90));
+          if (fb.trend != null) pair(sales, ft("d_vsYesterday"), pctOf(fb.trend), fb.trend < 0 ? "pt-flip-minus" : "pt-flip-plus");
+        }
         pair(sales, ft("d_checkedAt"), formatTime(fb.fetchedAt));
         sales.appendChild(externalLink(ft("d_salesLink"), `https://www.futbin.com${fb.path}?platform=${futbinPlatform(getFlip().platform)}`));
       } else {
@@ -10668,6 +10861,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-bar-value { text-align: right; font-variant-numeric: tabular-nums; color: #c9d3e0; }
 .pt-flip-note { margin-top: 6px; font-size: 12px; color: #9aa6b8; }
 .pt-flip-warn-line { padding: 2px 0; color: #f4a35d; }
+.pt-flip-warn-text { color: #f4a35d; }
+.pt-flip-plus-note { color: #27d98b; }
 .pt-watch-view a.pt-flip-link-out { display: inline-block; margin-top: 6px; margin-right: 12px; color: #63b3ff; text-decoration: none; font-size: 12px; }
 .pt-watch-view a.pt-flip-link-out:hover { color: #fff; }
 .pt-flip-small-btn { margin-top: 6px; padding: 4px 10px; font-size: 12px; }

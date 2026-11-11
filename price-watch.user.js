@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.64.0
+// @version      2.64.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6108,14 +6108,18 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
+  const FODDER_MARKET_CHEAPEST = 10;
   function fodderMarketPrice(rating) {
     const entry = fodderMarket && fodderMarket.prices[`${rating}-0`];
     if (entry && entry.min > 0) return entry;
-    // Standalone: lowest / median / average FUT.GG price of all regular cards of this rating.
+    // Standalone: the fodder price of this rating = the 10 cheapest regular cards (like FUTBIN's fodder
+    // price), FUT.GG prices. Lowest, median and average of those 10; all cards would pull in the meta cards.
     const prices = fodderCandidates(rating).filter(card => card.id <= 0xFFFFFF)
-      .map(card => (geniePrice(card.id) || {}).price || 0).filter(price => price > 0).sort((a, b) => a - b);
+      .map(card => (geniePrice(card.id) || {}).price || 0).filter(price => price > 0).sort((a, b) => a - b).slice(0, FODDER_MARKET_CHEAPEST);
     if (!prices.length) return null;
-    return { min: prices[0], med: prices[prices.length >> 1], avg: Math.round(prices.reduce((sum, price) => sum + price, 0) / prices.length), n: prices.length, futgg: true };
+    const mid = prices.length >> 1;
+    return { min: prices[0], med: prices.length % 2 ? prices[mid] : Math.round((prices[mid - 1] + prices[mid]) / 2),
+      avg: Math.round(prices.reduce((sum, price) => sum + price, 0) / prices.length), n: prices.length, futgg: true };
   }
 
   // --- Cheapest players per rating (like FUTBIN's "cheapest by rating"), from FUT Genie prices ---
@@ -6501,7 +6505,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       inventory.disabled = !!fodderInventoryProgress;
       inventory.textContent = fodderInventoryProgress ? `📦 ${fodderInventoryProgress}` : "📦 Voorraad bijwerken";
       status.textContent = !genie()
-        ? `FUT.GG-prijzen (${futggPlatform === "console" ? "console" : "PC"}) per rating: laagste, mediaan en gemiddelde van alle gewone kaarten${futggPricesAt ? ` · ${formatTime(futggPricesAt)}` : ""}`
+        ? `FUT.GG-prijzen (${futggPlatform === "console" ? "console" : "PC"}) per rating: laagste, mediaan en gemiddelde van de 10 goedkoopste gewone kaarten${futggPricesAt ? ` · ${formatTime(futggPricesAt)}` : ""}`
         : fodderMarketLoading ? "Fodderprijzen ophalen bij FUT Genie…"
           : fodderMarket
             ? `FUT Genie-marktprijzen (PC) per rating, gewone kaarten · bijgewerkt ${fodderMarket.lastUpdated ? formatDayTime(new Date(fodderMarket.lastUpdated).getTime()) : "onbekend"}`
@@ -11292,13 +11296,53 @@ function priceWatchMain(SCRIPT_VERSION) {
     draw();
     document.body.appendChild(panel);
   }
-  document.addEventListener("contextmenu", event => {
-    const target = event.target instanceof Element ? event.target.closest(HOTKEY_TARGETS) : null;
+  // Right-click on a button: EA's buttons react to the right mouse button as if it were a left click (a
+  // right-click on "List Now" would list the card!). So the right button never reaches a button: every
+  // right-button pointer/mouse event on a button is stopped here (capture, before EA and before FUT Genie's
+  // own hotkey menu), and the right-click only opens our "Toets toewijzen" menu.
+  // One right-click = one menu: pointerup and contextmenu both belong to the same press ("gesture").
+  let hotkeyGesture = 0;
+  let hotkeyGestureAt = 0;
+  let hotkeyOpenedGesture = -1;
+  const hotkeyOpenOnce = (target, x, y) => {
+    if (hotkeyOpenedGesture === hotkeyGesture) return;
+    hotkeyOpenedGesture = hotkeyGesture;
+    openHotkeyMenuFor(target, x, y, null);
+  };
+  const hotkeyRightTarget = event => {
+    if (event.button !== 2 || !(event.target instanceof Element)) return null;
+    const target = event.target.closest(HOTKEY_TARGETS);
+    return target && !target.closest(".pt-hk-menu, .pt-hk-panel") ? target : null;
+  };
+  ["pointerdown", "mousedown", "pointerup", "mouseup", "auxclick", "click"].forEach(type => {
+    window.addEventListener(type, event => {
+      const target = hotkeyRightTarget(event);
+      if (!target) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (type === "pointerdown") { hotkeyGesture++; hotkeyGestureAt = Date.now(); }
+      if (type === "pointerup") {
+        const x = event.clientX;
+        const y = event.clientY;
+        window.setTimeout(() => hotkeyOpenOnce(target, x, y), 0);
+      }
+    }, true);
+  });
+  window.addEventListener("contextmenu", event => {
+    if (!(event.target instanceof Element) || !event.target.closest(HOTKEY_TARGETS) || event.target.closest(".pt-hk-menu, .pt-hk-panel")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (Date.now() - hotkeyGestureAt > 1500) hotkeyGesture++; // menu key / no pointer events: a new press
+    hotkeyOpenOnce(event.target, event.clientX, event.clientY);
+  }, true);
+  function openHotkeyMenuFor(node, clientX, clientY, event) {
+    const target = node instanceof Element ? node.closest(HOTKEY_TARGETS) : null;
     if (!target || target.closest(".pt-hk-menu, .pt-hk-panel")) return;
     const label = hotkeyLabel(target);
     if (!label) return;
-    event.preventDefault();
+    if (event) event.preventDefault();
     closeHotkeyMenu();
+    event = { clientX, clientY };
     const classes = hotkeyClasses(target);
     const name = String(target.textContent || target.title || "").replace(/\s+/g, " ").trim().slice(0, 40);
     const bound = getHotkeys().filter(binding => binding.label === label);
@@ -11319,7 +11363,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (bound.length) item("✕ Toets verwijderen", () => { saveHotkeys(getHotkeys().filter(binding => binding.label !== label)); showToast("Sneltoets verwijderd", true); });
     item("☰ Alle sneltoetsen…", openHotkeyPanel);
     document.body.appendChild(hotkeyMenu);
-  }, true);
+  }
   document.addEventListener("mousedown", event => {
     if (hotkeyMenu && !(event.target instanceof Element && event.target.closest(".pt-hk-menu"))) closeHotkeyMenu();
   }, true);

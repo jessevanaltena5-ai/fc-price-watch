@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.63.0
+// @version      2.64.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1471,6 +1471,20 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Distance
   // ---------------------------------------------------------------------------
 
+  // The distance as a small bar + text (layout C): full green = at or under target, amber = near, grey = far.
+  function distanceBar(node, state) {
+    node.textContent = "";
+    node.className = `${state.className} pt-dist`;
+    node.title = state.title;
+    const track = el("span", "pt-dist-track");
+    const fill = el("i");
+    const pct = state.percent;
+    fill.style.width = `${pct == null ? 0 : pct <= 0 ? 100 : Math.max(8, Math.round(100 - pct * 4))}%`;
+    track.appendChild(fill);
+    node.append(track, el("b", "pt-dist-text", pct == null ? "—" : `${pct > 0 ? "+" : ""}${pct.toFixed(1)}%`));
+    node.title = `${state.title}${pct == null ? "" : ` · ${state.text}`}`;
+  }
+
   function distanceState(target, current) {
     if (target === null || current === null) {
       return { percent: null, text: "—", className: "pt-distance", title: target === null ? "Vul een PC-instapdoel in om de afstand te berekenen" : "Nog geen FUT Genie-prijs" };
@@ -1962,7 +1976,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const transfer = el("button", "pt-watch-refresh", "⇄ Overzetten");
     transfer.type = "button";
     transfer.title = "Lijst + prijzen naar je telefoon (QR-code) of een code van je pc plakken";
-    const walk = el("button", "pt-watch-refresh", "▶ Alles afgaan");
+    const walk = el("button", "pt-watch-refresh pt-primary", "▶ Alles afgaan");
     walk.type = "button";
     walk.title = "Zet speler na speler klaar op de transfermarkt (balk met \"Volgende\"): jouw PC-instapdoel als max BIN, leeg = auto uit de Genie-prijs. Duurste eerst.";
     walk.addEventListener("click", async () => {
@@ -2222,9 +2236,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 
         const state = distanceState(entry.target, price);
         row.__ptPercent = state.percent;
-        distance.textContent = state.text;
-        distance.className = state.className;
-        distance.title = state.title;
+        distanceBar(distance, state);
+        row.classList.toggle("pt-row-hit", state.percent != null && state.percent <= 0);
+        row.classList.toggle("pt-row-near", state.percent != null && state.percent > 0 && state.percent <= NEAR_PERCENT);
       };
 
       input.addEventListener("input", () => {
@@ -2277,6 +2291,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       priceHeader.textContent = live ? "Genie (PC)" : "Prijs";
       priceHeader.title = live ? "" : "Groen = laagste BIN die je zelf zocht (🏷️), wit = van je pc";
       const hits = list.filter(entry => (rowsById.get(entry.definitionId).row.__ptPercent ?? Infinity) <= 0).length;
+      setTabBadge("watch", hits, true);
       const summary = `${list.length} speler(s)` + (hits ? ` · ${hits} op of onder doel` : "");
       if (pcDevice()) {
         status.textContent = futggPricesAt
@@ -6547,9 +6562,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         // Distance: cheapest player vs your target (green = the market is at or under your target).
         const distanceCell = el("td", "pt-col-distance");
         const state2 = distanceState(target.max || null, cheapest);
-        const pill = el("span", state2.className, state2.text);
-        pill.title = target.max ? state2.title : "Vul een doel in om de afstand te zien";
+        const pill = el("span");
+        distanceBar(pill, state2);
+        if (!target.max) pill.title = "Vul een doel in om de afstand te zien";
         distanceCell.appendChild(pill);
+        row.classList.toggle("pt-row-hit", !!target.max && state2.percent != null && state2.percent <= 0);
+        row.classList.toggle("pt-row-near", !!target.max && state2.percent != null && state2.percent > 0 && state2.percent <= NEAR_PERCENT);
 
         const buttonCell = el("td", "pt-col-level");
         const max = target.max || null;
@@ -8945,6 +8963,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       futbinButton.title = ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
 
       const count = key => shown.filter(row => row.calc.status === key).length;
+      setTabBadge("flip", count("buy"), true);
       const history = getFlipHistory();
       const historyText = state.platform !== "pc" ? ""
         : history && history.times.length
@@ -9099,6 +9118,16 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   const TAB_KEY = "pt_watch_tab_v1";
 
+  // Small counter on a tab (what needs attention there); 0 or nothing hides it.
+  let tabBadges = {};
+  function setTabBadge(key, count, good) {
+    const button = tabBadges[key];
+    const badge = button && button.querySelector(".pt-tab-badge");
+    if (!badge) return;
+    badge.textContent = count > 0 ? String(count) : "";
+    badge.classList.toggle("pt-tab-badge-good", !!good);
+  }
+
   function buildTabs(root, sections) {
     const bar = el("div", "pt-tabs");
     const buttons = {};
@@ -9119,10 +9148,22 @@ function priceWatchMain(SCRIPT_VERSION) {
     [["flip", "Flip"], ["watch", "Spelers"], ["fodder", "Fodder"], ["lists", "Lijsten"], ["transfers", "Transfers"]].forEach(([key, label]) => {
       const button = el("button", "pt-tab", label);
       button.type = "button";
+      button.appendChild(el("em", "pt-tab-badge"));
       button.addEventListener("click", () => show(key));
       buttons[key] = button;
       bar.appendChild(button);
     });
+    tabBadges = buttons;
+    const device = el("span", "pt-tab-device");
+    bar.append(el("span", "pt-tab-spacer"), device);
+    const drawDevice = () => {
+      device.textContent = `${pcDevice() ? "💻 Pc" : "📱 Telefoon"}${futggPricesAt ? ` · FUT.GG-prijzen ${formatTime(futggPricesAt)}` : ""}`;
+      device.title = pcDevice()
+        ? "Dit apparaat is de pc: auto-check, historie, meldingen en sync naar je telefoon draaien hier. Prijzen van FUT.GG."
+        : "Dit apparaat leest mee met je pc (prijzen en lijsten via je gist).";
+    };
+    drawDevice();
+    listeners.add(drawDevice);
     root.insertBefore(bar, root.firstChild);
     let initial = "flip";
     try {
@@ -9256,7 +9297,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     );
     const importButton = el("button", "pt-watch-refresh", "+ Tip plakken");
     importButton.type = "button";
-    const massBidButton = el("button", "pt-watch-refresh", "🎯 Biedlijst maken");
+    const massBidButton = el("button", "pt-watch-refresh pt-primary", "🎯 Biedlijst maken");
     massBidButton.type = "button";
     massBidButton.title = "Mass bidding: kies kaarten op rating en FUT.GG PC-prijs";
     toolbar.append(heading, massBidButton, importButton);
@@ -11932,6 +11973,62 @@ button.pt-hk-item:hover { background: rgba(76, 180, 255, .14); }
 button.pt-hk-x { appearance: none; border: 0; background: none; color: #8392ab; cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 6px; }
 button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-hk-flash { outline: 2px solid #4cb4ff !important; outline-offset: 2px; }
+
+/* ==== Price Watch theme C: all tabs like the Flip tab ==== */
+.pt-watch-view { --c-bg: #0e1626; --c-panel: rgba(7, 12, 22, .65); --c-line: rgba(148, 178, 230, .10); --c-line2: rgba(148, 178, 230, .20);
+  --c-text: #e8eef9; --c-muted: #8392ab; --c-faint: #56637b; --c-accent: #4cb4ff; --c-good: #2fe39a; --c-warn: #f5c451; --c-risk: #ff9f5a; --c-bad: #ff6b7d; }
+.pt-watch-view .pt-tabs { display: flex; align-items: center; gap: 2px; max-width: 1280px; margin: 0 auto 12px; padding: 0 6px; border-bottom: 1px solid var(--c-line); background: none; }
+.pt-watch-view button.pt-tab { appearance: none; position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 10px 14px 11px; margin: 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; color: var(--c-muted); font: 700 14px inherit; font-family: inherit; letter-spacing: .3px; cursor: pointer; text-transform: none; }
+.pt-watch-view button.pt-tab:hover { color: var(--c-text); background: none; }
+.pt-watch-view button.pt-tab.pt-tab-active { color: var(--c-text); border-bottom-color: var(--c-accent); background: none; }
+.pt-watch-view .pt-tab-badge { font-style: normal; font-size: 11px; font-weight: 800; padding: 1px 7px; border-radius: 999px; background: rgba(255, 255, 255, .08); color: var(--c-muted); }
+.pt-watch-view .pt-tab-badge:empty { display: none; }
+.pt-watch-view .pt-tab-badge-good { background: rgba(47, 227, 154, .14); color: var(--c-good); }
+.pt-watch-view .pt-tab-spacer { flex: 1; }
+.pt-watch-view .pt-tab-device { font-size: 12px; color: var(--c-muted); padding: 0 4px; white-space: nowrap; }
+.pt-watch-view .pt-watch-card { max-width: 1280px; background: linear-gradient(180deg, rgba(19, 29, 49, .94), rgba(11, 18, 31, .97)); border: 1px solid rgba(148, 178, 230, .18); border-radius: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, .40), inset 0 1px 0 rgba(255, 255, 255, .04); padding: 14px 16px 12px; color: var(--c-text); }
+.pt-watch-view .pt-watch-toolbar { gap: 10px 14px; margin-bottom: 12px; align-items: center; }
+.pt-watch-view .pt-watch-title { font-size: 22px; font-weight: 800; letter-spacing: .3px; color: var(--c-text); margin: 0 0 2px; }
+.pt-watch-view .pt-watch-status { font-size: 12px; color: var(--c-muted); }
+.pt-watch-view button.pt-watch-refresh { height: 32px; padding: 0 13px; border-radius: 9px; border: 1px solid var(--c-line2); background: rgba(255, 255, 255, .03); color: var(--c-text); font-size: 13px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.pt-watch-view button.pt-watch-refresh:hover:not(:disabled) { border-color: var(--c-accent); color: #fff; }
+.pt-watch-view button.pt-watch-refresh.pt-primary, .pt-watch-view button.pt-watch-refresh.pt-cycle-btn:not(.pt-fx-btn) { background: linear-gradient(180deg, #58bcff, #2f97e6); border-color: transparent; color: #04111f; }
+.pt-watch-view button.pt-level-btn.pt-cycle-btn { height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid rgba(76, 180, 255, .4); background: rgba(76, 180, 255, .12); color: var(--c-text); font-size: 12.5px; font-weight: 600; }
+.pt-watch-view button.pt-level-btn.pt-cycle-btn.pt-current { background: linear-gradient(180deg, #58bcff, #2f97e6); color: #04111f; border-color: transparent; }
+.pt-watch-view button.pt-icon-btn { width: 26px; height: 24px; border-radius: 7px; border: 1px solid var(--c-line); background: none; color: var(--c-muted); }
+.pt-watch-view button.pt-icon-btn:hover { border-color: var(--c-accent); color: var(--c-text); }
+.pt-watch-view button.pt-link-btn { color: var(--c-accent); }
+.pt-watch-view select.pt-stock-select, .pt-watch-view input.pt-target-input { height: 30px; border-radius: 8px; border: 1px solid var(--c-line2); background: rgba(0, 0, 0, .3); color: var(--c-text); font-size: 13px; }
+.pt-watch-view input.pt-target-input:focus, .pt-watch-view select.pt-stock-select:focus { border-color: rgba(76, 180, 255, .55); outline: none; }
+.pt-watch-view .pt-goal { color: var(--c-muted); font-size: 12.5px; }
+.pt-watch-view .pt-watch-table { font-size: 13.5px; border-collapse: separate; border-spacing: 0; }
+.pt-watch-view .pt-watch-table th { font-size: 10.5px; letter-spacing: 1px; color: var(--c-faint); padding: 8px 10px; border-bottom: 1px solid var(--c-line); background: rgba(7, 12, 22, .45); }
+.pt-watch-view .pt-watch-table td { height: auto; padding: 8px 10px; border-bottom: 1px solid rgba(148, 178, 230, .08); }
+.pt-watch-view .pt-watch-table tbody tr:nth-child(even) { background: none; }
+.pt-watch-view .pt-watch-table tbody tr:hover td { background: rgba(255, 255, 255, .025); }
+.pt-watch-view .pt-watch-table tbody tr.pt-row-hit td { background: rgba(47, 227, 154, .045); }
+.pt-watch-view .pt-watch-table tbody tr.pt-row-hit td:first-child { box-shadow: inset 3px 0 0 var(--c-good); }
+.pt-watch-view .pt-watch-table tbody tr.pt-row-near td:first-child { box-shadow: inset 3px 0 0 var(--c-warn); }
+.pt-watch-view .pt-watch-table td.pt-col-price { color: var(--c-text); }
+.pt-watch-view .pt-watch-table td.pt-col-rarity, .pt-watch-view .pt-muted { color: var(--c-muted); }
+.pt-watch-view .pt-dist { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; background: none; border: 0; padding: 0; }
+.pt-watch-view .pt-dist-track { width: 72px; height: 6px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; display: inline-block; }
+.pt-watch-view .pt-dist-track i { display: block; height: 100%; border-radius: inherit; background: #6d7a91; }
+.pt-watch-view .pt-dist-text { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; font-size: 12.5px; color: var(--c-muted); }
+.pt-watch-view .pt-dist.pt-hit .pt-dist-track i { background: var(--c-good); }
+.pt-watch-view .pt-dist.pt-hit .pt-dist-text { color: var(--c-good); }
+.pt-watch-view .pt-dist.pt-near .pt-dist-track i { background: var(--c-warn); }
+.pt-watch-view .pt-dist.pt-near .pt-dist-text { color: var(--c-warn); }
+.pt-watch-view .pt-fodder-table td.pt-col-rating { font-weight: 800; }
+.pt-watch-view .pt-fodder-table td.pt-col-rating::before { content: none; }
+.pt-watch-view .pt-tl-block, .pt-watch-view .pt-stock-import, .pt-watch-view .pt-stock-summary, .pt-watch-view .pt-flip-panel:not(.pt-flip-help) { background: var(--c-panel); border: 1px solid var(--c-line); border-radius: 12px; padding: 12px 14px; }
+.pt-watch-view .pt-tl-block { margin-bottom: 12px; }
+.pt-watch-view .pt-tl-title { font-size: 10.5px; letter-spacing: 1.1px; text-transform: uppercase; color: var(--c-muted); font-weight: 700; }
+.pt-watch-view .pt-tl-sale { border-bottom-color: var(--c-line); padding: 6px 0; }
+.pt-watch-view .pt-tl-tile { border-color: var(--c-line); border-radius: 12px; background: rgba(255, 255, 255, .02); }
+.pt-watch-view .pt-stock-levels, .pt-watch-view .pt-windows { gap: 8px; }
+.pt-watch-view .pt-stock-level { border-radius: 10px; border-color: var(--c-line); background: rgba(255, 255, 255, .02); }
+
 .pt-flip-panel { margin: 4px 0 10px; padding: 10px 12px; background: #121a25; border: 1px solid rgba(255, 255, 255, .07); border-radius: 8px; }
 .pt-flip-help { display: grid; gap: 6px; font-size: 13px; color: #c9d3e0; }
 .pt-flip-help-line { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }

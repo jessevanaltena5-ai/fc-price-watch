@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.64.2
+// @version      2.65.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6891,7 +6891,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     recheckTitle: ["Check de aangevinkte kaarten opnieuw op FUTBIN, ook als ze net gecheckt zijn (max 30 per klik, één per paar seconden).", "Check the ticked cards on FUTBIN again, also when they were just checked (max 30 per click, one every few seconds)."],
     d_recheckButton: ["🔁 Opnieuw checken", "🔁 Check again"],
     d_recheckTitle: ["Haal de echte verkopen van deze kaart nu opnieuw op bij FUTBIN.", "Fetch this card's real sales from FUTBIN again now."],
-    d_staleCheck: ["Check is ouder dan 45 min: wordt nog gebruikt (tot 3 uur) en opnieuw gecheckt zodra er ruimte is.", "Check is older than 45 min: still used (up to 3 hours) and checked again when there is room."],
+    d_staleCheck: ["Check is ouder dan 45 min: wordt nog gebruikt (tot 3 uur). De auto-check ververst belangrijke kaarten (🟢/🟡/🟠, ↩, score 60+) na 45 min, de rest na 2,5 uur.", "Check is older than 45 min: still used (up to 3 hours). The auto check refreshes important cards (🟢/🟡/🟠, ↩, score 60+) after 45 min, the rest after 2.5 hours."],
     d_checkedAgo: ["{time} ({min} min geleden)", "{time} ({min} min ago)"],
     fbStopped: ["FUTBIN gestopt: {error}", "FUTBIN stopped: {error}"],
     fbDone: ["FUTBIN: {n} kaart(en) gecheckt", "FUTBIN: {n} card(s) checked"],
@@ -7825,10 +7825,15 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Version of the stored analysis: a check made by an older version (e.g. without the 72 h data of v2) is
   // still shown and used until it expires, but counts as "to check again" for 📊 and for the 🔔 alert.
   const FUTBIN_STATS_VERSION = 2;
-  function futbinNeedsCheck(card, platform) {
+  function futbinNeedsCheck(card, platform, refreshMs = FUTBIN_REFRESH_MS) {
     const entry = futbinSalesFor(card, platform);
-    return !entry || entry.v !== FUTBIN_STATS_VERSION || Date.now() - entry.fetchedAt >= FUTBIN_REFRESH_MS;
+    return !entry || entry.v !== FUTBIN_STATS_VERSION || Date.now() - entry.fetchedAt >= refreshMs;
   }
+  // Auto rounds refresh only what matters every 45 min (🟢/🟡/🟠, ↩ turning, score 60+); every other card
+  // after 2.5 h (a check counts 3 h, so there is never a gap). Then the rounds run dry and stay quiet.
+  const FUTBIN_REFRESH_LOW_MS = 150 * 60 * 1000;
+  const futbinImportant = row => ["buy", "near", "risk"].includes(row.calc.status) || row.calc.move === "turning" || !!(row.opp && row.opp.score >= 60);
+  const futbinAutoDue = (row, platform) => futbinNeedsCheck(row.card, platform, futbinImportant(row) ? FUTBIN_REFRESH_MS : FUTBIN_REFRESH_LOW_MS);
 
   function futbinHtml(url) {
     return futggRequestJson(url, true).then(text => new DOMParser().parseFromString(text, "text/html"));
@@ -8120,7 +8125,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Every card of the list (within your max price) gets its turn: turning dips, other dips, still
       // falling, risers, then cards FUTBIN already called no profit; within each, never checked first.
       const group = row => (row.calc.status === "skip" ? 4 : row.card.m24 >= 0 ? 3 : MOMENTUM_AUTO_ORDER[row.calc.move || "none"]);
-      cards = momentumRows(state).filter(row => futbinNeedsCheck(row.card, state.platform))
+      cards = rankMomentum(momentumRows(state), false).filter(row => futbinAutoDue(row, state.platform))
         .sort((a, b) => group(a) - group(b)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0) // never checked first, then the old checks
           || a.card.m24 - b.card.m24)
@@ -8129,7 +8134,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!flipData || flipData.token !== state.token) return;
       // Every card of the list: by score, cards without profit (by the sheet) last; never checked first.
       cards = rankFlipOpportunities(flipRows(flipData, state), state.platform)
-        .filter(row => futbinNeedsCheck(row.card, state.platform))
+        .filter(row => futbinAutoDue(row, state.platform))
         .sort((a, b) => (a.calc.status === "skip" ? 1 : 0) - (b.calc.status === "skip" ? 1 : 0)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0)) // stable: keeps the score order inside
         .slice(0, FUTBIN_AUTO_TOP)
@@ -11217,6 +11222,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // runs on its own. A button is recognised by its text (prices and other numbers left out, so "Buy Now
   // for 2,000" stays the same button) plus its EA style classes.
   const HOTKEY_KEY = "pt_hotkeys_v1";
+  const HOTKEY_DIALOGS = ".ea-dialog-view, .view-modal-container, .ui-dialog-type-message, .ut-popup";
   const HOTKEY_TARGETS = "button, .btn-standard, .ut-tab-bar-item, .ut-navigation-button-control, [role='button']";
   function getHotkeys() {
     try { const list = JSON.parse(localStorage.getItem(HOTKEY_KEY) || "[]"); return Array.isArray(list) ? list : []; } catch (_) { return []; }
@@ -11224,10 +11230,21 @@ function priceWatchMain(SCRIPT_VERSION) {
   function saveHotkeys(list) {
     try { localStorage.setItem(HOTKEY_KEY, JSON.stringify(list)); } catch (_) { /* this session only */ }
   }
-  const hotkeyLabel = node => String(node.textContent || node.getAttribute("aria-label") || node.title || "")
-    .replace(/[\d.,]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
   const HOTKEY_CLASS_SKIP = /^(pt-hk-|pt-fx-on|pt-fx-live|selected|active|focus|hover|disabled|pressed)/;
   const hotkeyClasses = node => [...node.classList].filter(name => !HOTKEY_CLASS_SKIP.test(name)).sort();
+  // Text of the button (numbers left out); an icon-only button (EA's ‹ back arrow) is known by its classes.
+  const hotkeyLabel = node => {
+    const text = String(node.textContent || node.getAttribute("aria-label") || node.title || "")
+      .replace(/[\d.,]+/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+    if (text) return text;
+    const classes = hotkeyClasses(node);
+    return classes.length ? `#${classes.join(".")}` : "";
+  };
+  const HOTKEY_ICON_NAMES = { "#ut-navigation-button-control": "‹ Terug" };
+  const hotkeyName = node => {
+    const text = String(node.textContent || node.title || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    return text || HOTKEY_ICON_NAMES[hotkeyLabel(node)] || "Icoonknop";
+  };
   function hotkeyCombo(event) {
     const key = event.key.length === 1 ? event.key.toUpperCase() : event.key;
     return [event.ctrlKey && "Ctrl", event.altKey && "Alt", event.shiftKey && key.length > 1 && "Shift", key].filter(Boolean).join("+");
@@ -11243,13 +11260,25 @@ function priceWatchMain(SCRIPT_VERSION) {
   };
   // The button on screen now for a binding: same text and (most of) the same classes; a button in an open
   // dialog wins (e.g. "Ok" of the buy confirmation), then the first one on the page.
+  // Same-looking buttons on one screen (the four "+" of the price filter): which one by position, counted
+  // over all of them (also disabled / hidden ones), so "the 4th +" stays the Buy Now max "+".
+  const hotkeySiblings = (label, classes) => [...document.querySelectorAll(HOTKEY_TARGETS)]
+    .filter(node => !node.closest(".pt-hk-menu, .pt-hk-panel") && hotkeyLabel(node) === label
+      && hotkeyClasses(node).join(" ") === classes.join(" "));
   function hotkeyFind(binding) {
+    if (binding.nth != null) {
+      const same = hotkeySiblings(binding.label, binding.classes);
+      if (same.length === binding.of) {
+        const node = same[binding.nth];
+        return node && hotkeyVisible(node) ? node : null;
+      }
+    }
     const candidates = [...document.querySelectorAll(HOTKEY_TARGETS)]
       .filter(node => !node.closest(".pt-hk-menu, .pt-hk-panel") && hotkeyLabel(node) === binding.label && hotkeyVisible(node));
     const fit = node => { const have = hotkeyClasses(node); return binding.classes.filter(name => have.includes(name)).length; };
     candidates.sort((a, b) => fit(b) - fit(a));
     const best = candidates.filter(node => fit(node) === (candidates.length ? fit(candidates[0]) : 0));
-    return best.find(node => node.closest(".ea-dialog-view, .view-modal-container, .ui-dialog-type-message, .ut-popup")) || best[0] || null;
+    return best.find(node => node.closest(HOTKEY_DIALOGS)) || best[0] || null;
   }
   function hotkeyPress(node) {
     const rect = node.getBoundingClientRect();
@@ -11262,6 +11291,41 @@ function priceWatchMain(SCRIPT_VERSION) {
     node.classList.add("pt-hk-flash");
     window.setTimeout(() => node.classList.remove("pt-hk-flash"), 250);
   }
+
+  // Subtle key label in the corner of every button that has a key (a layer on top of the page, so EA's
+  // own button styles and icons stay untouched). Redrawn twice a second and on scroll/resize.
+  const hotkeyLayer = el("div", "pt-hk-layer");
+  const hotkeyTags = new Map(); // node -> tag
+  function drawHotkeyTags() {
+    if (!hotkeyLayer.isConnected && document.body) document.body.appendChild(hotkeyLayer);
+    const want = new Map();
+    getHotkeys().forEach(binding => {
+      let nodes;
+      if (binding.nth != null) {
+        const same = hotkeySiblings(binding.label, binding.classes);
+        nodes = same.length === binding.of && same[binding.nth] ? [same[binding.nth]] : [];
+      } else {
+        const node = hotkeyFind(binding); // the button this key would press now
+        nodes = node ? [node] : [];
+      }
+      nodes.forEach(node => {
+        const rect = node.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2 || rect.bottom < 0 || rect.top > window.innerHeight) return;
+        want.set(node, { text: hotkeyShow(binding.combo), rect });
+      });
+    });
+    hotkeyTags.forEach((tag, node) => { if (!want.has(node)) { tag.remove(); hotkeyTags.delete(node); } });
+    want.forEach(({ text, rect }, node) => {
+      let tag = hotkeyTags.get(node);
+      if (!tag) { tag = el("span", "pt-hk-tag"); hotkeyLayer.appendChild(tag); hotkeyTags.set(node, tag); }
+      if (tag.textContent !== text) tag.textContent = text;
+      tag.style.left = `${Math.round(rect.right - 4)}px`;
+      tag.style.top = `${Math.round(rect.top + 3)}px`;
+    });
+  }
+  window.setInterval(drawHotkeyTags, 500);
+  window.addEventListener("resize", drawHotkeyTags);
+  window.addEventListener("scroll", drawHotkeyTags, true);
 
   let hotkeyCapture = null; // { label, classes, name } while waiting for the key to assign
   let hotkeyMenu = null;
@@ -11344,8 +11408,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     closeHotkeyMenu();
     event = { clientX, clientY };
     const classes = hotkeyClasses(target);
-    const name = String(target.textContent || target.title || "").replace(/\s+/g, " ").trim().slice(0, 40);
-    const bound = getHotkeys().filter(binding => binding.label === label);
+    // Position only for look-alikes side by side (the price "+" buttons); not when one of them sits in a
+    // dialog (then the dialog's button is meant, like "Ok" of the buy confirmation).
+    const same = hotkeySiblings(label, classes);
+    const inDialog = node => !!node.closest(HOTKEY_DIALOGS);
+    const nth = same.length > 1 && !same.some(inDialog) ? same.indexOf(target) : -1;
+    const name = hotkeyName(target) + (nth >= 0 ? ` (${nth + 1} van ${same.length})` : "");
+    const bound = getHotkeys().filter(binding => binding.label === label && (binding.nth ?? null) === (nth >= 0 ? nth : null));
     hotkeyMenu = el("div", "pt-hk-menu");
     hotkeyMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 230)}px`;
     hotkeyMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 140)}px`;
@@ -11357,10 +11426,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     };
     hotkeyMenu.appendChild(el("div", "pt-hk-title", name || label));
     item(bound.length ? `⌨ Andere toets (nu ${bound.map(b => hotkeyShow(b.combo)).join(", ")})` : "⌨ Toets toewijzen", () => {
-      hotkeyCapture = { label, classes, name };
+      hotkeyCapture = { label, classes, name, nth: nth >= 0 ? nth : null, of: nth >= 0 ? same.length : null };
       showToast(`Druk nu op de toets voor "${name || label}" (Esc = annuleren)`, true);
     });
-    if (bound.length) item("✕ Toets verwijderen", () => { saveHotkeys(getHotkeys().filter(binding => binding.label !== label)); showToast("Sneltoets verwijderd", true); });
+    if (bound.length) item("✕ Toets verwijderen", () => { saveHotkeys(getHotkeys().filter(binding => !bound.some(b => b.combo === binding.combo))); showToast("Sneltoets verwijderd", true); });
     item("☰ Alle sneltoetsen…", openHotkeyPanel);
     document.body.appendChild(hotkeyMenu);
   }
@@ -11379,9 +11448,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (event.key === "Escape") return void showToast("Toewijzen geannuleerd", false);
       const combo = hotkeyCombo(event);
       // one key = one button: the key leaves any other button, this button keeps only the new key
-      const next = getHotkeys().filter(binding => binding.combo !== combo && binding.label !== capture.label);
-      next.push({ combo, label: capture.label, classes: capture.classes, name: capture.name });
+      const sameButton = binding => binding.label === capture.label && (binding.nth ?? null) === capture.nth;
+      const next = getHotkeys().filter(binding => binding.combo !== combo && !sameButton(binding));
+      next.push({ combo, label: capture.label, classes: capture.classes, name: capture.name, nth: capture.nth, of: capture.of });
       saveHotkeys(next);
+      drawHotkeyTags();
       showToast(`"${capture.name || capture.label}" = ${hotkeyShow(combo)}${genie() ? " · deze toets gaat nu voor op FUT Genie" : ""}`, true);
       return;
     }
@@ -12017,6 +12088,8 @@ button.pt-hk-item:hover { background: rgba(76, 180, 255, .14); }
 button.pt-hk-x { appearance: none; border: 0; background: none; color: #8392ab; cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 6px; }
 button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-hk-flash { outline: 2px solid #4cb4ff !important; outline-offset: 2px; }
+.pt-hk-layer { position: fixed; inset: 0; z-index: 99990; pointer-events: none; }
+.pt-hk-tag { position: fixed; transform: translateX(-100%); padding: 0 4px; min-width: 10px; height: 14px; line-height: 14px; border-radius: 4px; background: rgba(8, 12, 20, .72); border: 1px solid rgba(76, 180, 255, .45); color: #9fd6ff; font: 700 9.5px/14px system-ui, sans-serif; letter-spacing: .3px; text-align: center; white-space: nowrap; opacity: .85; }
 
 /* ==== Price Watch theme C: all tabs like the Flip tab ==== */
 .pt-watch-view { --c-bg: #0e1626; --c-panel: rgba(7, 12, 22, .65); --c-line: rgba(148, 178, 230, .10); --c-line2: rgba(148, 178, 230, .20);

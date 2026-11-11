@@ -4,7 +4,7 @@ Tampermonkey-userscripts voor de EA FC Ultimate Team web app.
 
 | Script | Wat |
 | --- | --- |
-| [price-watch.user.js](price-watch.user.js) | **FC Price Watch** – eigen tab met FUT Genie-prijzen, doelprijzen, stock-/snipe-/fodderlijsten en sync met je telefoon. |
+| [price-watch.user.js](price-watch.user.js) | **FC Price Watch** – eigen tab met FUT Genie-prijzen, doelprijzen, stock-/snipe-/fodderlijsten en sync met je telefoon. Flip-tab voor een fodder.gg Price Watch-lijst met echte FUTBIN-verkopen, 72-uurs PC-prijshistorie (via je gist) en een Opportunity Score (0–100). |
 | [futbin-sales.user.js](futbin-sales.user.js) | **FUTBIN Sales Check** – paneel op FUTBIN-salespagina's: alleen echte verkopen, P10/mediaan/P90, % listings dat verkoopt, trend, koop/verkoop-advies na 5% belasting en break-even voor je eigen koopprijs. |
 | [pt-transfermarkt-knop.user.js](pt-transfermarkt-knop.user.js) | Oud: 🔍-knop in de Paletools Price Tracker. |
 | [price-tracker-plus.user.js](price-tracker-plus.user.js) | Oud: Price Tracker Plus voor de Paletools-tabel. |

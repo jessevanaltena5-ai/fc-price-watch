@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.68.0
+// @version      2.69.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -2579,6 +2579,123 @@ function priceWatchMain(SCRIPT_VERSION) {
       this.requestedBid = buy.price;
       return this.eBidConfirmed();
     };
+  }
+
+  // --- Sales check next to a card in the web app (transfer market, transfer list, club) ----------------
+  // EA's item-details controllers are followed while shown (viewDidAppear → viewWillDisappear); a short
+  // poll draws the block under their buttons for the selected player. Data: the same FUTBIN check as Flip
+  // (kept 3 h); not checked yet → one click on "Check FUTBIN" (1 request). Never buys, bids or lists.
+  const SC_CLASS = "pt-sc-ea";
+  const scShown = new Set();
+  let scExpanded = false;
+  let scInstalled = false;
+  function installSalesCheckPanel() {
+    if (scInstalled) return;
+    const names = ["UTItemDetailsViewController", "UTQuickListPanelViewController"].filter(name => window[name] && window[name].prototype);
+    if (!names.length) return;
+    scInstalled = true;
+    names.forEach(name => {
+      const proto = window[name].prototype;
+      const appear = proto.viewDidAppear;
+      const disappear = proto.viewWillDisappear;
+      proto.viewDidAppear = function () {
+        const result = typeof appear === "function" ? appear.apply(this, arguments) : undefined;
+        scShown.add(this);
+        return result;
+      };
+      proto.viewWillDisappear = function () {
+        scShown.delete(this);
+        try { const root = scRoot(this); const box = root && root.querySelector(`.${SC_CLASS}`); if (box) box.remove(); } catch (_) { /* gone */ }
+        return typeof disappear === "function" ? disappear.apply(this, arguments) : undefined;
+      };
+    });
+    window.setInterval(scTick, 700);
+  }
+  function scRoot(controller) {
+    const view = controller._view || (typeof controller.getView === "function" ? controller.getView() : null);
+    return view && typeof view.getRootElement === "function" ? view.getRootElement() : null;
+  }
+  function scItem(controller) {
+    try {
+      if (controller.viewmodel && typeof controller.viewmodel.current === "function") return controller.viewmodel.current();
+    } catch (_) { /* below */ }
+    return controller.item || controller._item || null;
+  }
+  function scTick() {
+    scShown.forEach(controller => {
+      try {
+        const root = scRoot(controller);
+        if (!root || !root.isConnected) return;
+        drawSalesCheckEa(root, scItem(controller));
+      } catch (error) {
+        console.warn(L("Price Watch: sales check bij de kaart mislukt.", "Price Watch: sales check next to the card failed."), error);
+        scShown.delete(controller);
+      }
+    });
+  }
+  function drawSalesCheckEa(root, item) {
+    let box = root.querySelector(`.${SC_CLASS}`);
+    const isPlayer = item && typeof item.isPlayer === "function" ? item.isPlayer() : !!(item && item.type === "player");
+    const id = isPlayer ? Number(item.definitionId) || 0 : 0;
+    if (!id) { if (box) box.remove(); return; }
+    const platform = userPlatform();
+    const card = { id, name: playerNameFor(id, (item._staticData && item._staticData.name) || ""), rating: Number(item.rating) || 0, holo: itemIsHolo(item) };
+    const fb = futbinSalesFor(card, platform);
+    let bin = 0;
+    try { const auction = typeof item.getAuctionData === "function" ? item.getAuctionData() : null; bin = auction && auction.buyNowPrice > 0 ? auction.buyNowPrice : 0; } catch (_) { /* no auction */ }
+    let bought = 0;
+    try { bought = boughtPrice(item) || 0; } catch (_) { /* unknown */ }
+    const key = [id, platform, fb ? fb.fetchedAt : "-", futbinState.busy ? 1 : 0, scExpanded ? 1 : 0, bin, bought, uiLang()].join("|");
+    if (box && box.dataset.key === key) return;
+    if (!box) box = el("div", `${SC_CLASS} pt-sc-mini`);
+    box.dataset.key = key;
+    box.textContent = "";
+    const top = el("div", "pt-sc-mini-top");
+    top.appendChild(el("span", "", `📊 FUTBIN · ${platform === "pc" ? "PC" : "PS"}${fb ? ` · ${Math.round((Date.now() - fb.fetchedAt) / 60000)} min` : ""}`));
+    box.appendChild(top);
+    if (!fb) {
+      const check = el("button", "pt-sc-btn", futbinState.busy ? L("FUTBIN is bezig…", "FUTBIN is busy…") : L("📊 Check FUTBIN · 1 verzoek", "📊 Check FUTBIN · 1 request"));
+      check.type = "button";
+      check.disabled = futbinState.busy;
+      check.addEventListener("click", event => {
+        event.stopPropagation();
+        futbinCheckCards([card], platform, false, { force: true }).then(() => { box.dataset.key = ""; });
+      });
+      box.appendChild(check);
+    } else {
+      const pr = futbinPrices(fb);
+      const chip = el("span", `pt-sc-chip ${pr.profit <= 0 ? "pt-sc-chip-bad" : pr.slow || pr.reasons.length ? "pt-sc-chip-amber" : "pt-sc-chip-ok"}`,
+        pr.profit <= 0 ? L("geen winst", "no profit") : pr.slow || pr.reasons.length ? L("twijfel", "doubtful") : "ok");
+      top.appendChild(chip);
+      const three = el("div", "pt-sc-mini-three");
+      const cell = (cls, value, label) => { const c = el("div", cls); c.append(el("b", "", value), el("span", "", label)); return c; };
+      three.append(cell("pt-sc-buy", scK(pr.buy), L("koop ≤", "buy ≤")), cell("pt-sc-sell", scK(pr.sell), L("verkoop", "sell")),
+        cell(pr.profit > 0 ? "pt-sc-plus" : "pt-sc-minus", `${pr.profit > 0 ? "+" : ""}${scK(pr.profit)}`, L("na 5%", "after tax")));
+      box.appendChild(three);
+      box.appendChild(el("div", "pt-sc-muted", L(`24u: ${fb.sales24} verkocht · ${Math.round(fb.sellThrough * 100)}% · mediaan ${scK(fb.median)}`, `24h: ${fb.sales24} sold · ${Math.round(fb.sellThrough * 100)}% · median ${scK(fb.median)}`)));
+      if (bin && !bought) {
+        box.appendChild(el("div", bin <= pr.buy ? "pt-sc-ok" : "pt-sc-warn", bin <= pr.buy
+          ? L(`✓ Buy Now ${scK(bin)} ≤ je koopprijs`, `✓ Buy Now ${scK(bin)} ≤ your buy price`)
+          : L(`⚠ Buy Now ${scK(bin)} is ${Math.round((bin / pr.buy - 1) * 1000) / 10}% boven je koopprijs`, `⚠ Buy Now ${scK(bin)} is ${Math.round((bin / pr.buy - 1) * 1000) / 10}% above your buy price`)));
+      }
+      if (bought) {
+        const net = Math.floor(pr.sell * (1 - EA_TAX)) - bought;
+        box.appendChild(el("div", net > 0 ? "pt-sc-ok" : "pt-sc-warn", L(`Gekocht ${scK(bought)} → verkoop ${scK(pr.sell)} = ${net > 0 ? "+" : ""}${scK(net)}`, `Bought ${scK(bought)} → sell ${scK(pr.sell)} = ${net > 0 ? "+" : ""}${scK(net)}`)));
+      }
+      const more = el("button", "pt-sc-more", scExpanded ? L("▾ Verberg sales check", "▾ Hide sales check") : L("▸ Volledige sales check", "▸ Full sales check"));
+      more.type = "button";
+      more.addEventListener("click", event => { event.stopPropagation(); scExpanded = !scExpanded; box.dataset.key = ""; drawSalesCheckEa(root, item); });
+      box.appendChild(more);
+      if (scExpanded) {
+        box.appendChild(salesCheckBlock(fb, { now: bought ? 0 : bin, id, bought, platform }));
+        const again = el("button", "pt-sc-more", futbinState.busy ? L("FUTBIN is bezig…", "FUTBIN is busy…") : L("🔁 Opnieuw checken", "🔁 Check again"));
+        again.type = "button";
+        again.disabled = futbinState.busy;
+        again.addEventListener("click", event => { event.stopPropagation(); futbinCheckCards([card], platform, false, { force: true }).then(() => { box.dataset.key = ""; }); });
+        box.appendChild(again);
+      }
+    }
+    if (!box.isConnected) root.appendChild(box);
   }
 
   // --- Transfer list timer: a pling (+ ntfy) when your listings run out ----------------------------
@@ -6713,6 +6830,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_fewSales: ["Weinig verkopen: {n} in 24 uur", "Few sales: {n} in 24 hours"],
     w_saleFalling: ["Verkoopprijs daalt: {pct} t.o.v. gisteren", "Sale price falling: {pct} vs yesterday"],
     w_lowSellThrough: ["Slechts {pct} van het aanbod verkoopt", "Only {pct} of listings sell"],
+    w_sellLowered: ["Verkoopprijs verlaagd naar {sell} (P75 {p75} verkoopt traag: {why})", "Sell price lowered to {sell} (P75 {p75} sells slowly: {why})"],
     w_outlierSale: ["Uitschieter genegeerd: verkoop voor {list}", "Outlier ignored: sale at {list}"],
     w_lowOdd: ["Lage prijs {price} was eenmalig (genegeerd)", "Low of {price} was a one-off (ignored)"],
     w_highOdd: ["Hoge prijs {price} is een uitschieter", "High of {price} is an outlier"],
@@ -7133,8 +7251,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const useFutbin = !!futbin && futbin.salesInBase >= 3;
     let fbRisky = false;
     if (useFutbin) {
-      buy = roundDownToStep(futbin.p10);
-      sell = roundDownToStep(futbin.p75);
+      const fbPrices = futbinPrices(futbin);
+      buy = fbPrices.buy;
+      sell = fbPrices.sell;
+      if (fbPrices.adjusted) { warnings.push(sellLoweredWarning(fbPrices, futbin)); if (fbPrices.slow) fbRisky = true; }
       if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
       const fh = futbin.h72;
       if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
@@ -7949,12 +8069,158 @@ function priceWatchMain(SCRIPT_VERSION) {
     const mid = futbinPct(raw, 0.5);
     const odd = value => raw.length >= 5 && (value < mid * 0.75 || value > mid * 1.35);
     const sorted = raw.filter(value => !odd(value));
+    const unsold = inWindow.filter(row => !row.sold).map(row => row.listed).sort((a, b) => a - b);
     return {
       listings: inWindow.length,
       sales: raw.length,
+      bids: inWindow.filter(row => row.sold > 0 && row.type === "bid").length,
+      min: sorted[0] || 0,
+      max: sorted[sorted.length - 1] || 0,
+      unsold: futbinPct(unsold, 0.5), // what unsold listings asked: people ask it, nobody pays it
       outliers: raw.filter(odd),
       p10: futbinPct(sorted, 0.1), p25: futbinPct(sorted, 0.25), median: futbinPct(sorted, 0.5), p75: futbinPct(sorted, 0.75), p90: futbinPct(sorted, 0.9)
     };
+  }
+
+  // Realistic buy/sell from real FUTBIN sales. In a healthy market you sell at the P75. In a slow one (few
+  // listings sell, demand falling, or unsold cards ask about the P75) cards at the P75 tend to sit, so the
+  // sell price goes 60% of the way from the median to the P75, and the buy price down with it so at least
+  // 8% profit after tax stays (Rogers 87: P75 462K, unsold ask 465.5K, 15% sold → sell 447K, buy ≤ 393K).
+  const FB_MIN_PROFIT = 0.08;
+  // Prices in the sales check like FUTBIN shows them: 465500 → "465.5K", 31650 → "31.7K", 1250000 → "1.25M".
+  function scK(value) {
+    const number = Math.round(Number(value) || 0);
+    const sign = number < 0 ? "-" : "";
+    const abs = Math.abs(number);
+    if (abs >= 1000000) return sign + flipShort(abs);
+    if (abs >= 10000) return `${sign}${Math.round(abs / 100) / 10}K`;
+    return sign + flipShort(abs);
+  }
+  function futbinPrices(fb) {
+    const p75 = roundDownToStep(fb.p75);
+    const median = fb.median || 0;
+    const reasons = [];
+    if (fb.unsold24 && fb.unsold24 <= fb.p75 * 1.03) reasons.push("unsold");
+    if (fb.listings24 >= 10 && fb.sellThrough < 0.2) reasons.push("slow");
+    if (fb.h72 && fb.h72.demand === "falling") reasons.push("demand");
+    let buy = roundDownToStep(fb.p10);
+    let sell = p75;
+    const adjusted = reasons.length > 0 && median > 0 && fb.p75 > median;
+    if (adjusted) {
+      sell = roundDownToStep(median + 0.6 * (fb.p75 - median));
+      buy = Math.min(buy, roundDownToStep(sell * (1 - EA_TAX) / (1 + FB_MIN_PROFIT)));
+    }
+    const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
+    return { buy, sell, p75, median, adjusted, reasons, slow: adjusted && reasons.some(r => r !== "unsold"), profit, pct: buy > 0 ? profit / buy * 100 : 0 };
+  }
+  function sellLoweredWarning(prices, fb) {
+    const why = prices.reasons.map(r => (r === "unsold" ? L(`onverkocht vraagt ${scK(fb.unsold24)}`, `unsold ask ${scK(fb.unsold24)}`)
+      : r === "slow" ? L(`${Math.round(fb.sellThrough * 100)}% verkocht`, `${Math.round(fb.sellThrough * 100)}% sold`)
+        : L("vraag daalt", "demand falling"))).join(", ");
+    return ft("w_sellLowered", { sell: scK(prices.sell), p75: scK(prices.p75), why });
+  }
+
+  // --- Sales check: real FUTBIN sales as buy / realistic sell / profit, per-period table, conclusion and
+  // "Bought for". Used in Flip → Sales and next to a card in the web app (transfer market, list, club).
+  const scBought = new Map(); // card id → purchase price typed in (this session)
+  function salesCheckBlock(fb, opts = {}) {
+    const box = el("div", "pt-sc");
+    const pr = futbinPrices(fb);
+    const fh = fb.h72;
+    const platform = futbinPlatform(opts.platform || getFlip().platform) === "pc" ? "PC" : "PS";
+    const minutes = Math.round((Date.now() - fb.fetchedAt) / 60000);
+    const head = el("div", "pt-sc-title");
+    head.append(el("span", "", L(`Echte verkopen · FUTBIN ${platform}`, `Real sales · FUTBIN ${platform}`)),
+      el("span", "", L(`${formatTime(fb.fetchedAt)} · ${minutes} min geleden`, `${formatTime(fb.fetchedAt)} · ${minutes} min ago`)));
+    box.appendChild(head);
+
+    const tiles = el("div", `pt-sc-boxes${pr.adjusted ? "" : " pt-sc-three"}`);
+    const tile = (cls, value, label) => { const t = el("div", `pt-sc-box ${cls}`); t.append(el("b", "", value), el("span", "", label)); return t; };
+    tiles.append(tile("pt-sc-buy", scK(pr.buy), L("koop ≤", "buy ≤")),
+      tile("pt-sc-sell", scK(pr.sell), pr.adjusted ? L("realistisch verkopen", "realistic sell") : L("verkoop (P75)", "sell (P75)")));
+    if (pr.adjusted) tiles.appendChild(tile("pt-sc-p75", scK(pr.p75), pr.reasons.includes("unsold") ? L("P75: onverkocht blijft hier", "P75: unsold sit here") : L("P75: te hoog, trage markt", "P75: too high, slow market")));
+    tiles.appendChild(tile(pr.profit > 0 ? "pt-sc-plus" : "pt-sc-minus", `${pr.profit > 0 ? "+" : ""}${scK(pr.profit)}`,
+      L(`winst na 5% · ${pr.pct.toFixed(1).replace(".", ",")}%`, `profit after 5% · ${pr.pct.toFixed(1)}%`)));
+    box.appendChild(tiles);
+
+    const t = fb.tbl;
+    if (t) {
+      const table = el("table", "pt-sc-table");
+      const headRow = el("tr");
+      ["", L("24u", "24h"), L("24–48u", "24–48h"), L(`${t.days} d`, `${t.days} d`)].forEach(text => headRow.appendChild(el("th", "", text)));
+      table.appendChild(headRow);
+      const cols = [t.d, t.p, t.a];
+      const line = (label, fn, bad) => {
+        const tr = el("tr");
+        tr.appendChild(el("td", "", label));
+        cols.forEach((w, i) => {
+          const value = w.s || /^(Verkocht|Sold|Listings)/.test(label) ? fn(w) : "—";
+          tr.appendChild(el("td", bad && i === 0 && bad(w) ? "pt-sc-bad" : "", value));
+        });
+        table.appendChild(tr);
+        return tr;
+      };
+      line(L("Verkocht", "Sold"), w => `${w.s}${w.b ? L(` (${w.b} bod)`, ` (${w.b} bid)`) : ""}`);
+      line("Listings", w => String(w.l));
+      line(L("% verkocht", "% sold"), w => `${w.l ? Math.round(w.s / w.l * 100) : 0}%`, w => w.l >= 10 && w.s / w.l < 0.2);
+      line("P10", w => scK(w.p10));
+      line(L("Mediaan", "Median"), w => scK(w.md));
+      line("P75", w => scK(w.p75));
+      line("P90", w => scK(w.p90));
+      line(L("Vraag onverkocht", "Unsold ask"), w => (w.u ? scK(w.u) : "—"), w => w.u && w.u <= w.p75 * 1.03).classList.add("pt-sc-hl");
+      line("Min–max", w => `${scK(w.mn)}–${scK(w.mx)}`);
+      box.appendChild(table);
+    } else {
+      box.appendChild(el("div", "pt-sc-muted", L("De volledige tabel komt na de volgende FUTBIN-check (🔁).", "The full table comes with the next FUTBIN check (🔁).")));
+    }
+
+    const verdict = el("div", "pt-sc-verdict");
+    const say = (cls, text) => verdict.appendChild(el("div", cls, text));
+    if (pr.reasons.includes("unsold")) say("pt-sc-warn", L(`⚠ Onverkochte kaarten vragen ${scK(fb.unsold24)} ≈ P75: verkoopprijs verlaagd naar ${scK(pr.sell)}`, `⚠ Unsold cards ask ${scK(fb.unsold24)} ≈ P75: sell price lowered to ${scK(pr.sell)}`));
+    if (fb.listings24 >= 10 && fb.sellThrough < 0.2) say("pt-sc-warn", L(`⚠ Maar ${Math.round(fb.sellThrough * 100)}% van de listings verkoopt: trage markt`, `⚠ Only ${Math.round(fb.sellThrough * 100)}% of listings sell: slow market`));
+    if (fh && fh.demand === "falling") say("pt-sc-warn", L(`⚠ Vraag daalt: ${fh.windows[0].sales} tegen ${Math.round(fh.salesBefore)}/dag ervoor`, `⚠ Demand falling: ${fh.windows[0].sales} vs ${Math.round(fh.salesBefore)}/day before`) + (fh.week != null ? ` · ${L("week", "week")} ${flipPct(fh.week * 100, 1)}` : ""));
+    if (fb.sales24 < 5) say("pt-sc-warn", L(`⚠ Maar ${fb.sales24} verkopen in 24u: verkoopt traag`, `⚠ Only ${fb.sales24} sales in 24h: sells slowly`));
+    const medians = fh ? fh.windows.map(w => w.median).filter(v => v != null).reverse() : [];
+    if (fh && (fh.state === "up" || fh.state === "recovering") && medians.length >= 2) say("pt-sc-ok", L(`✓ Verkoopprijs stijgt: mediaan ${medians.map(scK).join(" → ")}`, `✓ Sale price rising: median ${medians.map(scK).join(" → ")}`));
+    else if (fh && (fh.state === "down" || fh.state === "downLong") && medians.length >= 2) say("pt-sc-warn", L(`⚠ Verkoopprijs daalt: mediaan ${medians.map(scK).join(" → ")}`, `⚠ Sale price falling: median ${medians.map(scK).join(" → ")}`));
+    if (!verdict.childNodes.length) say("pt-sc-ok", L("✓ Genoeg verkopen, stabiel", "✓ Enough sales, stable"));
+    if (pr.profit <= 0) say("pt-sc-warn", L("⛔ Na 5% belasting blijft er niets over", "⛔ Nothing left after 5% tax"));
+    else {
+      const now = Number(opts.now) || 0;
+      const where = now ? (now <= pr.buy
+        ? L(`Nu ${scK(now)}: op of onder je koopprijs. `, `Now ${scK(now)}: at or below your buy price. `)
+        : L(`Nu ${scK(now)} is ${Math.round((now / pr.buy - 1) * 1000) / 10}% boven je koopprijs: bied ≤ ${scK(pr.buy)}. `, `Now ${scK(now)} is ${Math.round((now / pr.buy - 1) * 1000) / 10}% above your buy price: bid ≤ ${scK(pr.buy)}. `)) : "";
+      say("pt-sc-info", `→ ${where}${L(`Zet te koop voor ~${scK(pr.sell)}; na een dag zonder verkoop op ${scK(pr.median)}.`, `List at ~${scK(pr.sell)}; after a day without a sale at ${scK(pr.median)}.`)}`);
+    }
+    box.appendChild(verdict);
+
+    // Bought for → break-even and the profit at median / realistic sell / P75.
+    const own = el("div", "pt-sc-own");
+    const input = el("input", "pt-sc-input");
+    input.inputMode = "numeric";
+    input.placeholder = L("jouw koopprijs", "your buy price");
+    const start = opts.bought || (opts.id && scBought.get(opts.id)) || "";
+    input.value = start ? priceFormat.format(start) : "";
+    const out = el("div", "pt-sc-verdict");
+    const show = () => {
+      const paid = Number(String(input.value).replace(/\D/g, "")) || 0;
+      if (opts.id) { if (paid) scBought.set(opts.id, paid); else scBought.delete(opts.id); }
+      out.textContent = "";
+      if (!paid) return;
+      out.appendChild(el("div", "pt-sc-info", L(`Break-even: verkoop voor ≥ ${scK(roundUpToStep(paid / (1 - EA_TAX)))}`, `Break-even: sell for ≥ ${scK(roundUpToStep(paid / (1 - EA_TAX)))}`)));
+      const seen = new Set();
+      [[L("mediaan", "median"), roundDownToStep(pr.median)], [pr.adjusted ? L("realistisch", "realistic") : "P75", pr.sell], ["P75", pr.p75]].forEach(([label, at]) => {
+        if (!at || seen.has(at)) return;
+        seen.add(at);
+        const net = Math.floor(at * (1 - EA_TAX)) - paid;
+        out.appendChild(el("div", net > 0 ? "pt-sc-ok" : "pt-sc-warn", L(`Verkoop op ${label} ${scK(at)} → ${net > 0 ? "+" : ""}${scK(net)}`, `Sell at ${label} ${scK(at)} → ${net > 0 ? "+" : ""}${scK(net)}`)));
+      });
+    };
+    input.addEventListener("input", show);
+    own.append(el("span", "pt-sc-muted", L("Gekocht voor", "Bought for")), input);
+    box.append(own, out);
+    show();
+    return box;
   }
 
   // --- 72 h of real FUTBIN sales, from the same sales page (no extra request) -------------------------
@@ -8068,7 +8334,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (cells.length < 3) return null;
       const dateEl = tr.querySelector(".sales-date-time") || cells[0];
       const value = cell => Number(String(cell.textContent).replace(/[^\d]/g, "")) || 0;
-      return { at: futbinDate(dateEl.textContent), listed: value(cells[1]), sold: value(cells[2]) };
+      const kind = (cells[5] && cells[5].textContent || "").trim().toLowerCase();
+      return { at: futbinDate(dateEl.textContent), listed: value(cells[1]), sold: value(cells[2]), type: kind.includes("bid") ? "bid" : kind.includes("buy") ? "bin" : "" };
     }).filter(row => row && row.at && row.listed);
     if (!rows.length) return null;
     const newest = Math.max(...rows.map(row => row.at));
@@ -8078,8 +8345,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     const prev = futbinWindow(rows, end - 2 * 86400000, end - 86400000);
     const twoDays = futbinWindow(rows, end - 2 * 86400000, end);
     const base = day.sales >= 5 ? day : twoDays;
+    const all = futbinWindow(rows, 0, end);
+    // Compact table for the sales check: last 24 h, the 24 h before, the whole page.
+    const compact = w => ({ s: w.sales, l: w.listings, b: w.bids, p10: w.p10, md: w.median, p75: w.p75, p90: w.p90, mn: w.min, mx: w.max, u: w.unsold });
     return {
       window: day.sales >= 5 ? "24u" : "48u",
+      unsold24: day.unsold,
+      tbl: { d: compact(day), p: compact(prev), a: compact(all), days: Math.max(1, Math.round((newest - oldest) / 86400000)) },
       sales24: day.sales,
       listings24: day.listings,
       sellThrough: day.listings ? day.sales / day.listings : 0,
@@ -8310,9 +8582,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!futbin || futbin.salesInBase < 3) {
       return { buy: 0, sell: 0, profit: 0, pct: 0, gap: 1, warnings: [ft("w_mNoFutbin"), ...warnings], status: "unk", risky: true, futbin: null, move };
     }
-    const buy = roundDownToStep(futbin.p10);
-    const sell = roundDownToStep(futbin.p75);
+    const fbPrices = futbinPrices(futbin);
+    const buy = fbPrices.buy;
+    const sell = fbPrices.sell;
     let fbRisky = false;
+    if (fbPrices.adjusted) { warnings.push(sellLoweredWarning(fbPrices, futbin)); if (fbPrices.slow) fbRisky = true; }
     if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
     const fh = futbin.h72;
     if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
@@ -8888,7 +9162,13 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
       }
       sales.appendChild(externalLink(ft("d_searchLink"), `https://www.futbin.com/players?search=${encodeURIComponent(item.name)}`));
-      panes.sales = sales;
+      if (fb) {
+        const both = el("div", "pt-sc-grid");
+        both.append(salesCheckBlock(fb, { now: item.now, id: item.id, platform: getFlip().platform }), sales);
+        panes.sales = both;
+      } else {
+        panes.sales = sales;
+      }
 
       const warnings = calc.warnings.concat(opp ? opp.warnings.map(code => oppWarning(code, opp)) : []);
       if (warnings.length) {
@@ -12360,6 +12640,40 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-guide-line b { display: block; color: #fff; margin-bottom: 2px; }
 .pt-guide-nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
 .pt-guide .pt-fx-spacer { flex: 1; }
+.pt-sc-grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 900px) { .pt-sc-grid { grid-template-columns: 1fr; } }
+.pt-sc { background: rgba(7, 12, 22, .65); border: 1px solid rgba(148, 178, 230, .12); border-radius: 12px; padding: 12px 14px; color: #dfe7f2; font-size: 13px; line-height: 1.45; text-align: left; }
+.pt-sc-title { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 800; letter-spacing: .5px; text-transform: uppercase; color: #8d9aae; }
+.pt-sc-boxes { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin: 10px 0; }
+.pt-sc-boxes.pt-sc-three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.pt-sc-box { background: rgba(255, 255, 255, .03); border: 1px solid rgba(148, 178, 230, .12); border-radius: 10px; padding: 6px 8px; min-width: 0; }
+.pt-sc-box b { display: block; font-size: 16px; color: #fff; font-variant-numeric: tabular-nums; }
+.pt-sc-box span { display: block; font-size: 10.5px; color: #8d9aae; }
+.pt-sc-buy b { color: #63b3ff; } .pt-sc-sell b { color: #27d98b; } .pt-sc-plus b { color: #27d98b; } .pt-sc-minus b { color: #ff8080; }
+.pt-sc-p75 b { color: #8d9aae; text-decoration: line-through; text-decoration-color: rgba(255, 128, 128, .7); }
+.pt-sc-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.pt-sc-table th { font-size: 10.5px; color: #8d9aae; text-transform: uppercase; text-align: right; padding: 3px 5px; border-bottom: 1px solid rgba(148, 178, 230, .22); }
+.pt-sc-table td { text-align: right; padding: 4px 5px; border-bottom: 1px solid rgba(148, 178, 230, .08); white-space: nowrap; }
+.pt-sc-table th:first-child, .pt-sc-table td:first-child { text-align: left; color: #8d9aae; }
+.pt-sc-table tr.pt-sc-hl td { background: rgba(243, 201, 105, .07); }
+.pt-sc-table td.pt-sc-bad { color: #f4a35d; font-weight: 700; }
+.pt-sc-verdict { display: grid; gap: 3px; margin-top: 8px; }
+.pt-sc-warn { color: #f4a35d; } .pt-sc-ok { color: #27d98b; } .pt-sc-info { color: #c9d3e0; } .pt-sc-muted { color: #8d9aae; font-size: 12px; }
+.pt-sc-own { display: flex; gap: 8px; align-items: center; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(148, 178, 230, .12); }
+.pt-sc-input { width: 120px; padding: 5px 8px; border-radius: 8px; border: 1px solid rgba(148, 178, 230, .25); background: rgba(0, 0, 0, .25); color: #fff; font: inherit; }
+.pt-sc-mini { margin: 12px 0 4px; background: rgba(7, 12, 22, .85); border: 1px solid rgba(148, 178, 230, .22); border-radius: 12px; padding: 10px 12px; color: #dfe7f2; font-size: 13px; line-height: 1.45; text-align: left; }
+.pt-sc-mini .pt-sc { margin-top: 8px; padding: 10px; }
+.pt-sc-mini .pt-sc-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pt-sc-mini-top { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 800; letter-spacing: .5px; color: #8d9aae; text-transform: uppercase; }
+.pt-sc-mini-three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0 6px; text-align: center; }
+.pt-sc-mini-three b { display: block; font-size: 15px; font-variant-numeric: tabular-nums; }
+.pt-sc-mini-three span { font-size: 10.5px; color: #8d9aae; }
+.pt-sc-mini-three .pt-sc-buy b { color: #63b3ff; } .pt-sc-mini-three .pt-sc-sell b { color: #27d98b; } .pt-sc-mini-three .pt-sc-plus b { color: #27d98b; } .pt-sc-mini-three .pt-sc-minus b { color: #ff8080; }
+.pt-sc-chip { font-size: 10.5px; font-weight: 800; padding: 1px 8px; border-radius: 99px; text-transform: none; letter-spacing: 0; }
+.pt-sc-chip-ok { background: rgba(39, 217, 139, .15); color: #27d98b; } .pt-sc-chip-amber { background: rgba(243, 201, 105, .15); color: #f3c969; } .pt-sc-chip-bad { background: rgba(255, 128, 128, .15); color: #ff8080; }
+.pt-sc-more, .pt-sc-btn { appearance: none; display: block; margin-top: 6px; padding: 4px 0; border: 0; background: none; color: #63b3ff; font-weight: 700; font-size: 12px; font-family: inherit; cursor: pointer; text-align: left; }
+.pt-sc-btn { width: 100%; padding: 8px; border: 1px dashed rgba(148, 178, 230, .3); border-radius: 10px; text-align: center; margin-top: 8px; }
+.pt-sc-more:disabled, .pt-sc-btn:disabled { color: #8d9aae; cursor: default; }
 .pt-guide-num { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 6px 0; }
 .pt-guide-num > b { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(99, 179, 255, .18); color: #63b3ff; font-size: 12px; }
 .pt-guide-link { color: #63b3ff; font-weight: 700; text-decoration: underline; }
@@ -12837,6 +13151,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       installNotificationLog();
       returnToTargets();
       installOneClickBuyNow();
+      installSalesCheckPanel();
       startClubRise();
       importPendingTransfer();
       // Pc: send list + prices to the gist every 5 min. Phone: read them every 2 min.

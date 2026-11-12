@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.70.0
+// @version      2.70.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -890,6 +890,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Pc: fresh FUT Genie prices for the list, then into the gist. "l" tells the phone which of its own
   // lists the pc has taken over, so the phone doesn't fall back to the pc's older list in the meantime.
+  let relayFbSent = 0; // pc: FUTBIN checks in the last push
   async function pushRelay(force) {
     const relay = getRelay();
     if (!pcDevice() || relayBusy || !relay.hasToken || !relay.gistId) return;
@@ -900,7 +901,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const extraIds = [...new Set(readJson(TL_IDS_KEY, []).concat(getStock().filter(list => list.type === "players")
         .flatMap(list => list.players.filter(player => !(player.special && player.definitionId <= 0xFFFFFF)).map(player => player.definitionId))))];
       await fetchGeniePrices(getWatch().map(entry => entry.definitionId).concat(extraIds));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay() };
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), v: SCRIPT_VERSION || "" };
+      relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
     } catch (error) {
@@ -990,6 +992,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (data.bm && typeof data.bm === "object") writeJson(BOUGHT_KEY, { ...data.bm, ...readJson(BOUGHT_KEY, {}) });
       if (data.h && typeof data.h === "object") syncFlipHistory(data.h); // flip price history of the pc
       if (data.fb) syncFutbinFromRelay(data.fb); // FUTBIN checks of the pc
+      listPatch.pcFb = data.fb ? Object.keys(data.fb).length : -1; // -1: the pc doesn't send them (older version)
+      listPatch.pcVersion = data.v || "";
       if (data.fs && syncFlipSettings(data.fs)) {
         const flip = getFlip();
         if (flip.source === "futgg") loadMomentum(false); else if (flip.token) loadFlipSheet(false);
@@ -8031,9 +8035,23 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     return futbinCache[key];
   }
+  // Browser storage is ~5 MB for all of ea.com (EA's own data included). When it is full, older checks
+  // are made smaller (no table / 72 h detail) and expired ones dropped, then saved again; never silently lost.
+  let futbinSaveError = "";
   function futbinSave(key, value) {
     futbinCache[key] = value;
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* memory only */ }
+    const write = () => localStorage.setItem(key, JSON.stringify(value));
+    try { write(); futbinSaveError = ""; return; } catch (_) { /* full: make room below */ }
+    if (key === FUTBIN_SALES_KEY) {
+      const now = Date.now();
+      Object.keys(value).forEach(k => {
+        const entry = value[k];
+        if (!entry || now - entry.fetchedAt > FUTBIN_FRESH_MS) { delete value[k]; return; }
+        if (now - entry.fetchedAt > 60 * 60 * 1000) delete entry.tbl; // older than 1 h: summary only
+      });
+      try { write(); futbinSaveError = ""; return; } catch (_) { /* still full */ }
+    }
+    futbinSaveError = L("browseropslag vol: checks blijven alleen tot je de pagina herlaadt", "browser storage full: checks only last until you reload the page");
   }
   const futbinPlatform = platform => (platform === "pc" ? "pc" : "ps");
 
@@ -8808,7 +8826,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const langButton = button("", "pt-flip-lang");
     langButton.addEventListener("click", () => {
       update(state => { state.lang = uiLang() === "en" ? "nl" : "en"; });
-      showToast(L("Taal: Nederlands. De andere tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. The other tabs switch too when you reopen Price Watch."), true);
+      if (!rebuildPriceWatch()) showToast(L("Taal: Nederlands. De andere tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. The other tabs switch too when you reopen Price Watch."), true);
     });
     const controls = el("div", "pt-stock-list-buttons");
     // Tick many cards at once (instead of one by one): presets for the shown rows.
@@ -8861,6 +8879,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const row2 = el("div", "pt-fx-row pt-fx-row2");
     status.className = "pt-watch-status pt-fx-status";
     row2.append(sortSeg.box, dealsBox, selectMenu, recheckButton, watchButton, el("span", "pt-fx-spacer"), refresh, alertButton, settingsButton, helpButton, langButton);
+    // Phone: one compact first row (title, source, platform, search); the action buttons slide in row 2.
+    if (IS_PHONE) row2.prepend(runButton, bidButton, futbinButton);
     toolbar.append(row1, row2, status);
     card.appendChild(toolbar);
 
@@ -9429,6 +9449,8 @@ function priceWatchMain(SCRIPT_VERSION) {
               + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
               + (flipError ? ft("statusError", { error: flipError }) : "")
             : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
+      const syncText = flipSyncText();
+      if (syncText) status.textContent += ` · ${syncText}`;
       status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
       if (momentum) {
         const set = momentumData && momentumData[state.platform];
@@ -9440,6 +9462,8 @@ function priceWatchMain(SCRIPT_VERSION) {
               + (momentumError ? ft("statusError", { error: momentumError }) : "")
             : momentumError ? ft("statusFailed", { error: momentumError }) : ft("mEmpty");
         status.title = ft("mStatusTitle");
+        const syncLine = flipSyncText();
+        if (syncLine) status.textContent += ` · ${syncLine}`;
       }
 
       tbody.textContent = "";
@@ -9565,6 +9589,32 @@ function priceWatchMain(SCRIPT_VERSION) {
     return render;
   }
 
+  // One line on what pc and phone share: the pc says how many checks it sends, the phone how many it got.
+  function flipSyncText() {
+    const relay = getRelay();
+    const stored = Object.keys(futbinStore(FUTBIN_SALES_KEY)).length;
+    const warn = futbinSaveError ? ` ⚠ ${futbinSaveError}` : "";
+    if (!relay.gistId || (!relay.hasToken && pcDevice())) return warn.trim();
+    if (pcDevice()) {
+      return L(`📤 ${relayFbSent} FUTBIN-checks naar je telefoon${relay.sentAt ? ` (${formatTime(relay.sentAt)})` : ""}`, `📤 ${relayFbSent} FUTBIN checks to your phone${relay.sentAt ? ` (${formatTime(relay.sentAt)})` : ""}`) + warn;
+    }
+    if (relay.pcFb === -1) return L(`⚠ je pc stuurt nog geen FUTBIN-checks: update Price Watch op je pc (die heeft ${relay.pcVersion || "een oude versie"})`, `⚠ your PC doesn't send FUTBIN checks yet: update Price Watch on your PC (it has ${relay.pcVersion || "an old version"})`);
+    if (relay.pcFb == null) return L("📥 wacht op je pc…", "📥 waiting for your PC…");
+    return L(`📥 ${relay.pcFb} FUTBIN-checks van je pc${relay.receivedAt ? ` (${formatTime(relay.receivedAt)})` : ""} · ${stored} bewaard`, `📥 ${relay.pcFb} FUTBIN checks from your PC${relay.receivedAt ? ` (${formatTime(relay.receivedAt)})` : ""} · ${stored} stored`) + warn;
+  }
+
+  // Phone cards show the column name above a value: copy each header text onto the cells of its column.
+  function labelCells(table) {
+    const heads = [...table.querySelectorAll("thead th")];
+    table.querySelectorAll("tbody tr").forEach(tr => {
+      [...tr.children].forEach(td => {
+        const th = heads.find(h => h.className && td.classList.contains(h.className.split(" ")[0]));
+        if (th && th.textContent.trim() && !td.dataset.l) td.dataset.l = th.textContent.trim();
+      });
+    });
+    return table;
+  }
+
   // --- Tabs on the Price Watch page ----------------------------------------------
 
   const TAB_KEY = "pt_watch_tab_v1";
@@ -9587,7 +9637,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try { return !!localStorage.getItem(GUIDE_KEY); } catch (_) { return true; }
   }
   function openGuide(root) {
-    const old = root.querySelector(".pt-guide");
+    const old = document.querySelector(".pt-guide");
     if (old) old.remove();
     const startLang = uiLang();
     const startPlatform = getFlip().platform;
@@ -9603,7 +9653,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         refreshFutggPrices(true);
         if (flip.source === "futgg") loadMomentum(false);
       }
-      if (flip.lang !== startLang) showToast(L("Taal: Nederlands. Alle tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. All tabs switch too when you reopen Price Watch."), true);
+      if (flip.lang !== startLang && !rebuildPriceWatch()) showToast(L("Taal: Nederlands. Alle tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. All tabs switch too when you reopen Price Watch."), true);
       listeners.forEach(listener => listener());
     };
     const set = mutate => { const state = getFlip(); mutate(state); saveFlip(state); draw(); };
@@ -9717,7 +9767,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       card.append(head, content, nav);
     }
     draw();
-    root.appendChild(box);
+    document.body.appendChild(box); // above EA's own bars, not inside the page's scroll area
   }
 
   function buildTabs(root, sections) {
@@ -10000,7 +10050,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         maxCell.appendChild(max);
         const idealCell = el("td", "pt-col-league");
         idealCell.appendChild(ideal);
-        row.append(checkCell, el("td", "pt-col-raw pt-watch-name", `${entry.rating}-rated goud`), maxCell, idealCell, el("td", "pt-col-status", "✓"));
+        row.append(checkCell, el("td", "pt-col-raw pt-watch-name", L(`${entry.rating}-rated goud`, `${entry.rating}-rated gold`)), maxCell, idealCell, el("td", "pt-col-status", "✓"));
         body.appendChild(row);
         return { entry, check, max, ideal };
       });
@@ -10882,12 +10932,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         const detail = inventoryDetail(summarizeBucket(list.inventory && list.inventory.rules[rule.key]), null);
         if (detail) stockCell.appendChild(detail);
 
-        row.append(el("td", "pt-col-name pt-watch-name", `${fodder.rating}-rated goud`), maxCell, idealCell, buttonCell, stockCell);
+        row.append(el("td", "pt-col-name pt-watch-name", L(`${fodder.rating}-rated goud`, `${fodder.rating}-rated gold`)), maxCell, idealCell, buttonCell, stockCell);
         body.appendChild(row);
       });
 
       grid.append(thead, body);
-      return grid;
+      return labelCells(grid);
     }
 
     function buildPlayerGrid(list, rules, active) {
@@ -10959,7 +11009,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
 
       grid.append(thead, body);
-      return grid;
+      return labelCells(grid);
     }
 
     function renderLists() {
@@ -11198,6 +11248,18 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // EA-style view + controller so the page lives in the normal navigation stack.
+  // The open Price Watch page, so a language switch can rebuild it at once (texts are made when it is built).
+  let priceWatchView = null;
+  function rebuildPriceWatch() {
+    const view = priceWatchView;
+    if (!view || !view.__root || !view.__root.isConnected) return false;
+    const scroll = view.__root.scrollTop;
+    view.render = buildPage(view.__root);
+    view.render();
+    view.__root.scrollTop = scroll;
+    return true;
+  }
+
   function definePageClasses() {
     function PriceWatchView() {
       return EAView.call(this) || this;
@@ -11209,6 +11271,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       this.__root = root;
       this.render = buildPage(root);
       this._generated = true;
+      priceWatchView = this;
     };
     PriceWatchView.prototype.destroyGeneratedElements = function () {
       DOMKit.remove(this.__root);
@@ -12720,7 +12783,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-watch-view .pt-tab-spacer { flex: 1; }
 .pt-watch-view .pt-tab-device { font-size: 12px; color: var(--c-muted); padding: 0 4px; white-space: nowrap; }
 .pt-watch-view button.pt-tab.pt-tab-guide { font-size: 12px; padding: 6px 10px; }
-.pt-guide { position: fixed; inset: 0; z-index: 9990; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(4, 8, 16, .72); }
+.pt-guide { position: fixed; inset: 0; z-index: 2147483600; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(4, 8, 16, .72); }
 .pt-guide-card { width: min(620px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: linear-gradient(180deg, #16223a, #0c1424); border: 1px solid rgba(148, 178, 230, .25); border-radius: 16px; box-shadow: 0 30px 80px rgba(0, 0, 0, .55); padding: 18px 20px 16px; color: #dfe7f2; font-size: 14px; line-height: 1.45; text-align: left; }
 .pt-guide-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .pt-guide-head h2 { margin: 0; font-size: 19px; color: #fff; flex: 1; }
@@ -13072,7 +13135,9 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   /* Flip toolbar: first row wraps (title, source, platform, search full width), second row = pills that scroll */
   .pt-flip-card .pt-fx-row { flex-wrap: wrap; gap: 8px; }
   .pt-flip-card .pt-fx-title { font-size: 22px; }
-  .pt-flip-card .pt-fx-filter { flex: 1 1 100%; order: 10; min-width: 0; }
+  .pt-flip-card input.pt-fx-filter { flex: 1 1 100%; order: 10; min-width: 0; height: 38px; }
+  .pt-flip-card .pt-fx-row:first-child { row-gap: 8px; }
+  .pt-flip-card .pt-fx-row:first-child .pt-fx-seg { flex: 0 1 auto; }
   .pt-flip-card .pt-fx-row2 { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
   .pt-flip-card .pt-fx-row2::-webkit-scrollbar { display: none; }
   .pt-flip-card .pt-fx-row2 > * { flex: 0 0 auto; }
@@ -13137,9 +13202,28 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   .pt-players-table .pt-target-input { box-sizing: border-box; width: 100%; padding: 8px 10px; }
   .pt-players-table .pt-distance { font-size: 12px; padding: 3px 8px; }
 
+  /* Stock lists (players and fodder): one card per row, column name above each value */
+  .pt-stock-grid, .pt-stock-grid tbody { display: block; width: 100%; }
+  .pt-stock-grid thead { display: none; }
+  .pt-stock-grid tbody tr { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; grid-template-areas: "name name rating" "price target target" "level level level" "stock stock stock"; gap: 6px 10px; align-items: center; margin-bottom: 8px; padding: 10px 12px; border: 1px solid rgba(148, 178, 230, .12); border-radius: 14px; background: rgba(255, 255, 255, .035); }
+  .pt-stock-grid tbody td { display: block; width: auto !important; height: auto !important; padding: 0 !important; border: 0 !important; background: none !important; white-space: normal; text-align: left !important; overflow: visible; }
+  .pt-stock-grid td.pt-col-name { grid-area: name; font-size: 16px; font-weight: 700; color: #fff; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pt-stock-grid td.pt-col-rating { grid-area: rating; color: #8d9aae; font-weight: 700; }
+  .pt-stock-grid td.pt-col-price { grid-area: price; font-weight: 700; }
+  .pt-stock-grid td.pt-col-target { grid-area: target; }
+  .pt-stock-grid td.pt-col-level { grid-area: level; }
+  .pt-stock-grid td.pt-col-stock { grid-area: stock; }
+  .pt-stock-grid td.pt-col-stock:empty { display: none; }
+  .pt-stock-grid td.pt-col-price::before, .pt-stock-grid td.pt-col-target::before { content: attr(data-l); display: block; margin-bottom: 2px; font-size: 10.5px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; color: #8d9aae; }
+  .pt-stock-grid .pt-target-input { box-sizing: border-box; width: 100%; padding: 8px 10px; }
+  .pt-stock-grid td.pt-col-level button { width: 100%; }
+  /* Fodder: a calm card per rating instead of loose blocks */
+  .pt-fodder-table tr { margin-bottom: 8px; padding: 10px 12px; border: 1px solid rgba(148, 178, 230, .12) !important; border-radius: 14px; background: rgba(255, 255, 255, .035); }
+  .pt-fodder-table td { background: none !important; border: 0 !important; box-shadow: none !important; }
+
   /* Sales check next to a card (EA's panel is full width on the phone) */
   .pt-sc-mini { margin: 10px 8px 4px; }
-  .pt-guide { padding: 10px; align-items: flex-end; }
+  .pt-guide { padding: 10px 10px calc(env(safe-area-inset-bottom, 0px) + 12px); align-items: center; }
   .pt-guide-card { padding: 16px 14px 14px; max-height: calc(100vh - 20px); }
   .pt-guide-head h2 { font-size: 17px; }
 }

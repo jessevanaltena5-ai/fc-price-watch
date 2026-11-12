@@ -855,6 +855,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     else pending.reject(new Error(message.error || L("onbekende fout", "unknown error")));
   });
 
+  // Save a GitHub token; without a gist yet, Tampermonkey's part creates a secret one and returns its id.
+  async function connectToken(tokenText) {
+    const result = await relayCall("setToken", { token: String(tokenText || "").trim(), gistId: getRelay().gistId });
+    saveRelay({ hasToken: true, gistId: (result && result.gistId) || getRelay().gistId, listJson: "", error: "" });
+    if (pcDevice()) pushRelay(true);
+  }
+
   function relayCall(type, data) {
     return new Promise((resolve, reject) => {
       const id = ++relaySeq;
@@ -1708,7 +1715,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const liveInfo = el("div", "pt-muted");
     const gist = el("input", "pt-transfer-input");
     gist.type = "text";
-    gist.placeholder = L("Link of id van je geheime gist", "Link or ID of your secret gist");
+    gist.placeholder = L("Link of id van je geheime gist (leeg = wordt vanzelf gemaakt)", "Link or ID of your secret gist (empty = created automatically)");
     const token = el("input", "pt-transfer-input");
     token.type = "password";
     token.autocomplete = "off";
@@ -1717,7 +1724,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     saveToken.type = "button";
     const sendNow = el("button", "pt-watch-refresh", L("↑ Nu versturen", "↑ Send now"));
     sendNow.type = "button";
-    const clearToken = el("button", "pt-watch-refresh", "Token wissen");
+    const clearToken = el("button", "pt-watch-refresh", L("Token wissen", "Clear token"));
     clearToken.type = "button";
     const pullNow = el("button", "pt-watch-refresh", L("↓ Nu ophalen", "↓ Fetch now"));
     pullNow.type = "button";
@@ -1758,7 +1765,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         ? relay.hasToken
           ? L("Deze pc zet elke 5 minuten je lijst + FUT Genie-prijzen in de gist (zolang de web app openstaat)", "This PC puts your list + FUT Genie prices in the gist every 5 minutes (as long as the web app is open)") +
             L(" en neemt elke minuut een nieuwe lijst van je telefoon over.", " and imports a new list from your phone every minute.") +
-            (relay.sentAt ? ` Laatst: ${formatDayTime(relay.sentAt)}.` : "") + error
+            (relay.sentAt ? L(` Laatst: ${formatDayTime(relay.sentAt)}.`, ` Last: ${formatDayTime(relay.sentAt)}.`) : "") + error
           : L("Vul een GitHub-token in (alleen het recht \"gist\"); die blijft in Tampermonkey op deze pc.", "Enter a GitHub token (only the \"gist\" permission); it stays in Tampermonkey on this PC.") + error
         : (relay.pricesAt
           ? L(`Prijzen van je pc: ${formatDayTime(relay.pricesAt)}${relayFresh() ? " (live)" : " – staat de web app op je pc open?"}.`, `Prices from your PC: ${formatDayTime(relay.pricesAt)}${relayFresh() ? " (live)" : " – is the web app open on your PC?"}.`)
@@ -1771,10 +1778,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     saveToken.addEventListener("click", async () => {
       saveToken.disabled = true;
       try {
-        await relayCall("setToken", { token: token.value.trim(), gistId: getRelay().gistId });
+        await connectToken(token.value);
         token.value = "";
-        saveRelay({ hasToken: true, error: "" });
-        if (pcDevice()) pushRelay(true);
       } catch (error) {
         saveRelay({ error: error.message });
       }
@@ -9259,7 +9264,49 @@ function priceWatchMain(SCRIPT_VERSION) {
         row("⌨", L("Sneltoetsen", "Hotkeys"), L("Rechtsklik op een knop in de web app → \"Toets toewijzen\". Daarna is één toets één klik.", "Right-click a button in the web app → \"Assign key\". After that one key press is one click.")),
         row("💸", L("Belasting", "Tax"), L("EA houdt 5% in bij elke verkoop; alle winsten in Price Watch zijn al na belasting.", "EA keeps 5% of every sale; all profits in Price Watch are already after tax.")),
         row("🔄", "Updates", L("Nieuwe versies komen vanzelf via Tampermonkey. Deze gids open je weer met 📘 bovenaan.", "New versions arrive by themselves through Tampermonkey. Open this guide again with 📘 at the top."))
-      ]]
+      ]],
+      () => {
+        const relay = getRelay();
+        const title = L("📱 Ook op je telefoon? (optioneel)", "📱 Also on your phone? (optional)");
+        if (relay.hasToken && relay.gistId) {
+          return [title, [
+            el("p", "pt-guide-ok", L("✓ Gekoppeld. Deze pc bewaart je lijsten en prijzen nu in je eigen privé-opslag op GitHub.", "✓ Connected. This PC now keeps your lists and prices in your own private storage on GitHub.")),
+            row("📱", L("Telefoon koppelen", "Link your phone"), L("Ga naar Spelers → ⇄ Overzetten → 📱 Token naar telefoon en scan de QR-code met je telefoon.", "Go to Players → ⇄ Transfer → 📱 Token to phone and scan the QR code with your phone."))
+          ]];
+        }
+        const link = (text, href) => { const a = el("a", "pt-guide-link", text); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer"; return a; };
+        const num = (n, ...parts) => { const line = el("div", "pt-guide-num"); line.append(el("b", "", `${n}`), el("span")); line.lastChild.append(...parts); return line; };
+        const input = el("input", "pt-guide-input");
+        input.type = "password";
+        input.autocomplete = "off";
+        input.placeholder = L("Plak hier je token (ghp_…)", "Paste your token here (ghp_…)");
+        const msg = el("div", "pt-guide-msg");
+        const save = pick(L("Opslaan", "Save"), true, async () => {
+          save.disabled = true;
+          msg.className = "pt-guide-msg";
+          msg.textContent = L("Bezig…", "Working…");
+          try {
+            await connectToken(input.value);
+            input.value = "";
+            draw();
+          } catch (error) {
+            msg.className = "pt-guide-msg pt-guide-bad";
+            msg.textContent = error.message;
+            save.disabled = false;
+          }
+        });
+        const saveRow = el("div", "pt-guide-picks");
+        saveRow.append(input, save);
+        return [title, [
+          el("p", "", L("Alleen nodig als je Price Watch ook op je telefoon wilt zien. Je pc bewaart dan je lijsten en prijzen in een privé-opslag op je eigen GitHub (gratis). Alleen op de pc? Klik dan gewoon op Aan de slag.", "Only needed if you also want Price Watch on your phone. Your PC then keeps your lists and prices in private storage on your own GitHub (free). PC only? Just click Let's go.")),
+          num(1, el("span", "", L("Log in op GitHub of ", "Log in to GitHub or ")), link(L("maak een gratis account", "create a free account"), "https://github.com/signup"), el("span", "", ".")),
+          num(2, link(L("Open deze link", "Open this link"), "https://github.com/settings/tokens/new?scopes=gist&description=FC%20Price%20Watch"),
+            el("span", "", L(". Alles staat al goed (alleen ✓ gist). Kies bij Expiration \"No expiration\" en klik onderaan op Generate token.", ". Everything is already set (only ✓ gist). Pick \"No expiration\" at Expiration and click Generate token at the bottom."))),
+          num(3, el("span", "", L("Kopieer het token (begint met ghp_), plak het hieronder en klik Opslaan. De opslag wordt vanzelf gemaakt.", "Copy the token (starts with ghp_), paste it below and click Save. The storage is created automatically."))),
+          saveRow, msg,
+          el("p", "pt-guide-note", L("Het token blijft alleen in Tampermonkey op dit apparaat. Deel het met niemand: wie het heeft, kan je opslag aanpassen.", "The token stays in Tampermonkey on this device only. Don't share it with anyone: whoever has it can change your storage."))
+        ]];
+      }
     ];
     function draw() {
       card.textContent = "";
@@ -12313,6 +12360,14 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-guide-line b { display: block; color: #fff; margin-bottom: 2px; }
 .pt-guide-nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
 .pt-guide .pt-fx-spacer { flex: 1; }
+.pt-guide-num { display: grid; grid-template-columns: 24px 1fr; gap: 8px; padding: 6px 0; }
+.pt-guide-num > b { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(99, 179, 255, .18); color: #63b3ff; font-size: 12px; }
+.pt-guide-link { color: #63b3ff; font-weight: 700; text-decoration: underline; }
+.pt-guide-input { flex: 1; min-width: 200px; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(148, 178, 230, .25); background: rgba(7, 12, 22, .6); color: #fff; font: inherit; }
+.pt-guide-input:focus { outline: none; border-color: #63b3ff; }
+.pt-guide-msg { font-size: 13px; color: #8d9aae; min-height: 18px; margin-top: 6px; }
+.pt-guide-bad { color: #ff8080; }
+.pt-guide-ok { color: #27d98b; font-weight: 700; }
 .pt-watch-view .pt-watch-card { max-width: 1280px; background: linear-gradient(180deg, rgba(19, 29, 49, .94), rgba(11, 18, 31, .97)); border: 1px solid rgba(148, 178, 230, .18); border-radius: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, .40), inset 0 1px 0 rgba(255, 255, 255, .04); padding: 14px 16px 12px; color: var(--c-text); }
 .pt-watch-view .pt-watch-toolbar { gap: 10px 14px; margin-bottom: 12px; align-items: center; }
 .pt-watch-view .pt-watch-title { font-size: 22px; font-weight: 800; letter-spacing: .3px; color: var(--c-text); margin: 0 0 2px; }
@@ -12883,11 +12938,27 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   const auth = token => ({ Authorization: `Bearer ${token}` });
   const gistUrl = gistId => `https://api.github.com/gists/${encodeURIComponent(gistId)}`;
 
+  // No gist yet (first setup): create a secret one with this token, so a new user only needs the token.
   async function setToken(token, gistId) {
     if (!/^(ghp_|github_pat_)\w+$/.test(token || "")) throw new Error(L("Dat lijkt geen GitHub-token (begint met ghp_ of github_pat_)", "That doesn't look like a GitHub token (starts with ghp_ or github_pat_)"));
+    if (!gistId) {
+      const created = await request("POST", "https://api.github.com/gists", {
+        description: "FC Price Watch sync (private)",
+        public: false,
+        files: { "price-watch-prices.json": { content: "{}" } }
+      }, { ...auth(token), "Content-Type": "application/json" });
+      if (created.status !== 201 || !created.json || !created.json.id) {
+        throw new Error(created.status === 404 || created.status === 403
+          ? L("token mist het recht \"gist\": maak een nieuwe met het vinkje bij gist", "token lacks the \"gist\" permission: create a new one with gist ticked")
+          : L(`opslag maken mislukt: ${githubError(created)}`, `creating storage failed: ${githubError(created)}`));
+      }
+      setValue(TOKEN_KEY, token);
+      return created.json.id;
+    }
     const response = await request("GET", gistUrl(gistId), undefined, auth(token));
     if (response.status !== 200) throw new Error(L(`Token werkt niet met deze gist: ${githubError(response)}`, `Token doesn't work with this gist: ${githubError(response)}`));
     setValue(TOKEN_KEY, token);
+    return gistId;
   }
 
   async function push(gistId, file, content) {
@@ -12960,8 +13031,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       case "status":
         return { hasToken: !!getValue(TOKEN_KEY) };
       case "setToken":
-        await setToken(message.token, message.gistId);
-        return { hasToken: true };
+        return { hasToken: true, gistId: await setToken(message.token, message.gistId) };
       case "clearToken":
         setValue(TOKEN_KEY, null);
         return { hasToken: false };

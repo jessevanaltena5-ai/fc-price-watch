@@ -43,7 +43,14 @@ to get one right away).
 | [pt-transfermarkt-knop.user.js](pt-transfermarkt-knop.user.js) | Old: 🔍 button in the Paletools Price Tracker. |
 | [price-tracker-plus.user.js](price-tracker-plus.user.js) | Old: Price Tracker Plus for the Paletools table. |
 
-## Live via your PC (optional)
+## Also on your phone (optional)
 
-Your GitHub token and gist are **not** in this repo. Fill them in yourself under
-*⇄ Transfer → Live via your PC*; they stay in Tampermonkey on your own device only.
+Step 5 of the guide links your PC to your own private storage on GitHub (a secret gist), so your
+phone can see the same lists and prices. You only need a free GitHub account:
+
+1. Open <https://github.com/settings/tokens/new?scopes=gist&description=FC%20Price%20Watch>
+   (only *gist* is ticked), pick **No expiration**, click **Generate token**.
+2. Copy the token (`ghp_…`), paste it in the guide and click **Save**. The storage is created for you.
+3. Link your phone: *Players → ⇄ Transfer → 📱 Token to phone* and scan the QR code.
+
+The token stays in Tampermonkey on your own device and is **not** in this repo. Never share it.

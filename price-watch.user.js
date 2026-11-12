@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.70.1
+// @version      2.70.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -13147,7 +13147,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   .pt-flip-card .pt-flip-table { min-width: 0; width: 100%; }
   .pt-flip-card .pt-fx-table, .pt-flip-card .pt-fx-table tbody { display: block; width: 100%; }
   .pt-flip-card .pt-fx-table thead { display: none; }
-  .pt-flip-card tr.pt-flip-row { display: flex; flex-wrap: wrap; align-items: center; margin: 0 0 8px; padding: 9px 10px 9px 8px; border: 1px solid rgba(148, 178, 230, .12); border-left: 4px solid rgba(148, 178, 230, .28); border-radius: 14px; background: rgba(255, 255, 255, .035); }
+  .pt-flip-card tr.pt-flip-row { -webkit-tap-highlight-color: rgba(76, 180, 255, .15); display: flex; flex-wrap: wrap; align-items: center; margin: 0 0 8px; padding: 9px 10px 9px 8px; border: 1px solid rgba(148, 178, 230, .12); border-left: 4px solid rgba(148, 178, 230, .28); border-radius: 14px; background: rgba(255, 255, 255, .035); }
   .pt-flip-card tr.pt-flip-row-buy { border-left-color: #2fe39a; background: rgba(47, 227, 154, .06); }
   .pt-flip-card tr.pt-flip-row-near { border-left-color: #f5c451; }
   .pt-flip-card tr.pt-flip-row-risk { border-left-color: #ff9f5a; }
@@ -13254,7 +13254,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   // iPhone: the EA app swallows the click that should follow a tap, so our buttons never fire. Turn a real
   // tap (finger didn't move) on our own controls into a click ourselves, and cancel the native one.
   if ("ontouchstart" in window) {
-    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-lowest-wrap, .pt-picker, .pt-ql";
+    const OUR_AREAS = ".pt-watch-view, .pt-run-bar, .pt-toast, .pt-watch-add, .pt-lowest-wrap, .pt-picker, .pt-ql, .pt-guide, .pt-sc-ea";
     function openSelectPicker(select) {
       document.querySelectorAll(".pt-picker").forEach(old => old.remove());
       const overlay = el("div", "pt-picker");
@@ -13281,7 +13281,8 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       const current = sheet.querySelector(".pt-picker-current");
       if (current) current.scrollIntoView({ block: "center" });
     }
-    const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio]";
+    // tr.pt-flip-row: a Flip row opens its details on a tap (the row itself has the click handler)
+    const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio], tr.pt-flip-row";
     let start = null;
     // iOS can't always cancel the native click (touchend not cancelable, e.g. just after scrolling): it then
     // follows our own click, and one tap would count twice. Swallow it.

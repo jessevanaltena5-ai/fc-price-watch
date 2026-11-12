@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.67.1
+// @version      2.68.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9184,6 +9184,105 @@ function priceWatchMain(SCRIPT_VERSION) {
     badge.classList.toggle("pt-tab-badge-good", !!good);
   }
 
+  // --- First-use guide ------------------------------------------------------------
+  // Shown once, the first time Price Watch opens (pt_guide_v1); "📘 Guide" in the tab bar opens it again.
+  // Step 1 picks the language and platform, the rest explains the tabs and the rules in a few lines.
+  const GUIDE_KEY = "pt_guide_v1";
+  function guideSeen() {
+    try { return !!localStorage.getItem(GUIDE_KEY); } catch (_) { return true; }
+  }
+  function openGuide(root) {
+    const old = root.querySelector(".pt-guide");
+    if (old) old.remove();
+    const startLang = uiLang();
+    const startPlatform = getFlip().platform;
+    const box = el("div", "pt-guide");
+    const card = el("div", "pt-guide-card");
+    box.appendChild(card);
+    let step = 0;
+    const close = () => {
+      try { localStorage.setItem(GUIDE_KEY, String(Date.now())); } catch (_) { /* shows again next time */ }
+      box.remove();
+      const flip = getFlip();
+      if (flip.platform !== startPlatform) {
+        refreshFutggPrices(true);
+        if (flip.source === "futgg") loadMomentum(false);
+      }
+      if (flip.lang !== startLang) showToast(L("Taal: Nederlands. Alle tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. All tabs switch too when you reopen Price Watch."), true);
+      listeners.forEach(listener => listener());
+    };
+    const set = mutate => { const state = getFlip(); mutate(state); saveFlip(state); draw(); };
+    const pick = (label, on, onClick) => {
+      const b = el("button", `pt-guide-pick${on ? " pt-guide-on" : ""}`, label);
+      b.type = "button";
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    const row = (icon, title, text) => {
+      const line = el("div", "pt-guide-line");
+      const textBox = el("div");
+      textBox.append(el("b", "", title), el("span", "", text));
+      line.append(el("span", "pt-guide-icon", icon), textBox);
+      return line;
+    };
+    const STEPS = [
+      () => {
+        const flip = getFlip();
+        const lang = el("div", "pt-guide-picks");
+        lang.append(pick("English", uiLang() === "en", () => set(s => { s.lang = "en"; })), pick("Nederlands", uiLang() === "nl", () => set(s => { s.lang = "nl"; })));
+        const platform = el("div", "pt-guide-picks");
+        platform.append(pick("💻 PC", flip.platform !== "console", () => set(s => { s.platform = "pc"; })),
+          pick("🎮 Console (PlayStation / Xbox)", flip.platform === "console", () => set(s => { s.platform = "console"; })));
+        return [L("👋 Welkom bij Price Watch", "👋 Welcome to Price Watch"), [
+          el("p", "", L("Price Watch helpt je goedkope kaarten te vinden om te flippen: het toont echte verkopen, een score en een koop- en verkoopprijs. Eerst twee keuzes:", "Price Watch helps you find cheap cards to flip: it shows real sales, a score and a buy and sell price. First two choices:")),
+          el("div", "pt-guide-label", L("Taal", "Language")), lang,
+          el("div", "pt-guide-label", L("Op welk platform speel je?", "Which platform do you play on?")), platform,
+          el("p", "pt-guide-note", L("Prijzen en verkopen komen dan van jouw platform. Console gebruikt de PlayStation-prijzen van FUT.GG en FUTBIN (Xbox zit daar dichtbij). Je kunt dit later wijzigen in Flip → ⚙.", "Prices and sales then come from your platform. Console uses the PlayStation prices from FUT.GG and FUTBIN (Xbox is close to those). You can change this later in Flip → ⚙."))
+        ]];
+      },
+      () => [L("🔁 Begin bij Flip", "🔁 Start with Flip"), [
+        row("📡", L("Bron", "Source"), L("Kies FUT.GG (werkt meteen, niets invullen) of fodder.gg (plak je eigen fodder.gg Price Watch-link onder ⚙).", "Pick FUT.GG (works right away, nothing to fill in) or fodder.gg (paste your own fodder.gg Price Watch link under ⚙).")),
+        row("⏳", L("Even wachten", "Give it a moment"), L("De lijst laadt vanzelf. Daarna checkt Price Watch op de achtergrond de echte FUTBIN-verkopen. Laat de web app open staan; de eerste ronde duurt een paar minuten.", "The list loads by itself. Then Price Watch checks the real FUTBIN sales in the background. Keep the web app open; the first round takes a few minutes.")),
+        row("🟢", L("Bolletje", "Dot"), ft("help_dotText")),
+        row("👆", L("Details", "Details"), L("Klik op een rij voor alles: waarom deze score, de echte verkopen en de waarschuwingen. De ? rechtsboven legt elke kolom uit.", "Click a row for everything: why this score, the real sales and the warnings. The ? at the top right explains every column.")),
+        row("🆕", L("Nieuwe kaarten", "New cards"), L("Kaarten die net uit zijn worden nooit groen: hun prijs zakt vaak nog hard.", "Cards that just came out are never green: their price often still drops a lot."))
+      ]],
+      () => [L("🗂 De andere tabs", "🗂 The other tabs"), [
+        row("👤", L("Spelers", "Players"), L("Volg spelers met een doelprijs; je ziet hoe ver de markt ervan af zit.", "Follow players with a target price; you see how far the market is from it.")),
+        row("🪙", "Fodder", L("Prijzen van goud-fodder per rating (voor SBC's), met een doel per rating.", "Prices of gold fodder per rating (for SBCs), with a target per rating.")),
+        row("📋", L("Lijsten", "Lists"), L("Eigen zoek- en biedlijsten; Price Watch zet de filters per kaart klaar.", "Your own search and bid lists; Price Watch sets the filters up per card.")),
+        row("📦", "Transfers", L("Je transferlijst: wat je ervoor betaalde, wat het nu waard is en je winst na 5% belasting.", "Your transfer list: what you paid, what it is worth now and your profit after 5% tax."))
+      ]],
+      () => [L("✅ Goed om te weten", "✅ Good to know"), [
+        row("✋", L("Jij drukt zelf", "You press the buttons"), L("🔍-knoppen vullen alleen de zoekfilters van de transfermarkt in. Zoeken, kopen, bieden en listen doe je altijd zelf. Price Watch koopt nooit iets voor je.", "🔍 buttons only fill in the transfer market search filters. You always search, buy, bid and list yourself. Price Watch never buys anything for you.")),
+        row("🐢", L("Rustig zoeken", "Search calmly"), L("Zoek niet te snel achter elkaar: EA kan de transfermarkt dan tijdelijk blokkeren.", "Don't search too fast in a row: EA can then block the transfer market for a while.")),
+        row("⌨", L("Sneltoetsen", "Hotkeys"), L("Rechtsklik op een knop in de web app → \"Toets toewijzen\". Daarna is één toets één klik.", "Right-click a button in the web app → \"Assign key\". After that one key press is one click.")),
+        row("💸", L("Belasting", "Tax"), L("EA houdt 5% in bij elke verkoop; alle winsten in Price Watch zijn al na belasting.", "EA keeps 5% of every sale; all profits in Price Watch are already after tax.")),
+        row("🔄", "Updates", L("Nieuwe versies komen vanzelf via Tampermonkey. Deze gids open je weer met 📘 bovenaan.", "New versions arrive by themselves through Tampermonkey. Open this guide again with 📘 at the top."))
+      ]]
+    ];
+    function draw() {
+      card.textContent = "";
+      const [title, body] = STEPS[step]();
+      const head = el("div", "pt-guide-head");
+      const skip = el("button", "pt-guide-skip", "✕");
+      skip.type = "button";
+      skip.title = L("Sluiten", "Close");
+      skip.addEventListener("click", close);
+      head.append(el("h2", "", title), el("span", "pt-guide-steps", `${step + 1} / ${STEPS.length}`), skip);
+      const content = el("div", "pt-guide-body");
+      content.append(...body);
+      const nav = el("div", "pt-guide-nav");
+      if (step > 0) nav.appendChild(pick(L("‹ Terug", "‹ Back"), false, () => { step--; draw(); }));
+      nav.appendChild(el("span", "pt-fx-spacer"));
+      const last = step === STEPS.length - 1;
+      nav.appendChild(pick(last ? L("Aan de slag ✓", "Let's go ✓") : L("Volgende ›", "Next ›"), true, () => { if (last) close(); else { step++; draw(); } }));
+      card.append(head, content, nav);
+    }
+    draw();
+    root.appendChild(box);
+  }
+
   function buildTabs(root, sections) {
     const bar = el("div", "pt-tabs");
     const buttons = {};
@@ -9211,7 +9310,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     });
     tabBadges = buttons;
     const device = el("span", "pt-tab-device");
-    bar.append(el("span", "pt-tab-spacer"), device);
+    const guide = el("button", "pt-tab pt-tab-guide", L("📘 Gids", "📘 Guide"));
+    guide.type = "button";
+    guide.title = L("Uitleg voor de eerste keer: taal, platform en hoe alles werkt", "First-time guide: language, platform and how everything works");
+    guide.addEventListener("click", () => openGuide(root));
+    bar.append(el("span", "pt-tab-spacer"), guide, device);
     const drawDevice = () => {
       device.textContent = `${pcDevice() ? "💻 Pc" : L("📱 Telefoon", "📱 Phone")}${futggPricesAt ? L(` · FUT.GG-prijzen ${formatTime(futggPricesAt)}`, ` · FUT.GG prices ${formatTime(futggPricesAt)}`) : ""}`;
       device.title = pcDevice()
@@ -9228,6 +9331,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Default tab.
     }
     show(sections[initial] ? initial : "flip");
+    if (!guideSeen()) openGuide(root);
     return show;
   }
 
@@ -12187,6 +12291,28 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-watch-view .pt-tab-badge-good { background: rgba(47, 227, 154, .14); color: var(--c-good); }
 .pt-watch-view .pt-tab-spacer { flex: 1; }
 .pt-watch-view .pt-tab-device { font-size: 12px; color: var(--c-muted); padding: 0 4px; white-space: nowrap; }
+.pt-watch-view button.pt-tab.pt-tab-guide { font-size: 12px; padding: 6px 10px; }
+.pt-guide { position: fixed; inset: 0; z-index: 9990; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(4, 8, 16, .72); }
+.pt-guide-card { width: min(620px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: linear-gradient(180deg, #16223a, #0c1424); border: 1px solid rgba(148, 178, 230, .25); border-radius: 16px; box-shadow: 0 30px 80px rgba(0, 0, 0, .55); padding: 18px 20px 16px; color: #dfe7f2; font-size: 14px; line-height: 1.45; text-align: left; }
+.pt-guide-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.pt-guide-head h2 { margin: 0; font-size: 19px; color: #fff; flex: 1; }
+.pt-guide-steps { font-size: 12px; color: #8d9aae; }
+.pt-guide button { appearance: none; font: inherit; cursor: pointer; }
+.pt-guide-skip { border: 0; background: none; color: #8d9aae; font-size: 16px; padding: 2px 6px; }
+.pt-guide-skip:hover { color: #fff; }
+.pt-guide-body p { margin: 0 0 10px; }
+.pt-guide-label { font-size: 12px; font-weight: 700; color: #8d9aae; text-transform: uppercase; letter-spacing: .4px; margin: 10px 0 6px; }
+.pt-guide-picks { display: flex; flex-wrap: wrap; gap: 8px; }
+.pt-guide-pick { border: 1px solid rgba(148, 178, 230, .25); background: rgba(7, 12, 22, .6); color: #dfe7f2; border-radius: 10px; padding: 8px 14px; font-weight: 700; }
+.pt-guide-pick:hover { border-color: #63b3ff; }
+.pt-guide-pick.pt-guide-on { border-color: #27d98b; background: rgba(39, 217, 139, .16); color: #fff; }
+.pt-guide-note { font-size: 12px; color: #8d9aae; margin-top: 12px !important; }
+.pt-guide-line { display: grid; grid-template-columns: 28px 1fr; gap: 8px; padding: 8px 0; border-top: 1px solid rgba(148, 178, 230, .10); }
+.pt-guide-line:first-child { border-top: 0; }
+.pt-guide-icon { font-size: 18px; text-align: center; }
+.pt-guide-line b { display: block; color: #fff; margin-bottom: 2px; }
+.pt-guide-nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.pt-guide .pt-fx-spacer { flex: 1; }
 .pt-watch-view .pt-watch-card { max-width: 1280px; background: linear-gradient(180deg, rgba(19, 29, 49, .94), rgba(11, 18, 31, .97)); border: 1px solid rgba(148, 178, 230, .18); border-radius: 16px; box-shadow: 0 24px 60px rgba(0, 0, 0, .40), inset 0 1px 0 rgba(255, 255, 255, .04); padding: 14px 16px 12px; color: var(--c-text); }
 .pt-watch-view .pt-watch-toolbar { gap: 10px 14px; margin-bottom: 12px; align-items: center; }
 .pt-watch-view .pt-watch-title { font-size: 22px; font-weight: 800; letter-spacing: .3px; color: var(--c-text); margin: 0 0 2px; }

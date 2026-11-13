@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.71.0
+// @version      2.72.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8386,6 +8386,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!parsed.pc && !parsed.ps) throw new Error(L("geen index gevonden op de FUTBIN-pagina", "no index found on the FUTBIN page"));
       saveMarket({ ...current, ...parsed });
       marketError = "";
+      marketAlert(getFlip().platform);
       listeners.forEach(listener => listener());
       return true;
     } catch (error) {
@@ -8427,6 +8428,51 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     return false;
   }
+  // Crash help (pc, via ntfy + a toast): "falling hard" when the index drops >= 3% in 6 h, and "turning"
+  // when, after a drop of >= 5% below its 3-day high, it is >= 1.5% above the day's low with 6 h up again.
+  // Each at most once per 12 h, and a turn only once per low.
+  const MARKET_ALERT_KEY = "pt_market_alert_v1"; // { fallAt, turnAt, lowT }
+  function marketAlertState(platform, now = Date.now()) {
+    const set = getMarket()[futbinPlatform(platform)];
+    const mk = marketStats(platform);
+    if (!set || !set.live || set.live.length < 20 || !mk) return null;
+    const live = set.live;
+    const lastT = live[live.length - 1][0];
+    const peak = Math.max(...live.map(p => p[1]));
+    let low = null;
+    live.filter(p => p[0] >= lastT - 24 * 3600000).forEach(p => { if (!low || p[1] < low[1]) low = p; });
+    const stored = (() => { try { return JSON.parse(localStorage.getItem(MARKET_ALERT_KEY) || "{}") || {}; } catch (_) { return {}; } })();
+    const drop = low[1] / peak - 1;
+    const up = mk.now / low[1] - 1;
+    const fall = mk.ch6 != null && mk.ch6 <= -0.03 && now - (stored.fallAt || 0) > 12 * 3600000;
+    const turn = drop <= -0.05 && up >= 0.015 && mk.ch6 != null && mk.ch6 > 0 && low[0] !== stored.lowT && now - (stored.turnAt || 0) > 12 * 3600000;
+    return { mk, drop, up, low, fall, turn, stored };
+  }
+  function marketAlert(platform) {
+    if (!pcDevice()) return;
+    const state = marketAlertState(platform);
+    if (!state || (!state.fall && !state.turn)) return;
+    const { mk, drop, up, low, stored } = state;
+    const name = futbinPlatform(platform) === "pc" ? "PC" : "console";
+    const pct = value => flipPct(value * 100, 1);
+    let title;
+    let text;
+    if (state.turn) {
+      title = L("📈 Markt draait", "📈 Market is turning");
+      text = L(`Index 100 (${name}) zakte ${pct(drop)} onder de top van 3 dagen en staat nu ${pct(up)} boven de bodem (6u ${pct(mk.ch6)}). Tijd om weer naar kopen te kijken.`,
+        `Index 100 (${name}) dropped ${pct(drop)} below its 3-day high and is now ${pct(up)} above the low (6h ${pct(mk.ch6)}). Time to look at buying again.`);
+      Object.assign(stored, { turnAt: Date.now(), lowT: low[0] });
+    } else {
+      title = L("📉 Markt zakt hard", "📉 Market falling hard");
+      text = L(`Index 100 (${name}) ${pct(mk.ch6)} in 6 uur (nu ${mk.now.toFixed(1)}). Niet bijkopen; verkopen kan nog.`,
+        `Index 100 (${name}) ${pct(mk.ch6)} in 6 hours (now ${mk.now.toFixed(1)}). Don't buy more; you can still sell.`);
+      stored.fallAt = Date.now();
+    }
+    try { localStorage.setItem(MARKET_ALERT_KEY, JSON.stringify(stored)); } catch (_) { /* may repeat once */ }
+    showToast(`${title} – ${text}`, !!state.turn);
+    relayCall("notify", { title, text }).catch(() => {}); // ntfy, when a topic is set
+  }
+
   function marketText(platform) {
     const mk = marketStats(platform);
     if (!mk) return marketError && pcDevice() ? L(`📈 markt: ${marketError}`, `📈 market: ${marketError}`) : "";

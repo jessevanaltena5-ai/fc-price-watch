@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.70.2
+// @version      2.71.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -901,7 +901,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const extraIds = [...new Set(readJson(TL_IDS_KEY, []).concat(getStock().filter(list => list.type === "players")
         .flatMap(list => list.players.filter(player => !(player.special && player.definitionId <= 0xFFFFFF)).map(player => player.definitionId))))];
       await fetchGeniePrices(getWatch().map(entry => entry.definitionId).concat(extraIds));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), v: SCRIPT_VERSION || "" };
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(), v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
@@ -992,6 +992,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (data.bm && typeof data.bm === "object") writeJson(BOUGHT_KEY, { ...data.bm, ...readJson(BOUGHT_KEY, {}) });
       if (data.h && typeof data.h === "object") syncFlipHistory(data.h); // flip price history of the pc
       if (data.fb) syncFutbinFromRelay(data.fb); // FUTBIN checks of the pc
+      if (data.mk && typeof data.mk === "object" && !pcDevice()) { // market index of the pc
+        const local = getMarket();
+        const merged = { ...local };
+        ["pc", "ps"].forEach(key => { if (data.mk[key] && (!local[key] || local[key].at < data.mk[key].at)) merged[key] = data.mk[key]; });
+        saveMarket(merged);
+      }
       listPatch.pcFb = data.fb ? Object.keys(data.fb).length : -1; // -1: the pc doesn't send them (older version)
       listPatch.pcVersion = data.v || "";
       if (data.fs && syncFlipSettings(data.fs)) {
@@ -7016,6 +7022,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_young: ["Nieuwe kaart: pas {days} dag(en) op de markt, de prijs zakt vaak nog", "New card: only {days} day(s) on the market, the price often keeps falling"],
     w_fbDownLong: ["Echte verkoopprijzen dalen al langer (FUTBIN)", "Real sale prices have been falling for a while (FUTBIN)"],
     w_fbDemand: ["Minder verkopen dan de dagen ervoor ({pct})", "Fewer sales than the days before ({pct})"],
+    w_marketWide: ["De hele markt zakt ook ({market} in 24u, kaart {card}): geen echte dip van deze kaart", "The whole market is falling too ({market} in 24h, card {card}): not a dip of this card"],
+    w_marketFalling: ["De markt zakt nu nog ({pct} in 6u): wacht tot hij draait", "The market is still falling ({pct} in 6h): wait until it turns"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
     miss_fbHistory: ["verloop van de echte verkopen (te weinig verkopen of data)", "course of the real sales (too few sales or data)"],
     pos_cheapStable: ["Goedkoop, terwijl de echte verkoopprijzen stabiel blijven", "Cheap, while real sale prices hold"],
@@ -7305,7 +7313,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const restless = core.length >= 6 && (coreMax - coreMin) / mid > 0.2;
     if (restless) warnings.push(ft("w_restless", { low: flipShort(coreMin), high: flipShort(coreMax) }));
     // Thin data or a crazy high (sheet: skip it), a falling or restless price or a crash: never plain green.
-    const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky;
+    const marketRisky = platform ? marketCheck(Number.isFinite(card.change) ? card.change / 100 : null, platform, warnings) : false;
+    const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky || marketRisky;
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, sell, profit, pct, gap, warnings, status, risky, futbin: useFutbin ? futbin : null };
@@ -8332,6 +8341,100 @@ function priceWatchMain(SCRIPT_VERSION) {
     return box;
   }
 
+  // --- FUTBIN market index (Index 100): is a dip the card, or the whole market? ---------------------
+  // futbin.com/27/market carries the index per platform: "PC Index" (.market-graph-platform-pc) and
+  // "Console Index" (-ps), live (1 point a minute, ~3 days) and daily (~8 weeks). The page is big (~4 MB),
+  // so only the pc fetches it, every 30 min, keeps 15-min points of 72 h and shares it via the gist.
+  const MARKET_KEY = "pt_market_v1"; // { pc|ps: { at, live: [[t, v]], daily: [[t, v]] } }
+  const MARKET_URL = "https://www.futbin.com/27/market";
+  const MARKET_REFRESH_MS = 30 * 60 * 1000;
+  let marketLoading = false;
+  let marketError = "";
+  function getMarket() {
+    try { return JSON.parse(localStorage.getItem(MARKET_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  function saveMarket(value) {
+    try { localStorage.setItem(MARKET_KEY, JSON.stringify(value)); } catch (_) { /* next fetch */ }
+  }
+  function marketParse(doc) {
+    const out = {};
+    ["pc", "ps"].forEach(platform => {
+      const read = kind => {
+        const node = doc.querySelector(`.market-${kind}-graph.market-graph-platform-${platform}`);
+        try { return node ? JSON.parse(node.getAttribute("data-graph-data") || "[]") : []; } catch (_) { return []; }
+      };
+      const live = read("live").filter(p => Array.isArray(p) && p[0] > 0 && p[1] > 0);
+      if (!live.length) return;
+      const last = live[live.length - 1][0];
+      const kept = [];
+      let bucket = -1;
+      live.filter(p => p[0] >= last - 72 * 3600000).forEach(p => { // one point per 15 minutes
+        const b = Math.floor(p[0] / 900000);
+        if (b !== bucket) { kept.push([Math.round(p[0]), p[1]]); bucket = b; } else kept[kept.length - 1] = [Math.round(p[0]), p[1]];
+      });
+      out[platform] = { at: Date.now(), live: kept, daily: read("daily").slice(-14).map(p => [Math.round(p[0]), p[1]]) };
+    });
+    return out;
+  }
+  async function loadMarket(force) {
+    if (!pcDevice() || marketLoading || Date.now() < futbinAutoPause) return false;
+    const current = getMarket();
+    if (!force && current.pc && Date.now() - current.pc.at < MARKET_REFRESH_MS) return false;
+    marketLoading = true;
+    try {
+      const parsed = marketParse(await futbinHtml(MARKET_URL));
+      if (!parsed.pc && !parsed.ps) throw new Error(L("geen index gevonden op de FUTBIN-pagina", "no index found on the FUTBIN page"));
+      saveMarket({ ...current, ...parsed });
+      marketError = "";
+      listeners.forEach(listener => listener());
+      return true;
+    } catch (error) {
+      marketError = error && error.message ? error.message : String(error);
+      return false;
+    } finally {
+      marketLoading = false;
+    }
+  }
+  // now, change over 6 / 24 / 72 h and vs the 7-day average (null = not known); only when < 3 h old.
+  function marketStats(platform) {
+    const set = getMarket()[futbinPlatform(platform)];
+    if (!set || !set.live || set.live.length < 2 || Date.now() - set.at > 3 * 3600000) return null;
+    const live = set.live;
+    const [lastT, now] = live[live.length - 1];
+    const at = hours => {
+      const t = lastT - hours * 3600000;
+      if (live[0][0] > t + 900000) return null; // not that far back
+      let value = live[0][1];
+      for (const [x, v] of live) { if (x > t) break; value = v; }
+      return value;
+    };
+    const change = before => (before > 0 ? now / before - 1 : null);
+    const week = (set.daily || []).slice(-7).map(p => p[1]);
+    const weekAvg = week.length >= 3 ? week.reduce((a, b) => a + b, 0) / week.length : null;
+    return { now, at: set.at, ch6: change(at(6)), ch24: change(at(24)), ch72: change(live[0][1]), vsWeek: weekAvg ? now / weekAvg - 1 : null };
+  }
+  // A card's own dip vs the market: whole-market drops and a market still falling make it risky.
+  function marketCheck(cardChange, platform, warnings) {
+    const mk = marketStats(platform);
+    if (!mk) return false;
+    if (mk.ch24 != null && mk.ch24 <= -0.03 && cardChange != null && cardChange < 0 && cardChange - mk.ch24 > -0.04) {
+      warnings.push(ft("w_marketWide", { market: flipPct(mk.ch24 * 100, 1), card: flipPct(cardChange * 100, 1) }));
+      return true;
+    }
+    if (mk.ch6 != null && mk.ch6 <= -0.02) {
+      warnings.push(ft("w_marketFalling", { pct: flipPct(mk.ch6 * 100, 1) }));
+      return true;
+    }
+    return false;
+  }
+  function marketText(platform) {
+    const mk = marketStats(platform);
+    if (!mk) return marketError && pcDevice() ? L(`📈 markt: ${marketError}`, `📈 market: ${marketError}`) : "";
+    const p = value => (value == null ? "—" : flipPct(value * 100, 1));
+    return L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(mk.ch24)} · 6u ${p(mk.ch6)}`,
+      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(mk.ch24)} · 6h ${p(mk.ch6)}`);
+  }
+
   // --- 72 h of real FUTBIN sales, from the same sales page (no extra request) -------------------------
   // Next to the auctions table (last ~500 auctions, sold or not) the page carries two charts per platform:
   // "live" = the last 500 real sales with exact times (the same sales as the table's "Sold for", but they
@@ -8691,6 +8794,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try {
       const state = getFlip();
       if (!state.autoFutbin || !pcDevice()) return;
+      loadMarket(false);
       if (state.token) loadFlipSheet(false);
       loadMomentum(false);
     } catch (error) {
@@ -8727,7 +8831,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
     const pct = buy > 0 ? profit / buy * 100 : 0;
     const gap = buy > 0 ? card.now / buy - 1 : 1;
-    const risky = falling || fbRisky;
+    const marketRisky = marketCheck(card.m24 != null ? card.m24 / 100 : null, platform, warnings);
+    const risky = falling || fbRisky || marketRisky;
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, sell, profit, pct, gap, warnings, status, risky, futbin, move };
@@ -9451,6 +9556,8 @@ function priceWatchMain(SCRIPT_VERSION) {
             : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
       const syncText = flipSyncText();
       if (syncText) status.textContent += ` · ${syncText}`;
+      const marketLine = marketText(state.platform);
+      if (marketLine) status.textContent += ` · ${marketLine}`;
       status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
       if (momentum) {
         const set = momentumData && momentumData[state.platform];
@@ -9464,6 +9571,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         status.title = ft("mStatusTitle");
         const syncLine = flipSyncText();
         if (syncLine) status.textContent += ` · ${syncLine}`;
+        const marketInfo = marketText(state.platform);
+        if (marketInfo) status.textContent += ` · ${marketInfo}`;
       }
 
       tbody.textContent = "";
@@ -13686,10 +13795,11 @@ try {
     // FUTBIN player search and a player's sales page (flip check), nothing else on futbin.com.
     const futbinPage = parsed.hostname === "www.futbin.com" &&
       ((parsed.pathname === "/players" && /^[?]search=[^&]+$/.test(parsed.search)) ||
-       (/^[/]\d{2}[/]sales[/]\d+[/][a-z0-9-]+$/.test(parsed.pathname) && /^[?]platform=(pc|ps)$/.test(parsed.search)));
+       (/^[/]\d{2}[/]sales[/]\d+[/][a-z0-9-]+$/.test(parsed.pathname) && /^[?]platform=(pc|ps)$/.test(parsed.search)) ||
+       (/^[/]\d{2}[/]market$/.test(parsed.pathname) && !parsed.search)); // market index (Index 100), pc only, every 30 min
     const htmlPage = fodderWatch || futbinPage;
     if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi && !htmlPage)) {
-      reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch and FUTBIN search/sales are allowed") });
+      reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch and FUTBIN search/sales/market are allowed") });
       return;
     }
     if (typeof GM_xmlhttpRequest !== "function") {

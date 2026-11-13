@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.74.0
+// @version      2.75.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6724,6 +6724,56 @@ function priceWatchMain(SCRIPT_VERSION) {
     tick();
     window.setInterval(tick, 5 * 60 * 1000);
   }, 20000);
+  // Buy and list price per rating (fodder bought to sell when an SBC pushes prices up). Buy: 1 price step
+  // under the typical cheapest regular card (2 at a normal index, 3 when expensive). List: markup per rating after a
+  // trader's rule of thumb (84 <800-850 → 1.2-1.4K, 85 <2.2-2.3K → 2.8-3.2K, 86 <4.8-5K → 5.6-6K, 87 <7-7.1K → 7.7-8.2K).
+  const FODDER_MARKUP = { 83: 0.55, 84: 0.55, 85: 0.33, 86: 0.18, 87: 0.13, 88: 0.1, 89: 0.08 }; // 90+: 0.06, ≤82: 0.55
+  function fodderTrade(rating, level) {
+    const regular = (futggCheapestFor(rating) || []).filter(item => !item.special).map(item => item.price);
+    const set = getFgFodder()[userPlatform() === "console" ? "console" : "pc"];
+    const row = set && (set.rows || []).find(item => item.r === rating);
+    // the typical cheapest: median of the 5 cheapest regular cards (one odd cheap listing doesn't count)
+    const five = regular.sort((a, b) => a - b).slice(0, 5);
+    const now = five.length ? five[Math.floor((five.length - 1) / 2)] : row ? row.price : 0;
+    if (!now) return null;
+    let buy = now;
+    for (let i = 0; i < (level === "bad" ? 3 : level === "ok" ? 2 : 1); i++) buy = priceStepBelow(buy);
+    buy = Math.max(150, buy);
+    const markup = FODDER_MARKUP[rating] != null ? FODDER_MARKUP[rating] : rating >= 90 ? 0.06 : 0.55;
+    const list = roundUpToStep(buy * (1 + markup));
+    return { now, buy, list, net: Math.floor(list * (1 - EA_TAX)) - buy, source: regular.length ? "futgg" : "index" };
+  }
+  function drawFodderTrade(box, level) {
+    const ratings = fodderRatings().map(rating => ({ rating, trade: fodderTrade(rating, level) })).filter(item => item.trade);
+    if (!ratings.length) return;
+    const table = el("table", "pt-fgi-trade");
+    const head = el("tr");
+    ["Rating", L("Nu goedkoopst", "Cheapest now"), L("Koop ≤", "Buy ≤"), L("Verkoop voor", "List at"), L("Winst na 5%", "Profit after 5%")].forEach(text => head.appendChild(el("th", "", text)));
+    table.appendChild(head);
+    ratings.forEach(({ rating, trade }) => {
+      const tr = el("tr");
+      tr.append(el("td", "", String(rating)), el("td", "", priceFormat.format(trade.now) + (trade.source === "index" ? "*" : "")),
+        el("td", "pt-fgi-buy", priceFormat.format(trade.buy)), el("td", "", priceFormat.format(trade.list)),
+        el("td", trade.net > 0 ? "pt-fgi-plus" : "pt-fgi-minus", `${trade.net > 0 ? "+" : ""}${priceFormat.format(trade.net)} (${Math.round(trade.net / trade.buy * 100)}%)`));
+      table.appendChild(tr);
+    });
+    const wrap = el("div", "pt-fgi-trade-wrap");
+    wrap.appendChild(table);
+    const foot = el("div", "pt-fgi-best");
+    const set = el("button", "pt-watch-refresh", L("→ Koopprijzen als doel zetten", "→ Set buy prices as targets"));
+    set.type = "button";
+    set.title = L("Vult \"Jouw doel\" in met de koopprijs per rating. Daarna zet 🔄 Cycle de zoekfilters klaar; zoeken en kopen doe je zelf.", "Fills in \"Your target\" with the buy price per rating. Then 🔄 Cycle prepares the search filters; you search and buy yourself.");
+    set.addEventListener("click", () => {
+      const state = getFodder();
+      ratings.forEach(({ rating, trade }) => { state.targets[rating] = { ...(state.targets[rating] || {}), max: trade.buy }; });
+      saveFodder();
+      showToast(L(`Doelen gezet voor ${ratings.length} ratings.`, `Targets set for ${ratings.length} ratings.`), true);
+    });
+    foot.append(set, el("span", "pt-muted", L("Verkopen als er een grote SBC uitkomt en fodder stijgt; dat is een verwachting, geen zekerheid.", "Sell when a big SBC drops and fodder rises; that's an expectation, not a certainty.")
+      + (ratings.some(item => item.trade.source === "index") ? L(" * = fodderprijs van de index (geen FUT.GG-lijst)", " * = index fodder price (no FUT.GG list)") : "")));
+    box.append(wrap, foot);
+  }
+
   // The block above the fodder table.
   function drawFgFodder(box) {
     const platform = userPlatform() === "console" ? "console" : "pc";
@@ -6738,6 +6788,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       top.append(el("span", "pt-muted", fgFodderLoading ? L("Fodder-index ophalen…", "Fetching fodder index…")
         : fgFodderError ? L(`Fodder-index: ${fgFodderError}`, `Fodder index: ${fgFodderError}`) : L("Fodder-index: nog niet opgehaald", "Fodder index: not fetched yet")), link);
       box.appendChild(top);
+      drawFodderTrade(box, "ok");
       return;
     }
     const verdict = {
@@ -6782,6 +6833,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         `${row.r} · ${priceFormat.format(row.price)} · ${priceFormat.format(row.per1k)}/1k`)));
       box.appendChild(list);
     }
+    drawFodderTrade(box, st.level);
   }
 
   function buildFodderSection(root) {
@@ -12545,6 +12597,13 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-fgi-best { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
 .pt-fgi-chip { padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .2); font-variant-numeric: tabular-nums; }
 .pt-fgi-chip-best { border-color: #27d98b; color: #27d98b; }
+.pt-fgi-trade-wrap { overflow-x: auto; margin-top: 10px; }
+.pt-fgi-trade { border-collapse: collapse; font-size: 12.5px; font-variant-numeric: tabular-nums; min-width: 100%; }
+.pt-fgi-trade th { font-size: 10.5px; color: #8d9aae; text-transform: uppercase; text-align: right; padding: 3px 8px; border-bottom: 1px solid rgba(148, 178, 230, .22); white-space: nowrap; }
+.pt-fgi-trade td { text-align: right; padding: 4px 8px; border-bottom: 1px solid rgba(148, 178, 230, .08); white-space: nowrap; }
+.pt-fgi-trade th:first-child, .pt-fgi-trade td:first-child { text-align: left; font-weight: 700; }
+.pt-fgi-buy { color: #63b3ff; font-weight: 700; } .pt-fgi-plus { color: #27d98b; } .pt-fgi-minus { color: #ff8080; }
+.pt-fgi-trade-wrap + .pt-fgi-best { margin-top: 8px; }
 .pt-watch-view .pt-credit { margin: 10px 4px 6px; text-align: right; font-size: 10px; letter-spacing: .4px; color: rgba(141, 154, 174, .45); user-select: none; }
 
 .pt-watch-refresh {

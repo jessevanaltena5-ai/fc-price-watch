@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.73.0
+// @version      2.74.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -18,6 +18,7 @@
 // @connect      www.fut.gg
 // @connect      fodder.gg
 // @connect      www.futbin.com
+// @connect      www.futgenie.gg
 // @require      https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js
 // @updateURL    https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
 // @downloadURL  https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js
@@ -6630,6 +6631,159 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
+  // --- Fodder index (futgenie.gg/fodder): what 1,000 SBC points cost with the cheapest fodder --------
+  // The page has a daily chart of 2 weeks per platform (cookie fg_platform) and a table per rating
+  // (points, fodder price, cost per 1,000 points). Fetched at most once an hour; read-only.
+  const FG_FODDER_KEY = "pt_fgfodder_v1"; // { pc|console: { at, series: [[t, v]], rows: [{ r, pts, price, per1k }] } }
+  const FG_FODDER_URL = "https://www.futgenie.gg/fodder";
+  const FG_FODDER_REFRESH_MS = 60 * 60 * 1000;
+  const FG_ALERT_KEY = "pt_fodder_alert_v1";
+  let fgFodderLoading = null;
+  let fgFodderTriedAt = 0;
+  let fgFodderError = "";
+  function getFgFodder() {
+    try { return JSON.parse(localStorage.getItem(FG_FODDER_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  function fgFodderParse(text, platform) {
+    const flat = String(text || "").replace(/\\"/g, '"');
+    const found = /"series":\[\{"id":"(pc|console)"[^\]]*?"points":(\[[^\]]*\])/.exec(flat);
+    if (!found) throw new Error(L("geen grafiek gevonden op de pagina", "no chart found on the page"));
+    if (found[1] !== platform) throw new Error(L(`pagina gaf ${found[1]} in plaats van ${platform}`, `page returned ${found[1]} instead of ${platform}`));
+    const series = JSON.parse(found[2]).filter(p => p && p.t > 0 && p.v > 0).map(p => [p.t, p.v]);
+    const doc = new DOMParser().parseFromString(String(text || ""), "text/html");
+    const num = node => Number(String(node ? node.textContent : "").replace(/[^\d]/g, "")) || 0;
+    const rows = [];
+    doc.querySelectorAll("table.cat-table tbody tr").forEach(tr => {
+      const head = tr.querySelector("th .cat-value");
+      const cells = [...tr.querySelectorAll("td")].map(td => td.querySelector(".cat-value"));
+      const row = { r: num(head), pts: num(cells[0]), price: num(cells[1]), per1k: num(cells[2]) };
+      if (row.r >= 40 && row.pts > 0 && row.price > 0 && row.per1k > 0) rows.push(row);
+    });
+    if (series.length < 2) throw new Error(L("te weinig punten in de grafiek", "too few points in the chart"));
+    return { at: Date.now(), series, rows: rows.sort((a, b) => a.per1k - b.per1k) };
+  }
+  function loadFgFodder(force) {
+    const platform = userPlatform() === "console" ? "console" : "pc";
+    const current = getFgFodder()[platform];
+    if (fgFodderLoading) return fgFodderLoading;
+    if (!force && current && Date.now() - current.at < FG_FODDER_REFRESH_MS) return Promise.resolve(false);
+    if (!force && Date.now() - fgFodderTriedAt < 5 * 60 * 1000) return Promise.resolve(false);
+    fgFodderTriedAt = Date.now();
+    fgFodderLoading = futggRequestJson(`${FG_FODDER_URL}#${platform}`, true).then(text => {
+      const parsed = fgFodderParse(text, platform);
+      const all = getFgFodder();
+      all[platform] = parsed;
+      try { localStorage.setItem(FG_FODDER_KEY, JSON.stringify(all)); } catch (_) { /* next hour */ }
+      fgFodderError = "";
+      listeners.forEach(listener => listener());
+      return true;
+    }).catch(error => {
+      fgFodderError = error && error.message ? error.message : String(error);
+      listeners.forEach(listener => listener());
+      return false;
+    }).finally(() => { fgFodderLoading = null; });
+    return fgFodderLoading;
+  }
+  // now, 2-week low and the usual price (median of the days); level good / ok / bad.
+  function fgFodderStats(platform) {
+    const set = getFgFodder()[platform === "console" ? "console" : "pc"];
+    if (!set || !set.series || set.series.length < 2) return null;
+    const values = set.series.map(p => p[1]);
+    const now = values[values.length - 1];
+    const low = Math.min(...values);
+    const lowAt = set.series[values.lastIndexOf(low)][0];
+    const sorted = values.slice().sort((a, b) => a - b);
+    const usual = sorted[Math.floor(sorted.length / 2)];
+    const lastT = set.series[set.series.length - 1][0];
+    const week = set.series.filter(p => p[0] >= lastT - 7 * 24 * 3600000).map(p => p[1]);
+    const low7 = Math.min(...week);
+    // lowest (of the week, or of 2 weeks) / almost lowest (within 4%) / normal / expensive (10%+ above usual)
+    const kind = now <= low7 ? (now <= low ? "low14" : "low7") : now <= low7 * 1.04 ? "near" : now >= usual * 1.1 ? "high" : "normal";
+    const level = kind === "high" ? "bad" : kind === "normal" ? "ok" : "good";
+    return { now, low, lowAt, low7, usual, kind, level, nearLow: kind === "low7" || kind === "low14", set };
+  }
+  // Push (pc, ntfy) when fodder is cheap: at the 2-week low and below the usual price; once per 24 h.
+  function fgFodderAlert() {
+    if (!pcDevice()) return;
+    const platform = userPlatform() === "console" ? "console" : "pc";
+    const st = fgFodderStats(platform);
+    if (!st || !st.nearLow || st.now >= st.usual * 0.97 || Date.now() - st.set.at > 2 * FG_FODDER_REFRESH_MS) return;
+    let last = 0;
+    try { last = Number(localStorage.getItem(FG_ALERT_KEY)) || 0; } catch (_) { /* none */ }
+    if (Date.now() - last < 24 * 3600000) return;
+    try { localStorage.setItem(FG_ALERT_KEY, String(Date.now())); } catch (_) { /* once more later */ }
+    const best = st.set.rows[0];
+    const title = L("Fodder goedkoop", "Fodder cheap");
+    const text = L(`1.000 SBC-punten kosten nu ${priceFormat.format(st.now)} (laagste week ${priceFormat.format(st.low7)}, 2 weken ${priceFormat.format(st.low)}, normaal ${priceFormat.format(st.usual)}).${best ? ` Beste: ${best.r} voor ${priceFormat.format(best.price)}.` : ""}`,
+      `1,000 SBC points now cost ${priceFormat.format(st.now)} (week low ${priceFormat.format(st.low7)}, 2-week low ${priceFormat.format(st.low)}, usual ${priceFormat.format(st.usual)}).${best ? ` Best: ${best.r} at ${priceFormat.format(best.price)}.` : ""}`);
+    showToast(`🟢 ${title}: ${text}`, true);
+    relayCall("notify", { title, text }).catch(() => { /* toast was shown */ });
+  }
+  window.setTimeout(() => {
+    const tick = () => { if (pcDevice()) loadFgFodder(false).then(() => fgFodderAlert()); };
+    tick();
+    window.setInterval(tick, 5 * 60 * 1000);
+  }, 20000);
+  // The block above the fodder table.
+  function drawFgFodder(box) {
+    const platform = userPlatform() === "console" ? "console" : "pc";
+    const st = fgFodderStats(platform);
+    box.textContent = "";
+    const top = el("div", "pt-fgi-top");
+    const link = el("a", "pt-link-btn", "futgenie.gg ↗");
+    link.href = FG_FODDER_URL;
+    link.target = "_blank";
+    link.rel = "noopener";
+    if (!st) {
+      top.append(el("span", "pt-muted", fgFodderLoading ? L("Fodder-index ophalen…", "Fetching fodder index…")
+        : fgFodderError ? L(`Fodder-index: ${fgFodderError}`, `Fodder index: ${fgFodderError}`) : L("Fodder-index: nog niet opgehaald", "Fodder index: not fetched yet")), link);
+      box.appendChild(top);
+      return;
+    }
+    const verdict = {
+      low14: L("🟢 Laagste van 2 weken: kopen", "🟢 Lowest of 2 weeks: buy"),
+      low7: L("🟢 Laagste van de week: kopen", "🟢 Lowest of the week: buy"),
+      near: L("🟢 Bijna laagst van de week: goed moment", "🟢 Almost the lowest of the week: good time"),
+      normal: L("🟡 Normale prijs: alleen kopen wat je nodig hebt", "🟡 Normal price: only buy what you need"),
+      high: L("🔴 Duur: wachten (of fodder verkopen)", "🔴 Expensive: wait (or sell fodder)")
+    }[st.kind];
+    const main = el("div", "pt-fgi-main");
+    main.append(el("b", "pt-fgi-now", priceFormat.format(st.now)), el("span", "pt-muted", L(" per 1.000 SBC-punten", " per 1,000 SBC points")));
+    const facts = el("div", "pt-muted pt-fgi-facts", L(`laagste week ${priceFormat.format(st.low7)} · laagste 2 weken ${priceFormat.format(st.low)} (${new Date(st.lowAt).toLocaleDateString("nl-NL", { weekday: "short", day: "numeric", month: "short" })}) · normaal ${priceFormat.format(st.usual)} · ${platform === "pc" ? "PC" : "console"} · ${formatTime(st.set.at)}`,
+      `week low ${priceFormat.format(st.low7)} · 2-week low ${priceFormat.format(st.low)} (${new Date(st.lowAt).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}) · usual ${priceFormat.format(st.usual)} · ${platform === "pc" ? "PC" : "console"} · ${formatTime(st.set.at)}`));
+    top.append(main, el("span", `pt-fgi-verdict pt-fgi-${st.level}`, verdict), link);
+    box.appendChild(top);
+    box.appendChild(facts);
+    // Chart: one point a day, the dashed line = usual.
+    const values = st.set.series.map(p => p[1]);
+    const lo = Math.min(...values) * 0.97;
+    const hi = Math.max(...values) * 1.03;
+    const W = 300;
+    const H = 46;
+    const x = i => (i / (values.length - 1)) * W;
+    const y = v => H - ((v - lo) / (hi - lo || 1)) * H;
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("class", "pt-fgi-chart");
+    svg.setAttribute("preserveAspectRatio", "none");
+    const usual = document.createElementNS(NS, "line");
+    [["x1", 0], ["x2", W], ["y1", y(st.usual)], ["y2", y(st.usual)], ["class", "pt-fgi-usual"]].forEach(([k, v]) => usual.setAttribute(k, v));
+    const line = document.createElementNS(NS, "polyline");
+    line.setAttribute("points", values.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" "));
+    line.setAttribute("class", "pt-fgi-line");
+    svg.append(usual, line);
+    box.appendChild(svg);
+    const best = st.set.rows.slice(0, 4);
+    if (best.length) {
+      const list = el("div", "pt-fgi-best");
+      list.appendChild(el("span", "pt-muted", L("Beste per punt: ", "Best per point: ")));
+      best.forEach((row, i) => list.appendChild(el("span", i ? "pt-fgi-chip" : "pt-fgi-chip pt-fgi-chip-best",
+        `${row.r} · ${priceFormat.format(row.price)} · ${priceFormat.format(row.per1k)}/1k`)));
+      box.appendChild(list);
+    }
+  }
+
   function buildFodderSection(root) {
     const card = el("div", "pt-watch-card pt-fodder-card");
     root.appendChild(card);
@@ -6694,7 +6848,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const body = el("tbody");
     table.append(thead, body);
     const totals = el("div", "pt-stock-summary-line pt-fodder-totals");
-    card.append(toolbar, table, totals);
+    const fgIndex = el("div", "pt-fgi");
+    card.append(toolbar, fgIndex, table, totals);
 
     function render() {
       const active = document.activeElement;
@@ -6702,7 +6857,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (card.style.display !== "none") {
         loadFodderMarket(false);
         loadFodderCheapest(false);
+        loadFgFodder(false);
       }
+      drawFgFodder(fgIndex);
 
       const state = getFodder();
       from.value = state.from;
@@ -12374,6 +12531,20 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-update { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pt-update-note { font-size: 12px; }
 .pt-watch-view button.pt-watch-refresh.pt-update-new, .pt-watch-view button.pt-update-new:hover { background: #1fa463; border-color: #1fa463; color: #fff; }
+.pt-fgi { margin: 6px 0 12px; padding: 10px 12px; border: 1px solid rgba(148, 178, 230, .16); border-radius: 12px; background: rgba(255, 255, 255, .025); }
+.pt-fgi-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.pt-fgi-main { display: flex; align-items: baseline; gap: 4px; }
+.pt-fgi-now { font-size: 22px; color: #fff; font-variant-numeric: tabular-nums; }
+.pt-fgi-verdict { font-weight: 700; font-size: 13px; }
+.pt-fgi-good { color: #27d98b; } .pt-fgi-ok { color: #f3c969; } .pt-fgi-bad { color: #ff8080; }
+.pt-fgi .pt-link-btn { margin-left: auto; }
+.pt-fgi-facts { font-size: 12px; margin-top: 2px; }
+.pt-fgi-chart { display: block; width: 100%; height: 46px; margin: 6px 0; }
+.pt-fgi-line { fill: none; stroke: #63b3ff; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.pt-fgi-usual { stroke: #8d9aae; stroke-width: 1; stroke-dasharray: 4 4; vector-effect: non-scaling-stroke; }
+.pt-fgi-best { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 12px; }
+.pt-fgi-chip { padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .2); font-variant-numeric: tabular-nums; }
+.pt-fgi-chip-best { border-color: #27d98b; color: #27d98b; }
 .pt-watch-view .pt-credit { margin: 10px 4px 6px; text-align: right; font-size: 10px; letter-spacing: .4px; color: rgba(141, 154, 174, .45); user-select: none; }
 
 .pt-watch-refresh {
@@ -13895,9 +14066,11 @@ try {
       ((parsed.pathname === "/players" && /^[?]search=[^&]+$/.test(parsed.search)) ||
        (/^[/]\d{2}[/]sales[/]\d+[/][a-z0-9-]+$/.test(parsed.pathname) && /^[?]platform=(pc|ps)$/.test(parsed.search)) ||
        (/^[/]\d{2}[/]market$/.test(parsed.pathname) && !parsed.search)); // market index (Index 100), pc only, every 30 min
-    const htmlPage = fodderWatch || futbinPage;
+    // futgenie.gg fodder index; "#pc" / "#console" picks the platform (sent as its fg_platform cookie).
+    const fgPlatform = parsed.hostname === "www.futgenie.gg" && parsed.pathname === "/fodder" && !parsed.search && /^#(pc|console)$/.test(parsed.hash) ? parsed.hash.slice(1) : "";
+    const htmlPage = fodderWatch || futbinPage || !!fgPlatform;
     if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi && !htmlPage)) {
-      reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch and FUTBIN search/sales/market are allowed") });
+      reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch, FUTBIN search/sales/market and futgenie.gg/fodder are allowed") });
       return;
     }
     if (typeof GM_xmlhttpRequest !== "function") {
@@ -13907,9 +14080,10 @@ try {
     try {
       GM_xmlhttpRequest({
         method: "GET",
-        url: parsed.href,
-        headers: { "Accept": htmlPage ? "text/html" : "application/json", "Cache-Control": "no-cache" },
-        anonymous: true, // all public: no cookies needed
+        url: fgPlatform ? `${parsed.origin}${parsed.pathname}` : parsed.href,
+        headers: { "Accept": htmlPage ? "text/html" : "application/json", "Cache-Control": "no-cache", ...(fgPlatform ? { Cookie: `fg_platform=${fgPlatform}` } : {}) },
+        ...(fgPlatform ? { cookie: `fg_platform=${fgPlatform}` } : {}),
+        anonymous: !fgPlatform, // public pages: no cookies; futgenie.gg only gets its platform cookie
         onload: response => {
           let final = null;
           try { final = new URL(response.finalUrl || parsed.href); } catch (_) { /* below */ }

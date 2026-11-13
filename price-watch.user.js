@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.75.0
+// @version      2.76.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6656,7 +6656,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     doc.querySelectorAll("table.cat-table tbody tr").forEach(tr => {
       const head = tr.querySelector("th .cat-value");
       const cells = [...tr.querySelectorAll("td")].map(td => td.querySelector(".cat-value"));
-      const row = { r: num(head), pts: num(cells[0]), price: num(cells[1]), per1k: num(cells[2]) };
+      const changeNode = tr.querySelector(".cat-change__value");
+      const change = changeNode ? Number(changeNode.textContent.replace("%", "").replace("−", "-").trim()) : NaN;
+      const row = { r: num(head), pts: num(cells[0]), price: num(cells[1]), per1k: num(cells[2]), ch: Number.isFinite(change) ? change / 100 : null };
       if (row.r >= 40 && row.pts > 0 && row.price > 0 && row.per1k > 0) rows.push(row);
     });
     if (series.length < 2) throw new Error(L("te weinig punten in de grafiek", "too few points in the chart"));
@@ -6674,6 +6676,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const all = getFgFodder();
       all[platform] = parsed;
       try { localStorage.setItem(FG_FODDER_KEY, JSON.stringify(all)); } catch (_) { /* next hour */ }
+      fgHistoryAdd(platform, parsed.rows);
       fgFodderError = "";
       listeners.forEach(listener => listener());
       return true;
@@ -6720,10 +6723,107 @@ function priceWatchMain(SCRIPT_VERSION) {
     relayCall("notify", { title, text }).catch(() => { /* toast was shown */ });
   }
   window.setTimeout(() => {
-    const tick = () => { if (pcDevice()) loadFgFodder(false).then(() => fgFodderAlert()); };
+    const tick = () => {
+      if (!pcDevice()) return;
+      Promise.all([loadFgFodder(false), loadFutggCheapest(false)]).then(() => { fgFodderAlert(); fgBuyAlert(); });
+    };
     tick();
     window.setInterval(tick, 5 * 60 * 1000);
   }, 20000);
+  // Own price history per rating ({ pc|console: { 85: [[t, price]] } }), to see a dip against its own week.
+  const FG_HIST_KEY = "pt_fgfodder_hist_v1";
+  function fgHistory() {
+    try { return JSON.parse(localStorage.getItem(FG_HIST_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  function fgHistoryAdd(platform, rows) {
+    const all = fgHistory();
+    const set = all[platform] || {};
+    const now = Date.now();
+    rows.forEach(row => {
+      const list = (set[row.r] || []).filter(p => now - p[0] < 8 * 24 * 3600000);
+      if (!list.length || now - list[list.length - 1][0] >= 50 * 60000) list.push([now, row.price]);
+      set[row.r] = list;
+    });
+    all[platform] = set;
+    try { localStorage.setItem(FG_HIST_KEY, JSON.stringify(all)); } catch (_) { /* keeps the old one */ }
+  }
+  // Price now vs this rating's own week (median), once there are 2 days of points; else the page's 24 h change.
+  function fgDip(platform, rating, priceNow) {
+    const list = ((fgHistory()[platform] || {})[rating] || []).filter(p => Date.now() - p[0] < 7 * 24 * 3600000);
+    if (list.length >= 2 && Date.now() - list[0][0] >= 48 * 3600000) {
+      const sorted = list.map(p => p[1]).sort((a, b) => a - b);
+      const mid = sorted[Math.floor(sorted.length / 2)];
+      return { value: priceNow / mid - 1, kind: "week" };
+    }
+    const set = getFgFodder()[platform];
+    const row = set && (set.rows || []).find(item => item.r === rating);
+    return row && row.ch != null ? { value: row.ch, kind: "24h" } : null;
+  }
+  // BUY / MAYBE / SKIP per rating: a dip (5%+), not too dear per point (≤ 30% above the cheapest rating),
+  // enough profit when listed (6%+). The whole index expensive → nothing is BUY.
+  function fgSignals(level) {
+    const platform = userPlatform() === "console" ? "console" : "pc";
+    const set = getFgFodder()[platform];
+    const rows = (set && set.rows) || [];
+    const bestPer1k = rows.length ? Math.min(...rows.map(row => row.per1k)) : 0;
+    return fodderRatings().map(rating => {
+      const trade = fodderTrade(rating, level);
+      if (!trade) return null;
+      const row = rows.find(item => item.r === rating);
+      const perPoint = row && bestPer1k ? row.per1k / bestPer1k - 1 : null;
+      const profitPct = trade.net / trade.buy;
+      const dip = fgDip(platform, rating, row ? row.price : trade.now);
+      let kind = "maybe";
+      if ((perPoint != null && perPoint > 0.3) || profitPct < 0.05 || (dip && dip.value >= 0.05)) kind = "skip";
+      else if (dip && dip.value <= -0.05 && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.06 && level !== "bad") kind = "buy";
+      return { rating, trade, perPoint, profitPct, dip, kind };
+    }).filter(Boolean).sort((a, b) => ({ buy: 0, maybe: 1, skip: 2 })[a.kind] - ({ buy: 0, maybe: 1, skip: 2 })[b.kind]
+      || (a.perPoint == null ? 9 : a.perPoint) - (b.perPoint == null ? 9 : b.perPoint));
+  }
+  function fgWhy(item) {
+    const pct = value => `${value > 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
+    const lines = [];
+    if (item.dip) {
+      lines.push(item.dip.kind === "week"
+        ? L(`${pct(item.dip.value)} tegen zijn eigen week`, `${pct(item.dip.value)} vs its own week`)
+        : L(`${pct(item.dip.value)} vandaag`, `${pct(item.dip.value)} today`));
+    } else lines.push(L("Nog geen prijsverloop", "No price trend yet"));
+    if (item.perPoint != null) lines.push(item.perPoint <= 0.001 ? L("Goedkoopste per SBC-punt", "Cheapest per SBC point")
+      : L(`${Math.round(item.perPoint * 100)}% duurder per SBC-punt dan de goedkoopste rating`, `${Math.round(item.perPoint * 100)}% dearer per SBC point than the cheapest rating`));
+    lines.push(L(`Verkocht voor ${priceFormat.format(item.trade.list)} houd je ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) over na belasting`,
+      `Listed at ${priceFormat.format(item.trade.list)} you keep ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) after tax`));
+    return lines;
+  }
+  // ⓘ with an explanation: hover on pc, tap on the phone.
+  function fgInfo(title, lines) {
+    const info = el("span", "pt-fgs-i", "i");
+    const tip = el("div", "pt-fgs-tip");
+    tip.appendChild(el("b", "", title));
+    lines.forEach(line => tip.appendChild(el("div", "", `• ${line}`)));
+    info.appendChild(tip);
+    info.addEventListener("click", event => { event.stopPropagation(); info.classList.toggle("pt-fgs-open"); });
+    return info;
+  }
+  let fgDetailsOpen = false;
+  // Push (pc, ntfy) when a rating becomes BUY; once per rating per 24 h.
+  const FG_BUY_ALERT_KEY = "pt_fodder_buy_alert_v1";
+  function fgBuyAlert() {
+    if (!pcDevice()) return;
+    const st = fgFodderStats(userPlatform() === "console" ? "console" : "pc");
+    if (!st || Date.now() - st.set.at > 2 * FG_FODDER_REFRESH_MS) return;
+    let seen = {};
+    try { seen = JSON.parse(localStorage.getItem(FG_BUY_ALERT_KEY) || "{}") || {}; } catch (_) { seen = {}; }
+    const fresh = fgSignals(st.level).filter(item => item.kind === "buy" && Date.now() - (seen[item.rating] || 0) > 24 * 3600000);
+    if (!fresh.length) return;
+    fresh.forEach(item => { seen[item.rating] = Date.now(); });
+    try { localStorage.setItem(FG_BUY_ALERT_KEY, JSON.stringify(seen)); } catch (_) { /* again later */ }
+    const title = L("Fodder kopen", "Buy fodder");
+    const text = fresh.map(item => L(`${item.rating}: koop ≤ ${priceFormat.format(item.trade.buy)}, verkoop ${priceFormat.format(item.trade.list)}`,
+      `${item.rating}: buy ≤ ${priceFormat.format(item.trade.buy)}, sell ${priceFormat.format(item.trade.list)}`)).join(" · ");
+    showToast(`🟢 ${title}: ${text}`, true);
+    relayCall("notify", { title, text }).catch(() => { /* toast was shown */ });
+  }
+
   // Buy and list price per rating (fodder bought to sell when an SBC pushes prices up). Buy: 1 price step
   // under the typical cheapest regular card (2 at a normal index, 3 when expensive). List: markup per rating after a
   // trader's rule of thumb (84 <800-850 → 1.2-1.4K, 85 <2.2-2.3K → 2.8-3.2K, 86 <4.8-5K → 5.6-6K, 87 <7-7.1K → 7.7-8.2K).
@@ -6774,8 +6874,74 @@ function priceWatchMain(SCRIPT_VERSION) {
     box.append(wrap, foot);
   }
 
-  // The block above the fodder table.
+  // The block above the fodder table: one line on the market, a tile per rating (BUY / MAYBE / SKIP),
+  // one button. The numbers sit behind ⓘ and under "Details".
   function drawFgFodder(box) {
+    box.textContent = "";
+    const platform = userPlatform() === "console" ? "console" : "pc";
+    const st = fgFodderStats(platform);
+    const level = st ? st.level : "ok";
+    const head = el("div", "pt-fgs-head");
+    if (st) {
+      const word = { good: L("goedkoop", "cheap"), ok: L("normaal geprijsd", "normally priced"), bad: L("duur", "expensive") }[level];
+      const extra = st.kind === "low14" ? L(" (laagste van 2 weken)", " (lowest of 2 weeks)") : st.kind === "low7" ? L(" (laagste van de week)", " (lowest of the week)")
+        : st.kind === "near" ? L(" (bijna laagst van de week)", " (almost lowest of the week)") : "";
+      const text = el("span", "");
+      text.append(`${{ good: "🟢", ok: "🟡", bad: "🔴" }[level]} ${L("Fodder is nu ", "Fodder is ")}`, el("b", `pt-fgi-${level}`, word), `${L("", " right now")}${extra}`);
+      head.append(text, fgInfo(L("Fodder-markt", "Fodder market"), [
+        L(`1.000 SBC-punten kosten nu ${priceFormat.format(st.now)}`, `1,000 SBC points cost ${priceFormat.format(st.now)} now`),
+        L(`Laagste deze week ${priceFormat.format(st.low7)}, in 2 weken ${priceFormat.format(st.low)}`, `Lowest this week ${priceFormat.format(st.low7)}, in 2 weeks ${priceFormat.format(st.low)}`),
+        L(`Normaal ${priceFormat.format(st.usual)} · ${platform === "pc" ? "PC" : "console"} · ${formatTime(st.set.at)} · bron futgenie.gg`, `Usual ${priceFormat.format(st.usual)} · ${platform === "pc" ? "PC" : "console"} · ${formatTime(st.set.at)} · source futgenie.gg`)
+      ]));
+    } else {
+      head.appendChild(el("span", "pt-muted", fgFodderLoading ? L("Fodder-markt ophalen…", "Fetching fodder market…")
+        : fgFodderError ? L(`Fodder-markt: ${fgFodderError}`, `Fodder market: ${fgFodderError}`) : L("Fodder-markt: nog niet opgehaald", "Fodder market: not fetched yet")));
+    }
+    box.appendChild(head);
+    const signals = fgSignals(level);
+    if (signals.length) {
+      box.appendChild(el("div", "pt-fgs-label", L("Wat kopen", "What to buy")));
+      const tiles = el("div", "pt-fgs-tiles");
+      signals.forEach(item => {
+        const tile = el("div", `pt-fgs-tile pt-fgs-${item.kind}`);
+        const word = { buy: L("KOPEN", "BUY"), maybe: L("MISSCHIEN", "MAYBE"), skip: L("OVERSLAAN", "SKIP") }[item.kind];
+        const body = el("div", "pt-fgs-body");
+        body.appendChild(el("b", "", word));
+        const line = el("div", "");
+        if (item.kind === "skip") line.textContent = item.perPoint != null && item.perPoint > 0.3 ? L("te duur", "too expensive") : item.dip && item.dip.value >= 0.05 ? L("stijgt nu", "rising now") : L("te weinig winst", "too little profit");
+        else line.append(L("voor ", "at "), el("strong", "", `≤ ${priceFormat.format(item.trade.buy)}`), L(` · verkoop ${priceFormat.format(item.trade.list)}`, ` · sell ${priceFormat.format(item.trade.list)}`));
+        body.appendChild(line);
+        tile.append(el("span", "pt-fgs-n", String(item.rating)), body,
+          fgInfo(L(`Waarom ${word.toLowerCase()} ${item.rating}?`, `Why ${word.toLowerCase()} ${item.rating}?`), fgWhy(item)));
+        tiles.appendChild(tile);
+      });
+      box.appendChild(tiles);
+      const buys = signals.filter(item => item.kind === "buy");
+      const foot = el("div", "pt-fgs-foot");
+      const go = el("button", "pt-watch-refresh pt-fgs-go", buys.length ? L("→ Zoek de KOPEN-ratings", "→ Search the BUY ones") : L("Nu niets om te kopen", "Nothing to buy right now"));
+      go.type = "button";
+      go.disabled = !buys.length;
+      go.addEventListener("click", () => {
+        const state = getFodder();
+        buys.forEach(item => { state.targets[item.rating] = { ...(state.targets[item.rating] || {}), max: item.trade.buy }; });
+        state.cycleWith = buys.map(item => item.rating);
+        saveFodder();
+        if (!startFodderCycle(state.cycleWith)) showToast(L("Nog geen spelers gevonden voor deze ratings; probeer ↻ Prijzen.", "No players found for these ratings yet; try ↻ Prices."), false);
+      });
+      foot.append(go, el("span", "pt-muted", L("vult je doelen in en zet de filters klaar · op Zoeken druk je zelf", "fills in your targets and prepares the filters · you press Search yourself")));
+      box.appendChild(foot);
+    }
+    const more = el("button", "pt-sc-more", fgDetailsOpen ? L("▾ Details", "▾ Details") : L("▸ Details", "▸ Details"));
+    more.type = "button";
+    more.addEventListener("click", () => { fgDetailsOpen = !fgDetailsOpen; drawFgFodder(box); });
+    box.appendChild(more);
+    if (fgDetailsOpen) {
+      const details = el("div", "pt-fgs-details");
+      drawFgFodderDetails(details);
+      box.appendChild(details);
+    }
+  }
+  function drawFgFodderDetails(box) {
     const platform = userPlatform() === "console" ? "console" : "pc";
     const st = fgFodderStats(platform);
     box.textContent = "";
@@ -12604,6 +12770,26 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-fgi-trade th:first-child, .pt-fgi-trade td:first-child { text-align: left; font-weight: 700; }
 .pt-fgi-buy { color: #63b3ff; font-weight: 700; } .pt-fgi-plus { color: #27d98b; } .pt-fgi-minus { color: #ff8080; }
 .pt-fgi-trade-wrap + .pt-fgi-best { margin-top: 8px; }
+.pt-fgs-head { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+.pt-fgs-head > .pt-fgs-i { margin-left: auto; }
+.pt-fgs-label { font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: #ffd166; font-weight: 800; margin: 12px 0 6px; }
+.pt-fgs-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.pt-fgs-tile { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 34px 12px 14px; border-radius: 12px; border: 1px solid rgba(148, 178, 230, .16); }
+.pt-fgs-n { font-size: 28px; font-weight: 800; color: #fff; min-width: 40px; }
+.pt-fgs-body { font-size: 13px; line-height: 1.35; }
+.pt-fgs-body b { display: block; font-size: 17px; letter-spacing: .3px; }
+.pt-fgs-body strong { color: #fff; }
+.pt-fgs-buy { background: rgba(39, 217, 139, .10); border-color: rgba(39, 217, 139, .55); } .pt-fgs-buy b { color: #27d98b; }
+.pt-fgs-maybe { background: rgba(243, 201, 105, .06); border-color: rgba(243, 201, 105, .35); } .pt-fgs-maybe b { color: #f3c969; }
+.pt-fgs-skip { opacity: .5; } .pt-fgs-skip b { color: #ff8080; }
+.pt-fgs-i { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; border: 1px solid #8d9aae; color: #8d9aae; font-size: 11px; font-weight: 700; font-style: normal; cursor: help; position: relative; flex: none; }
+.pt-fgs-tile > .pt-fgs-i { position: absolute; top: 8px; right: 8px; }
+.pt-fgs-tip { display: none; position: absolute; z-index: 20; top: 24px; right: -6px; width: 260px; background: #0b1220; border: 1px solid rgba(148, 178, 230, .35); border-radius: 10px; padding: 10px 12px; font-size: 12px; font-weight: 400; line-height: 1.5; color: #dfe7f2; text-align: left; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); cursor: default; }
+.pt-fgs-tip b { display: block; color: #27d98b; margin-bottom: 2px; }
+.pt-fgs-i:hover .pt-fgs-tip, .pt-fgs-i.pt-fgs-open .pt-fgs-tip { display: block; }
+.pt-fgs-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; }
+.pt-watch-view button.pt-fgs-go:not(:disabled) { background: #1fa463; border-color: #1fa463; color: #fff; }
+.pt-fgs-details { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(148, 178, 230, .12); }
 .pt-watch-view .pt-credit { margin: 10px 4px 6px; text-align: right; font-size: 10px; letter-spacing: .4px; color: rgba(141, 154, 174, .45); user-select: none; }
 
 .pt-watch-refresh {
@@ -13709,7 +13895,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
       if (current) current.scrollIntoView({ block: "center" });
     }
     // tr.pt-flip-row: a Flip row opens its details on a tap (the row itself has the click handler)
-    const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio], tr.pt-flip-row";
+    const TAPPABLE = "button, a[href], label, .pt-sortable, input[type=checkbox], input[type=radio], tr.pt-flip-row, .pt-fgs-i";
     let start = null;
     // iOS can't always cancel the native click (touchend not cancelable, e.g. just after scrolling): it then
     // follows our own click, and one tap would count twice. Swallow it.

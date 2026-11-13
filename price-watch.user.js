@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.76.0
+// @version      2.76.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6668,7 +6668,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const platform = userPlatform() === "console" ? "console" : "pc";
     const current = getFgFodder()[platform];
     if (fgFodderLoading) return fgFodderLoading;
-    if (!force && current && Date.now() - current.at < FG_FODDER_REFRESH_MS) return Promise.resolve(false);
+    // stored before v2.76 (no 24 h change per rating yet): fetch again right away
+    const complete = current && (current.rows || []).some(row => "ch" in row);
+    if (!force && complete && Date.now() - current.at < FG_FODDER_REFRESH_MS) return Promise.resolve(false);
     if (!force && Date.now() - fgFodderTriedAt < 5 * 60 * 1000) return Promise.resolve(false);
     fgFodderTriedAt = Date.now();
     fgFodderLoading = futggRequestJson(`${FG_FODDER_URL}#${platform}`, true).then(text => {
@@ -7037,6 +7039,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     refresh.addEventListener("click", () => {
       loadFodderMarket(true);
       loadFodderCheapest(true);
+      loadFgFodder(true);
     });
     inventory.title = L("Telt je gewone kaarten per rating in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten.", "Counts your regular cards per rating in your club, transfer list, unassigned and won transfer targets. No transfer market searches.");
     inventory.addEventListener("click", () => updateFodderInventory());

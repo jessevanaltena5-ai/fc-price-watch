@@ -1,7 +1,8 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.72.1
+// @author       Altenarista
+// @version      2.72.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9967,6 +9968,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     drawDevice();
     listeners.add(drawDevice);
     root.insertBefore(bar, root.firstChild);
+    root.appendChild(el("div", "pt-credit", "Developed by Altenarista"));
     let initial = "flip";
     try {
       initial = localStorage.getItem(TAB_KEY) || "flip";
@@ -12338,6 +12340,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-watch-title { margin: 0 0 4px; font-size: 22px; font-weight: 700; color: #fff; }
 .pt-watch-status { font-size: 13px; color: #9aa6b8; }
 .pt-watch-version { margin-left: 10px; font-size: 12px; font-weight: 600; color: #6b7789; vertical-align: middle; }
+.pt-watch-view .pt-credit { margin: 10px 4px 6px; text-align: right; font-size: 10px; letter-spacing: .4px; color: rgba(141, 154, 174, .45); user-select: none; }
 
 .pt-watch-refresh {
   flex: 0 0 auto;
@@ -12983,6 +12986,11 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-sc-mini { margin: 12px 0 4px; background: rgba(7, 12, 22, .85); border: 1px solid rgba(148, 178, 230, .22); border-radius: 12px; padding: 10px 12px; color: #dfe7f2; font-size: 13px; line-height: 1.45; text-align: left; }
 .pt-sc-mini .pt-sc { margin-top: 8px; padding: 10px; }
 .pt-sc-mini .pt-sc-boxes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.pt-sc-mini .pt-sc { overflow-x: auto; padding: 10px 8px; }
+.pt-sc-mini .pt-sc-table { font-size: 11.5px; }
+.pt-sc-mini .pt-sc-table th { font-size: 9.5px; padding: 3px 2px; }
+.pt-sc-mini .pt-sc-table td { white-space: normal; padding: 3px 2px; overflow-wrap: anywhere; }
+.pt-sc-mini .pt-sc-table td:first-child { white-space: nowrap; }
 .pt-sc-mini-top { display: flex; justify-content: space-between; align-items: center; font-size: 11px; font-weight: 800; letter-spacing: .5px; color: #8d9aae; text-transform: uppercase; }
 .pt-sc-mini-three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0 6px; text-align: center; }
 .pt-sc-mini-three b { display: block; font-size: 15px; font-variant-numeric: tabular-nums; }

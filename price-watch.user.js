@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
-// @version      2.72.0
+// @version      2.72.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8345,16 +8345,16 @@ function priceWatchMain(SCRIPT_VERSION) {
   // futbin.com/27/market carries the index per platform: "PC Index" (.market-graph-platform-pc) and
   // "Console Index" (-ps), live (1 point a minute, ~3 days) and daily (~8 weeks). The page is big (~4 MB),
   // so only the pc fetches it, every 30 min, keeps 15-min points of 72 h and shares it via the gist.
-  const MARKET_KEY = "pt_market_v1"; // { pc|ps: { at, live: [[t, v]], daily: [[t, v]] } }
+  const FB_INDEX_KEY = "pt_fbindex_v1"; // own key (pt_market_v1 = EA market prices) { pc|ps: { at, live: [[t, v]], daily: [[t, v]] } }
   const MARKET_URL = "https://www.futbin.com/27/market";
   const MARKET_REFRESH_MS = 30 * 60 * 1000;
   let marketLoading = false;
   let marketError = "";
   function getMarket() {
-    try { return JSON.parse(localStorage.getItem(MARKET_KEY) || "{}") || {}; } catch (_) { return {}; }
+    try { return JSON.parse(localStorage.getItem(FB_INDEX_KEY) || "{}") || {}; } catch (_) { return {}; }
   }
   function saveMarket(value) {
-    try { localStorage.setItem(MARKET_KEY, JSON.stringify(value)); } catch (_) { /* next fetch */ }
+    try { localStorage.setItem(FB_INDEX_KEY, JSON.stringify(value)); } catch (_) { /* next fetch */ }
   }
   function marketParse(doc) {
     const out = {};

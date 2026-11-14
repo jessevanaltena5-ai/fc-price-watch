@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.85.0
+// @version      2.86.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -974,6 +974,123 @@ function priceWatchMain(SCRIPT_VERSION) {
     return !pcDevice() && (force || IS_PHONE || Date.now() - startedAt >= 20000);
   }
 
+  // --- Several pcs on one gist (home pc, work pc) + the phone ---------------------------------------
+  // Every pc reads the gist before it writes and merges: per card the newest FUTBIN check, the breadth
+  // points, the signal logs and the fodder calibration of all devices. Pcs also read it every 2 minutes, so
+  // what one pc checked the other skips; and the auto scan is split between the pcs that are online.
+  const DEVICE_ID_KEY = "pt_device_id_v1";
+  const CAL_OTHERS_KEY = "pt_fodder_cal_others_v1"; // { deviceId: { pc: { day: { rating: [sum, n] } } } }
+  const DEVICES_KEY = "pt_devices_v1"; // { deviceId: { at, pc } } as last seen in the gist
+  function deviceId() {
+    let id = "";
+    try { id = localStorage.getItem(DEVICE_ID_KEY) || ""; } catch (_) { /* below */ }
+    if (!/^[a-z0-9]{6,12}$/.test(id)) {
+      id = Math.random().toString(36).slice(2, 10).padEnd(8, "0");
+      try { localStorage.setItem(DEVICE_ID_KEY, id); } catch (_) { /* this session only */ }
+    }
+    return id;
+  }
+  function devicesSeen() {
+    try { return JSON.parse(localStorage.getItem(DEVICES_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  // Pcs that wrote the gist in the last 15 minutes (this one always counts): [ids], sorted.
+  function activePcs() {
+    const me = deviceId();
+    const seen = devicesSeen();
+    const ids = Object.keys(seen).filter(id => id !== me && seen[id] && seen[id].pc && Date.now() - seen[id].at < 15 * 60000);
+    return [me, ...ids].sort();
+  }
+  // Which part of the list this pc checks automatically: card id hashed over the active pcs.
+  function myScanShare(cardId) {
+    const pcs = activePcs();
+    if (pcs.length < 2) return true;
+    const hash = (Math.imul(Number(cardId) >>> 0, 2654435761) >>> 0) % pcs.length;
+    return pcs[hash] === deviceId();
+  }
+  function mergeBreadth(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    const all = getMarket();
+    const br = { ...(all.br || {}) };
+    let changed = false;
+    ["pc", "ps"].forEach(key => {
+      const mine = br[key] || [];
+      const theirs = Array.isArray(incoming[key]) ? incoming[key] : [];
+      if (!theirs.length) return;
+      const merged = [];
+      mine.concat(theirs).filter(point => Array.isArray(point) && Date.now() - point[0] < 72 * 3600000)
+        .sort((a, b) => a[0] - b[0])
+        .forEach(point => { if (!merged.length || point[0] - merged[merged.length - 1][0] >= 5 * 60000) merged.push(point); });
+      if (merged.length !== mine.length) { br[key] = merged; changed = true; }
+    });
+    if (changed) saveMarket({ ...all, br });
+  }
+  function mergeSignalLog(incoming) {
+    if (!Array.isArray(incoming) || !incoming.length) return;
+    const log = signalLog();
+    let changed = false;
+    incoming.forEach(entry => {
+      if (!entry || !entry.k || !(entry.t > 0)) return;
+      const same = log.find(item => item.k === entry.k && Math.abs(item.t - entry.t) < 3600000);
+      if (!same) { log.push(entry); changed = true; return; }
+      ["p6", "p24", "p72"].forEach(field => { if (same[field] == null && entry[field] != null) { same[field] = entry[field]; changed = true; } });
+    });
+    if (!changed) return;
+    const kept = log.filter(entry => Date.now() - entry.t < 5 * 86400000).sort((a, b) => a.t - b.t).slice(-400);
+    try { localStorage.setItem(SIGNAL_LOG_KEY, JSON.stringify(kept)); } catch (_) { /* next time */ }
+  }
+  function mergeCalibration(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    const me = deviceId();
+    let others = {};
+    try { others = JSON.parse(localStorage.getItem(CAL_OTHERS_KEY) || "{}") || {}; } catch (_) { others = {}; }
+    Object.entries(incoming).forEach(([id, cal]) => { if (id !== me && cal && typeof cal === "object") others[id] = cal; });
+    try { localStorage.setItem(CAL_OTHERS_KEY, JSON.stringify(others)); } catch (_) { /* next time */ }
+  }
+  function mergeDevices(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    const seen = devicesSeen();
+    Object.entries(incoming).forEach(([id, info]) => { if (info && info.at > ((seen[id] || {}).at || 0)) seen[id] = info; });
+    try { localStorage.setItem(DEVICES_KEY, JSON.stringify(seen)); } catch (_) { /* next time */ }
+  }
+  // Everything that is merged (on pcs and the phone).
+  function mergeShared(data) {
+    if (!data || typeof data !== "object") return;
+    if (data.fb) syncFutbinFromRelay(data.fb);
+    if (data.mk && data.mk.br) mergeBreadth(data.mk.br);
+    if (data.sl) mergeSignalLog(data.sl);
+    if (data.fc) mergeCalibration(data.fc);
+    if (data.dev) mergeDevices(data.dev);
+  }
+  // For the gist: this pc's calibration next to the others it knows; device heartbeats.
+  function calibrationForRelay() {
+    const out = {};
+    try { Object.assign(out, JSON.parse(localStorage.getItem(CAL_OTHERS_KEY) || "{}") || {}); } catch (_) { /* none */ }
+    try { out[deviceId()] = JSON.parse(localStorage.getItem(FODDER_CAL_KEY) || "{}") || {}; } catch (_) { /* none */ }
+    return out;
+  }
+  function devicesForRelay() {
+    const seen = devicesSeen();
+    Object.keys(seen).forEach(id => { if (Date.now() - seen[id].at > 7 * 86400000) delete seen[id]; });
+    seen[deviceId()] = { at: Date.now(), pc: pcDevice() };
+    return seen;
+  }
+  // Pc: read the gist every 2 minutes and take over what the other pcs checked.
+  async function pcPullShared(force) {
+    const relay = getRelay();
+    if (!pcDevice() || relayBusy || !relay.hasToken || !relay.gistId) return;
+    if (!force && Date.now() - (relay.pcPulledAt || 0) < RELAY_PULL_MS) return;
+    relayBusy = true;
+    try {
+      const text = await relayCall("pull", { gistId: relay.gistId, file: RELAY_FILE });
+      if (text) mergeShared(JSON.parse(text));
+      saveRelay({ pcPulledAt: Date.now() });
+    } catch (_) {
+      saveRelay({ pcPulledAt: Date.now() }); // try again next interval
+    } finally {
+      relayBusy = false;
+    }
+  }
+
   // Pc: fresh FUT Genie prices for the list, then into the gist. "l" tells the phone which of its own
   // lists the pc has taken over, so the phone doesn't fall back to the pc's older list in the meantime.
   let relayFbSent = 0; // pc: FUTBIN checks in the last push
@@ -987,7 +1104,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       const extraIds = [...new Set(readJson(TL_IDS_KEY, []).concat(getStock().filter(list => list.type === "players")
         .flatMap(list => list.players.filter(player => !(player.special && player.definitionId <= 0xFFFFFF)).map(player => player.definitionId))))];
       await fetchGeniePrices(getWatch().map(entry => entry.definitionId).concat(extraIds));
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(), v: SCRIPT_VERSION || "" };
+      // Other pcs write the same file: merge their part in first, so nothing of theirs is overwritten.
+      try {
+        const remote = await relayCall("pull", { gistId: relay.gistId, file: RELAY_FILE });
+        if (remote) mergeShared(JSON.parse(remote));
+      } catch (_) { /* first push, or GitHub busy: send what we have */ }
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(),
+        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
@@ -1077,13 +1200,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (data.cr && typeof data.cr === "object") listPatch.pcClubRise = data.cr;
       if (data.bm && typeof data.bm === "object") writeJson(BOUGHT_KEY, { ...data.bm, ...readJson(BOUGHT_KEY, {}) });
       if (data.h && typeof data.h === "object") syncFlipHistory(data.h); // flip price history of the pc
-      if (data.fb) syncFutbinFromRelay(data.fb); // FUTBIN checks of the pc
       if (data.mk && typeof data.mk === "object" && !pcDevice()) { // market index of the pc
         const local = getMarket();
         const merged = { ...local };
         ["pc", "ps"].forEach(key => { if (data.mk[key] && (!local[key] || local[key].at < data.mk[key].at)) merged[key] = data.mk[key]; });
         saveMarket(merged);
       }
+      mergeShared(data); // FUTBIN checks, breadth, signal logs, fodder calibration of all pcs
       listPatch.pcFb = data.fb ? Object.keys(data.fb).length : -1; // -1: the pc doesn't send them (older version)
       listPatch.pcVersion = data.v || "";
       if (data.fs && syncFlipSettings(data.fs)) {
@@ -1111,6 +1234,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       await checkPhoneList(false);
       await checkPhoneSettings();
       await pushRelay(false);
+      await pcPullShared(false);
       await pullRelay(false);
       await pushPhoneList(false);
       flipHistoryTick();
@@ -6894,8 +7018,20 @@ function priceWatchMain(SCRIPT_VERSION) {
     return value;
   }
   function fodderOffsetCompute(rating) {
-    let set = {};
-    try { set = (JSON.parse(localStorage.getItem(FODDER_CAL_KEY) || "{}") || {})[fbFodderPlatform()] || {}; } catch (_) { return 0; }
+    // own samples plus those of the other devices (per day and rating: sums and counts added up)
+    const set = {};
+    const add = all => {
+      const part = (all || {})[fbFodderPlatform()] || {};
+      Object.entries(part).forEach(([day, cells]) => {
+        const cell = (cells || {})[rating];
+        if (!cell) return;
+        const target = (set[day] = set[day] || {});
+        const sum = target[rating] || [0, 0];
+        target[rating] = [sum[0] + cell[0], sum[1] + cell[1]];
+      });
+    };
+    try { add(JSON.parse(localStorage.getItem(FODDER_CAL_KEY) || "{}")); } catch (_) { /* none */ }
+    try { Object.values(JSON.parse(localStorage.getItem(CAL_OTHERS_KEY) || "{}") || {}).forEach(add); } catch (_) { /* none */ }
     const points = ((getFbFodder()[fbFodderPlatform()] || {})[rating]) || [];
     const ratios = [];
     points.forEach(([t, fodder]) => {
@@ -8472,7 +8608,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     return Object.keys(out).length ? out : null;
   }
   function syncFutbinFromRelay(incoming) {
-    if (pcDevice() || !incoming || typeof incoming !== "object") return 0;
+    if (!incoming || typeof incoming !== "object") return 0; // phone and other pcs
     const store = futbinStore(FUTBIN_SALES_KEY);
     let changed = 0;
     Object.entries(incoming).forEach(([key, entry]) => {
@@ -9787,7 +9923,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         .sort((a, b) => group(a) - group(b)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0) // never checked first, then the old checks
           || a.card.m24 - b.card.m24)
-        .map(row => row.card).filter(card => !futbinMissingRecently(card)).slice(0, MOMENTUM_AUTO_TOP);
+        .map(row => row.card).filter(card => !futbinMissingRecently(card) && myScanShare(card.id)).slice(0, MOMENTUM_AUTO_TOP);
     } else {
       if (!flipData || flipData.token !== state.token) return;
       // Every card of the list: by score, cards without profit (by the sheet) last; never checked first.
@@ -9796,7 +9932,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         .sort((a, b) => (a.calc.status === "skip" ? 1 : 0) - (b.calc.status === "skip" ? 1 : 0)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0)) // stable: keeps the score order inside
         .map(row => row.card)
-        .filter(card => !futbinMissingRecently(card))
+        .filter(card => !futbinMissingRecently(card) && myScanShare(card.id))
         .slice(0, FUTBIN_AUTO_TOP);
     }
     if (!cards.length || Date.now() < futbinAutoPause) return;
@@ -10867,7 +11003,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const warn = futbinSaveError ? ` ⚠ ${futbinSaveError}` : "";
     if (!relay.gistId || (!relay.hasToken && pcDevice())) return warn.trim();
     if (pcDevice()) {
-      return L(`📤 ${relayFbSent} FUTBIN-checks naar je telefoon${relay.sentAt ? ` (${formatTime(relay.sentAt)})` : ""}`, `📤 ${relayFbSent} FUTBIN checks to your phone${relay.sentAt ? ` (${formatTime(relay.sentAt)})` : ""}`) + warn;
+      const pcs = activePcs().length;
+      const shared = pcs > 1 ? L(` · 🔗 ${pcs} pc's delen het werk`, ` · 🔗 ${pcs} PCs share the work`) : "";
+      return L(`📤 ${relayFbSent} FUTBIN-checks gedeeld${relay.sentAt ? ` (${formatTime(relay.sentAt)})` : ""}`, `📤 ${relayFbSent} FUTBIN checks shared${relay.sentAt ? ` (${formatTime(relay.sentAt)})` : ""}`) + shared + warn;
     }
     if (relay.pcFb === -1) return L(`⚠ je pc stuurt nog geen FUTBIN-checks: update Price Watch op je pc (die heeft ${relay.pcVersion || "een oude versie"})`, `⚠ your PC doesn't send FUTBIN checks yet: update Price Watch on your PC (it has ${relay.pcVersion || "an old version"})`);
     if (relay.pcFb == null) return L("📥 wacht op je pc…", "📥 waiting for your PC…");

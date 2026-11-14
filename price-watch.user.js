@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.82.2
+// @version      2.83.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -7674,6 +7674,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_fbDownLong: ["Echte verkoopprijzen dalen al langer (FUTBIN)", "Real sale prices have been falling for a while (FUTBIN)"],
     w_fbDemand: ["Minder verkopen dan de dagen ervoor ({pct})", "Fewer sales than the days before ({pct})"],
     w_marketWide: ["De hele markt zakt ook ({market} in 24u, kaart {card}): geen echte dip van deze kaart", "The whole market is falling too ({market} in 24h, card {card}): not a dip of this card"],
+    w_marketCrash: ["Markt crasht ({pct} in 24u) en draait nog niet: niets is nu een veilige koop, wacht op de draai", "Market is crashing ({pct} in 24h) and not turning yet: nothing is a safe buy now, wait for the turn"],
+    w_marketSell: ["Verkoopprijs {pct}% omlaag voor de dalende markt ({from} → {to})", "Sell price lowered {pct}% for the falling market ({from} → {to})"],
     w_marketFalling: ["De markt zakt nu nog ({pct} in 6u): wacht tot hij draait", "The market is still falling ({pct} in 6h): wait until it turns"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
     miss_fbHistory: ["verloop van de echte verkopen (te weinig verkopen of data)", "course of the real sales (too few sales or data)"],
@@ -7945,6 +7947,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (lowOdd) warnings.push(ft("w_lowOdd", { price: flipShort(card.low) }));
       if (highOdd) warnings.push(ft("w_highOdd", { price: flipShort(card.high) }));
       if (avgOdd) warnings.push(ft("w_avgOdd", { price: flipShort(card.avg) }));
+    }
+    const sellFactor = platform ? marketSellFactor(platform) : 1;
+    if (sellFactor < 1) {
+      const before = sell;
+      sell = roundDownToStep(sell * sellFactor);
+      warnings.push(ft("w_marketSell", { pct: ((1 - sellFactor) * 100).toFixed(1), from: flipShort(before), to: flipShort(sell) }));
     }
     const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
     const pct = buy > 0 ? profit / buy * 100 : 0;
@@ -9096,12 +9104,38 @@ function priceWatchMain(SCRIPT_VERSION) {
     const change = before => (before > 0 ? now / before - 1 : null);
     const week = (set.daily || []).slice(-7).map(p => p[1]);
     const weekAvg = week.length >= 3 ? week.reduce((a, b) => a + b, 0) / week.length : null;
-    return { now, at: set.at, ch6: change(at(6)), ch24: change(at(24)), ch72: change(live[0][1]), vsWeek: weekAvg ? now / weekAvg - 1 : null };
+    // Smoothed: mean of the last 2 h vs the mean of the 2 h ending `hours` earlier (null when not covered).
+    const mean = (from, to) => {
+      const values = live.filter(([x]) => x > from && x <= to).map(p => p[1]);
+      return values.length >= 3 ? values.reduce((a, b) => a + b, 0) / values.length : null;
+    };
+    const smooth = hours => {
+      const recent = mean(lastT - 2 * 3600000, lastT);
+      const before = live[0][0] <= lastT - (hours + 2) * 3600000 + 900000 ? mean(lastT - (hours + 2) * 3600000, lastT - hours * 3600000) : null;
+      return recent && before ? recent / before - 1 : null;
+    };
+    return { now, at: set.at, ch6: change(at(6)), ch24: change(at(24)), ch72: change(live[0][1]), vsWeek: weekAvg ? now / weekAvg - 1 : null,
+      s6: smooth(6), s24: smooth(24) };
   }
   // A card's own dip vs the market: whole-market drops and a market still falling make it risky.
+  const MARKET_CRASH = -0.05; // smoothed 24 h change of the FUTBIN index
+  function marketCrash(platform) {
+    const mk = marketStats(platform);
+    return !!(mk && mk.s24 != null && mk.s24 <= MARKET_CRASH && !(mk.s6 != null && mk.s6 >= 0.015));
+  }
+  // Past sales (the 24 h window is on average half a day old) were made in a higher market: lower the sell
+  // price by half of the market's smoothed 24 h drop (at most 10 %).
+  function marketSellFactor(platform) {
+    const mk = marketStats(platform);
+    return mk && mk.s24 != null && mk.s24 < -0.01 ? 1 + Math.max(mk.s24, -0.2) / 2 : 1;
+  }
   function marketCheck(cardChange, platform, warnings) {
     const mk = marketStats(platform);
     if (!mk) return false;
+    if (marketCrash(platform)) {
+      warnings.unshift(ft("w_marketCrash", { pct: flipPct(mk.s24 * 100, 1) }));
+      return true;
+    }
     if (mk.ch24 != null && mk.ch24 <= -0.03 && cardChange != null && cardChange < 0 && cardChange - mk.ch24 > -0.04) {
       warnings.push(ft("w_marketWide", { market: flipPct(mk.ch24 * 100, 1), card: flipPct(cardChange * 100, 1) }));
       return true;
@@ -9589,8 +9623,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     const fbPrices = futbinPrices(futbin);
     const buy = fbPrices.buy;
-    const sell = fbPrices.sell;
+    const sellFactor = marketSellFactor(platform);
+    const sell = sellFactor < 1 ? roundDownToStep(fbPrices.sell * sellFactor) : fbPrices.sell;
     let fbRisky = false;
+    if (sellFactor < 1) warnings.push(ft("w_marketSell", { pct: ((1 - sellFactor) * 100).toFixed(1), from: flipShort(fbPrices.sell), to: flipShort(sell) }));
     if (fbPrices.adjusted) { warnings.push(sellLoweredWarning(fbPrices, futbin)); if (fbPrices.slow) fbRisky = true; }
     if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
     const fh = futbin.h72;

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.80.0
+// @version      2.80.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6856,11 +6856,12 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // BUY / MAYBE / SKIP per rating: a dip (5%+ under its week), not too dear per point (≤ 30% above the
-  // cheapest rating), enough profit when listed (6%+), and earlier dips of this rating mostly reached the
+  // middle of 84–88; not the single cheapest rating, which after a crash of one rating made all others look dear), enough profit when listed (6%+), and earlier dips of this rating mostly reached the
   // 10%+ within 7 days (FUTBIN back-test, when 4+ dips). The whole market expensive → nothing is BUY.
   function fgSignals(level) {
     const points = sbcPointCosts();
-    const bestPer1k = points.best ? points.per1k[points.best] : 0;
+    const middle = [84, 85, 86, 87, 88].map(rating => points.per1k[rating]).filter(v => v > 0);
+    const bestPer1k = middle.length >= 3 ? fbMedian(middle) : points.best ? points.per1k[points.best] : 0;
     return fodderRatings().map(rating => {
       const trade = fodderTrade(rating, level);
       if (!trade) return null;
@@ -6903,8 +6904,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         ? L(`${pct(item.dip.value)} tegen zijn eigen week`, `${pct(item.dip.value)} vs its own week`)
         : L(`${pct(item.dip.value)} vandaag`, `${pct(item.dip.value)} today`));
     } else lines.push(L("Nog geen prijsverloop", "No price trend yet"));
-    if (item.perPoint != null) lines.push(item.perPoint <= 0.001 ? L("Goedkoopste per SBC-punt", "Cheapest per SBC point")
-      : L(`${Math.round(item.perPoint * 100)}% duurder per SBC-punt dan de goedkoopste rating`, `${Math.round(item.perPoint * 100)}% dearer per SBC point than the cheapest rating`));
+    if (item.perPoint != null) lines.push(item.perPoint <= -0.05 ? L(`${Math.round(-item.perPoint * 100)}% goedkoper per SBC-punt dan het midden van 84–88`, `${Math.round(-item.perPoint * 100)}% cheaper per SBC point than the middle of 84–88`)
+      : item.perPoint < 0.05 ? L("Normaal per SBC-punt (midden van 84–88)", "Normal per SBC point (middle of 84–88)")
+      : L(`${Math.round(item.perPoint * 100)}% duurder per SBC-punt dan het midden van 84–88`, `${Math.round(item.perPoint * 100)}% dearer per SBC point than the middle of 84–88`));
     if (item.trade.waitForDip) lines.push(L(`Koopprijs ${priceFormat.format(item.trade.buy)}: daar zit hij 5% onder zijn week, zoals bij eerdere dips die goed afliepen. Nu goedkoopst: ${priceFormat.format(item.trade.now)}`,
       `Buy price ${priceFormat.format(item.trade.buy)}: that is 5% under its week, like earlier dips that worked out. Cheapest now: ${priceFormat.format(item.trade.now)}`));
     lines.push(L(`Verkocht voor ${priceFormat.format(item.trade.list)} houd je ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) over na belasting`,

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.86.0
+// @version      2.86.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10719,8 +10719,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!noPrice) {
         if (calc.bid > 0 && calc.bid < calc.buy) pair(facts, L("Bieden ≤", "Bid ≤"), flipShort(calc.bid));
         const plan = flipPlan(item, calc, fb, getFlip().platform);
-        if (plan.known) pair(facts, L("Max inzet", "Max stake"), plan.qtyText);
-        pair(facts, L("Uitstap", "Exit"), plan.exitText);
+        if (plan.known) pair(facts, L("Max inzet", "Max stake"), plan.qtyText, "pt-flip-kv-long");
+        pair(facts, L("Uitstap", "Exit"), plan.exitText, "pt-flip-kv-long");
       }
       const todo = section(ft("d_todo"));
       const searchNow = el("button", "pt-fx-btn pt-fx-primary pt-fx-wide pt-flip-search", noPrice ? ft("d_searchNoMax") : ft("d_searchMax", { max: flipShort(calc.buy) }));
@@ -14388,6 +14388,9 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-flip-kv { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 2px 0; }
 .pt-flip-kv-label { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pt-flip-kv-value { flex: 0 0 auto; white-space: nowrap; text-align: right; font-variant-numeric: tabular-nums; }
+/* Sentences (max stake, exit) wrap instead of pushing the card wider than the screen. */
+.pt-flip-kv-value.pt-flip-kv-long { flex: 1 1 65%; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.pt-flip-kv:has(.pt-flip-kv-long) .pt-flip-kv-label { flex: 0 0 auto; }
 .pt-flip-bar-line { display: grid; grid-template-columns: minmax(0, 1fr) 80px 26px; align-items: center; gap: 8px; padding: 2px 0; }
 .pt-flip-lang { min-width: 64px; }
 .pt-watch-view .pt-flip-select { width: auto; min-width: 120px; }

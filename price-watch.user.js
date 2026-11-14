@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.84.0
+// @version      2.85.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -6455,6 +6455,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           .sort((a, b) => a.price - b.price);
       });
       futggCheapest = { at: Date.now(), byRating, platform: requested };
+      try { fodderCalAdd(); } catch (_) { /* calibration is optional */ }
       return true;
     }).catch(error => {
       console.warn(L("Price Watch: FUT.GG cheapest-by-rating ophalen mislukt; eigen berekening blijft actief.", "Price Watch: fetching FUT.GG cheapest-by-rating failed; own calculation stays active."), error);
@@ -6820,7 +6821,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Ratings whose 10 cheapest spread wide (89, 90: a few cheap cards, then dearer ones) use the cheapest card.
   const fbMedian = list => { const sorted = list.slice().sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
   const FB_DIP = 0.05;
-  const FB_BOUNCE = 0.1; // a dip "worked" when the price rose 10%+ within 7 days
+  const FB_BOUNCE = 0.12; // a dip "worked" when days 2-5 after it sold 12%+ higher (median), i.e. ~6.4% after tax
   function fbFodderRef(rating) {
     const all = getFbFodder();
     const points = ((all[fbFodderPlatform()] || {})[rating]) || [];
@@ -6841,18 +6842,67 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
   // Back-test on this rating's own days: each day 5%+ under its previous 7 days → did it reach +target
   // (FB_BOUNCE) within the 7 days after? { n, hits, rise: median best rise }.
+  // Review: one case per dip episode (7 days cool-down: back-to-back dip days are one dip), and the outcome is
+  // the median of days 2-5 after it (what you can sell at), not the best day. { n episodes, hits, rise }.
   function fbFodderBacktest(ref, target) {
     const v = ref.series.map(p => p[1]);
-    let n = 0, hits = 0;
+    let n = 0, hits = 0, last = -99;
     const rises = [];
-    for (let i = 7; i + 7 < v.length; i++) {
-      if (v[i] > fbMedian(v.slice(i - 7, i)) * (1 - FB_DIP)) continue;
-      const best = Math.max(...v.slice(i + 1, i + 8)) / v[i] - 1;
+    for (let i = 7; i + 5 < v.length; i++) {
+      if (i - last < 7 || v[i] > fbMedian(v.slice(i - 7, i)) * (1 - FB_DIP)) continue;
+      last = i;
+      const outcome = fbMedian(v.slice(i + 2, i + 6)) / v[i] - 1;
       n++;
-      if (best >= target) hits++;
-      rises.push(best);
+      if (outcome >= target) hits++;
+      rises.push(outcome);
     }
     return { n, hits, rise: rises.length ? fbMedian(rises) : 0 };
+  }
+  // Review: Saturday/Sunday are 3-4% under the week by themselves, so a weekend "dip" needs that much more.
+  function fodderDipThreshold() {
+    const wk = fbFodderWeekdays();
+    const today = wk && wk.effect[wk.today];
+    return FB_DIP + (today != null && today < 0 ? -today : 0);
+  }
+  // Review: live lowest BINs (FUT.GG) are not FUTBIN's daily average of sold prices. Each day the live
+  // measure is averaged per rating; once FUTBIN has that day, the offset (FUTBIN / live − 1) is learned.
+  const FODDER_CAL_KEY = "pt_fodder_cal_v1"; // { pc: { "2026-11-14": { 86: [sum, n] } } }
+  function fodderCalAdd() {
+    const key = fbFodderPlatform();
+    let all = {};
+    try { all = JSON.parse(localStorage.getItem(FODDER_CAL_KEY) || "{}") || {}; } catch (_) { all = {}; }
+    const set = all[key] || {};
+    const day = new Date().toISOString().slice(0, 10);
+    const today = set[day] || {};
+    FB_FODDER_GROUPS.flat().forEach(rating => {
+      const value = fbFodderLive(rating, false, true);
+      if (!value) return;
+      const cell = today[rating] || [0, 0];
+      today[rating] = [cell[0] + value, cell[1] + 1];
+    });
+    set[day] = today;
+    Object.keys(set).sort().slice(0, -12).forEach(old => delete set[old]); // keep 12 days
+    all[key] = set;
+    try { localStorage.setItem(FODDER_CAL_KEY, JSON.stringify(all)); } catch (_) { /* next time */ }
+  }
+  let fodderOffsetCache = { at: 0, values: {} };
+  function fodderOffset(rating) {
+    if (Date.now() - fodderOffsetCache.at > 60000) fodderOffsetCache = { at: Date.now(), values: {} };
+    if (rating in fodderOffsetCache.values) return fodderOffsetCache.values[rating];
+    const value = fodderOffsetCompute(rating);
+    fodderOffsetCache.values[rating] = value;
+    return value;
+  }
+  function fodderOffsetCompute(rating) {
+    let set = {};
+    try { set = (JSON.parse(localStorage.getItem(FODDER_CAL_KEY) || "{}") || {})[fbFodderPlatform()] || {}; } catch (_) { return 0; }
+    const points = ((getFbFodder()[fbFodderPlatform()] || {})[rating]) || [];
+    const ratios = [];
+    points.forEach(([t, fodder]) => {
+      const cell = (set[new Date(t).toISOString().slice(0, 10)] || {})[rating];
+      if (cell && cell[1] >= 4 && fodder > 0) ratios.push(fodder / (cell[0] / cell[1]) - 1);
+    });
+    return ratios.length >= 2 ? Math.max(-0.15, Math.min(0.15, fbMedian(ratios))) : 0;
   }
   // Day-of-week pattern over 84–88: each day vs the 7 days around it (median). Needs 4+ weeks.
   function fbFodderWeekdays() {
@@ -6879,11 +6929,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     return new Date(Date.UTC(2026, 10, 1 + day)).toLocaleDateString(uiLang() === "nl" ? "nl-NL" : "en-GB", { weekday: "long", timeZone: "UTC" });
   }
   // The same measure live from FUT.GG's list: mean of the 10 cheapest regular cards (or the cheapest one).
-  function fbFodderLive(rating, byCheapest) {
+  function fbFodderLive(rating, byCheapest, raw) {
     const regular = (futggCheapestFor(rating) || []).filter(item => !item.special).map(item => item.price).sort((a, b) => a - b);
     if (byCheapest) return regular.length ? regular[0] : 0;
     const ten = regular.slice(0, 10);
-    return ten.length >= 5 ? Math.round(ten.reduce((sum, v) => sum + v, 0) / ten.length) : 0;
+    if (ten.length < 5) return 0;
+    const mean = ten.reduce((sum, v) => sum + v, 0) / ten.length;
+    return Math.round(raw ? mean : mean * (1 + fodderOffset(rating)));
   }
   function fbFodderDip(rating) {
     const ref = fbFodderRef(rating);
@@ -6920,12 +6972,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       const perPoint = points.per1k[rating] && bestPer1k ? points.per1k[rating] / bestPer1k - 1 : null;
       const profitPct = trade.net / trade.buy;
       const dip = fbFodderDip(rating);
-      // FUTBIN: how did this rating's earlier dips end? (rose 10%+ within 7 days)
+      // FUTBIN: how did this rating's earlier dip episodes end? (days 2-5 sold 12%+ higher)
       const backtest = dip && dip.ref && dip.ref.series ? fbFodderBacktest(dip.ref, FB_BOUNCE) : null;
-      const weakHistory = backtest && backtest.n >= 4 && backtest.hits / backtest.n < 0.6;
+      const weakHistory = backtest && backtest.n >= 5 && backtest.hits / backtest.n < 0.6;
       let kind = "maybe";
-      if ((perPoint != null && perPoint > 0.3) || profitPct < 0.05 || (dip && dip.value >= 0.05)) kind = "skip";
-      else if (dip && dip.value <= -0.05 && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.06 && level !== "bad" && !weakHistory) kind = "buy";
+      // profit is now on the realistic sell price: 4%+ after tax is a buy, under 3% not worth it
+      if ((perPoint != null && perPoint > 0.3) || profitPct < 0.03 || (dip && dip.value >= 0.05)) kind = "skip";
+      else if (dip && dip.value <= -trade.threshold && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.04 && level !== "bad" && !weakHistory) kind = "buy";
       return { rating, trade, perPoint, profitPct, dip, backtest, weakHistory, kind };
     }).filter(Boolean).sort((a, b) => ({ buy: 0, maybe: 1, skip: 2 })[a.kind] - ({ buy: 0, maybe: 1, skip: 2 })[b.kind]
       || (a.perPoint == null ? 9 : a.perPoint) - (b.perPoint == null ? 9 : b.perPoint));
@@ -6940,14 +6993,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         `${pct(item.dip.value)} vs its last 7 days (${what}: now ${priceFormat.format(item.dip.now)}, week ${priceFormat.format(ref.week)})`));
       const bt = item.backtest;
       if (bt && bt.n) {
-        lines.push(L(`Eerdere dips (5%+ onder de week): ${bt.hits} van ${bt.n} keer binnen 7 dagen 10%+ gestegen, meestal tot +${Math.round(bt.rise * 100)}%`,
-          `Earlier dips (5%+ under the week): ${bt.hits} of ${bt.n} times up 10%+ within 7 days, usually to +${Math.round(bt.rise * 100)}%`));
-        const listRise = item.trade.list / item.trade.now - 1;
-        if (bt.n >= 4 && listRise > bt.rise + 0.05) {
-          const realistic = roundUpToStep(item.trade.now * (1 + bt.rise));
-          lines.push(L(`Je verkoopprijs (+${Math.round(listRise * 100)}%) werd na dips zelden gehaald: reken eerder op ±${priceFormat.format(realistic)}`,
-            `Your list price (+${Math.round(listRise * 100)}%) was rarely reached after dips: expect about ${priceFormat.format(realistic)}`));
-        }
+        lines.push(L(`Eerdere dips (${bt.n} keer, aaneengesloten dagen als één): ${bt.hits}× verkocht dag 2–5 daarna 12%+ hoger, meestal ${pct(bt.rise)}${bt.n < 5 ? " (te weinig om op te bouwen)" : ""}`,
+          `Earlier dips (${bt.n} episodes, back-to-back days as one): ${bt.hits}× days 2–5 after sold 12%+ higher, usually ${pct(bt.rise)}${bt.n < 5 ? " (too few to rely on)" : ""}`));
       } else lines.push(L("Nog geen eerdere dips van deze rating om mee te vergelijken", "No earlier dips of this rating to compare with yet"));
       lines.push(L(`Maand: normaal ${priceFormat.format(ref.usual)} (${pct(item.dip.month)}), laagste 30 dagen ${priceFormat.format(ref.low30)}, 90 dagen ${priceFormat.format(ref.low90)} · FUTBIN${item.dip.kind === "fbday" ? ", prijs van gisteren" : ""}`,
         `Month: usual ${priceFormat.format(ref.usual)} (${pct(item.dip.month)}), lowest 30 days ${priceFormat.format(ref.low30)}, 90 days ${priceFormat.format(ref.low90)} · FUTBIN${item.dip.kind === "fbday" ? ", yesterday's price" : ""}`));
@@ -6959,8 +7006,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (item.perPoint != null) lines.push(item.perPoint <= -0.05 ? L(`${Math.round(-item.perPoint * 100)}% goedkoper per SBC-punt dan het midden van 84–88`, `${Math.round(-item.perPoint * 100)}% cheaper per SBC point than the middle of 84–88`)
       : item.perPoint < 0.05 ? L("Normaal per SBC-punt (midden van 84–88)", "Normal per SBC point (middle of 84–88)")
       : L(`${Math.round(item.perPoint * 100)}% duurder per SBC-punt dan het midden van 84–88`, `${Math.round(item.perPoint * 100)}% dearer per SBC point than the middle of 84–88`));
-    if (item.trade.waitForDip) lines.push(L(`Koopprijs ${priceFormat.format(item.trade.buy)}: daar zit hij 5% onder zijn week, zoals bij eerdere dips die goed afliepen. Nu goedkoopst: ${priceFormat.format(item.trade.now)}`,
-      `Buy price ${priceFormat.format(item.trade.buy)}: that is 5% under its week, like earlier dips that worked out. Cheapest now: ${priceFormat.format(item.trade.now)}`));
+    if (item.trade.waitForDip) lines.push(L(`Koopprijs ${priceFormat.format(item.trade.buy)}: daar zit hij ${Math.round(item.trade.threshold * 100)}% onder zijn week, zoals bij eerdere dips die goed afliepen. Nu goedkoopst: ${priceFormat.format(item.trade.now)}`,
+      `Buy price ${priceFormat.format(item.trade.buy)}: that is ${Math.round(item.trade.threshold * 100)}% under its week, like earlier dips that worked out. Cheapest now: ${priceFormat.format(item.trade.now)}`));
+    if (item.trade.threshold > FB_DIP + 0.005) lines.push(L(`Vandaag is meestal een goedkope dag: een dip telt pas vanaf ${pct(-item.trade.threshold)}`,
+      `Today is usually a cheap day: a dip only counts from ${pct(-item.trade.threshold)}`));
+    if (item.trade.realistic && item.trade.stretch > item.trade.list) lines.push(L(`Verkoopprijs = wat eerdere dips echt deden; tradertip (stretch) ${priceFormat.format(item.trade.stretch)}`,
+      `Sell price = what earlier dips really did; trader tip (stretch) ${priceFormat.format(item.trade.stretch)}`));
+    lines.push(L("Kopen za avond–zo, verkopen di–wo vóór 19:00 (NL); uiterlijk woensdag alles weg", "Buy Saturday evening–Sunday, sell Tuesday–Wednesday before 18:00 UK; everything gone by Wednesday"));
     lines.push(L(`Verkocht voor ${priceFormat.format(item.trade.list)} houd je ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) over na belasting`,
       `Listed at ${priceFormat.format(item.trade.list)} you keep ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) after tax`));
     return lines;
@@ -7012,14 +7064,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     // before). The dip is measured on FUTBIN's measure (avg of 10 cheapest); scaled to this price.
     let dipCap = 0;
     const dip = fbFodderDip(rating);
-    if (dip && dip.now > 0 && dip.value > -FB_DIP) {
-      dipCap = roundDownToStep(now * (1 - FB_DIP) * dip.ref.week / dip.now);
+    const threshold = fodderDipThreshold();
+    if (dip && dip.now > 0 && dip.value > -threshold) {
+      dipCap = roundDownToStep(now * (1 - threshold) * dip.ref.week / dip.now);
       if (dipCap < buy) buy = Math.max(150, dipCap);
       else dipCap = 0;
     }
+    // Review: the trader markup was rarely reached (83/84: 0 of 11). Sell at what this rating's earlier dips
+    // really did (median of days 2-5, ≥ 5 episodes), the markup is only the stretch target.
     const markup = FODDER_MARKUP[rating] != null ? FODDER_MARKUP[rating] : rating >= 90 ? 0.06 : 0.55;
-    const list = roundUpToStep(buy * (1 + markup));
-    return { now, buy, list, net: Math.floor(list * (1 - EA_TAX)) - buy, source: live ? "futgg" : "futbin", waitForDip: dipCap > 0 };
+    const bt = dip && dip.ref && dip.ref.series ? fbFodderBacktest(dip.ref, FB_BOUNCE) : null;
+    const realistic = bt && bt.n >= 5;
+    const rise = realistic ? Math.min(markup, Math.max(0, bt.rise)) : markup;
+    const list = roundUpToStep(buy * (1 + rise));
+    const stretch = roundUpToStep(buy * (1 + markup));
+    return { now, buy, list, stretch, realistic, threshold, net: Math.floor(list * (1 - EA_TAX)) - buy, source: live ? "futgg" : "futbin", waitForDip: dipCap > 0 };
   }
   function drawFodderTrade(box, level) {
     const ratings = fodderRatings().map(rating => ({ rating, trade: fodderTrade(rating, level) })).filter(item => item.trade);
@@ -7089,6 +7148,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     box.appendChild(head);
     const signals = fgSignals(level);
+    signalLogTouch("fodderSbc", signals.map(item => ({ k: `f${item.rating}|${platform}`, n: `${item.rating} fodder`, price: item.trade.now,
+      green: item.kind === "buy", buy: item.trade.buy, sell: item.trade.list })));
     if (signals.length) {
       box.appendChild(el("div", "pt-fgs-label", L("Wat kopen", "What to buy")));
       const tiles = el("div", "pt-fgs-tiles");
@@ -7674,7 +7735,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_fbDownLong: ["Echte verkoopprijzen dalen al langer (FUTBIN)", "Real sale prices have been falling for a while (FUTBIN)"],
     w_fbDemand: ["Minder verkopen dan de dagen ervoor ({pct})", "Fewer sales than the days before ({pct})"],
     w_marketWide: ["De hele markt zakt ook ({market} in 24u, kaart {card}): geen echte dip van deze kaart", "The whole market is falling too ({market} in 24h, card {card}): not a dip of this card"],
-    w_marketCrash: ["Markt crasht ({pct} in 24u) en draait nog niet: niets is nu een veilige koop, wacht op de draai", "Market is crashing ({pct} in 24h) and not turning yet: nothing is a safe buy now, wait for the turn"],
+    w_marketCrash: ["Markt crasht ({pct} in 24u) en draait nog niet: niets is nu een veilige koop, wacht op de draai (zet in totaal max 40% van je coins in)", "Market is crashing ({pct} in 24h) and not turning yet: nothing is a safe buy now, wait for the turn (deploy at most 40% of your coins)"],
+    w_promoWindow: ["Promo-venster (do 18:00 – vr 22:00 NL): de nieuwe promo komt eraan, prijzen zakken vaak nog", "Promo window (Thu 17:00 – Fri 21:00 UK): the new promo is about to drop, prices often fall further"],
+    w_illiquid: ["Verkoopt traag: {n} verkopen per dag (nodig {min}+) of {pct}% van de aanbiedingen verkocht (nodig 25%+)", "Sells slowly: {n} sales a day (need {min}+) or {pct}% of listings sold (need 25%+)"],
+    w_medianThin: ["Verkoop je tegen de recente mediaan ({median}), dan blijft minder dan 3% over", "Selling at the recent median ({median}) leaves less than 3%"],
     w_marketSell: ["Verkoopprijs {pct}% omlaag voor de dalende markt ({from} → {to})", "Sell price lowered {pct}% for the falling market ({from} → {to})"],
     w_marketFalling: ["De markt zakt nu nog ({pct} in 6u): wacht tot hij draait", "The market is still falling ({pct} in 6h): wait until it turns"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
@@ -7934,6 +7998,13 @@ function priceWatchMain(SCRIPT_VERSION) {
       sell = fbPrices.sell;
       if (fbPrices.adjusted) { warnings.push(sellLoweredWarning(fbPrices, futbin)); if (fbPrices.slow) fbRisky = true; }
       if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
+      // Liquidity you can exit (review): 20+ sales a day (10+ above 300K) and 25%+ of listings selling.
+      const minSales = card.now > 300000 ? 10 : 20;
+      if (futbin.salesPerDay < minSales || (futbin.listings24 >= 10 && futbin.sellThrough < 0.25)) {
+        warnings.push(ft("w_illiquid", { n: Math.round(futbin.salesPerDay), min: minSales, pct: Math.round(futbin.sellThrough * 100) }));
+        fbRisky = true;
+      }
+      if (!fbPrices.medianOk) { warnings.push(ft("w_medianThin", { median: flipShort(fbPrices.refMedian) })); fbRisky = true; }
       const fh = futbin.h72;
       if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
       // New card (TOTW / new content, ≤ 2 days of sales): its price usually keeps settling → never plain 🟢.
@@ -7948,11 +8019,16 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (highOdd) warnings.push(ft("w_highOdd", { price: flipShort(card.high) }));
       if (avgOdd) warnings.push(ft("w_avgOdd", { price: flipShort(card.avg) }));
     }
-    const sellFactor = platform ? marketSellFactor(platform) : 1;
-    if (sellFactor < 1) {
-      const before = sell;
-      sell = roundDownToStep(sell * sellFactor);
-      warnings.push(ft("w_marketSell", { pct: ((1 - sellFactor) * 100).toFixed(1), from: flipShort(before), to: flipShort(sell) }));
+    // Market haircut (no stacking: measured from the P75 / sheet sell, applied only if it cuts deeper).
+    const cut = platform ? marketHaircut(card.now, useFutbin ? futbin : null, platform) : 0;
+    if (cut < 0) {
+      const baseSell = useFutbin ? roundDownToStep(futbin.p75) : sell;
+      const cutSell = roundDownToStep(baseSell * (1 + cut));
+      if (cutSell < sell) {
+        warnings.push(ft("w_marketSell", { pct: (-cut * 100).toFixed(1), from: flipShort(sell), to: flipShort(cutSell) }));
+        sell = cutSell;
+      }
+      buy = Math.min(buy, roundDownToStep(buy * (1 + cut)));
     }
     const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
     const pct = buy > 0 ? profit / buy * 100 : 0;
@@ -7973,10 +8049,81 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (restless) warnings.push(ft("w_restless", { low: flipShort(coreMin), high: flipShort(coreMax) }));
     // Thin data or a crazy high (sheet: skip it), a falling or restless price or a crash: never plain green.
     const marketRisky = platform ? marketCheck(Number.isFinite(card.change) ? card.change / 100 : null, platform, warnings) : false;
-    const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky || marketRisky;
+    const promo = promoWindow();
+    if (promo) warnings.unshift(ft("w_promoWindow"));
+    const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky || marketRisky || promo;
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
-    return { buy, sell, profit, pct, gap, warnings, status, risky, futbin: useFutbin ? futbin : null };
+    return { buy, bid: useFutbin ? Math.min(futbinPrices(futbin).bid, buy) : 0, sell, profit, pct, gap, warnings, status, risky, futbin: useFutbin ? futbin : null };
+  }
+
+  // Position size and exit (review): per card at most 10% of your coins and 10% of its daily sales; not sold
+  // after 6 h → relist at the recent median; stop at −7%. In crash mode at most 40% of your coins in total.
+  function userCoins() {
+    try { return services.User.getUser().getCurrency(window.GameCurrency.COINS).amount || 0; } catch (_) { return 0; }
+  }
+  function flipPlan(card, calc, fb, platform) {
+    const coins = userCoins();
+    const byCoins = coins > 0 && calc.buy > 0 ? Math.floor(coins * 0.1 / calc.buy) : null;
+    const bySales = fb && fb.salesPerDay > 0 ? Math.max(1, Math.floor(fb.salesPerDay * 0.1)) : null;
+    const qty = byCoins == null && bySales == null ? 0 : Math.max(byCoins == null ? bySales : bySales == null ? byCoins : Math.min(byCoins, bySales), 0);
+    const crash = marketCrash(platform);
+    const qtyText = (qty ? L(`${qty} stuks`, `${qty} cards`) : L("geen (te weinig coins)", "none (not enough coins)"))
+      + L(` (≤10% van je coins${bySales != null ? `, ≤10% van ${Math.round(fb.salesPerDay)} verkopen/dag` : ""})`, ` (≤10% of your coins${bySales != null ? `, ≤10% of ${Math.round(fb.salesPerDay)} sales/day` : ""})`)
+      + (crash ? L(" · crash: in totaal max 40% van je coins", " · crash: at most 40% of your coins in total") : "");
+    const relist = fb ? roundDownToStep(fb.recent && fb.recent.s >= 4 ? fb.recent.md : fb.median) : 0;
+    const stop = roundDownToStep(calc.buy * 0.93);
+    const exitText = L(`na 6u niet verkocht → opnieuw te koop voor ${relist ? flipShort(relist) : "de mediaan"}; stop onder ${flipShort(stop)} (−7%) of als FUTBIN "lang dalend" geeft`,
+      `not sold after 6 h → relist at ${relist ? flipShort(relist) : "the median"}; stop below ${flipShort(stop)} (−7%) or when FUTBIN says "falling for long"`);
+    return { qty, known: byCoins != null || bySales != null, qtyText, exitText };
+  }
+
+  // --- Signal log (review): every 🟢 Flip card and fodder BUY with the price 6 / 24 / 72 h later, so the rules
+  // can be tuned on real outcomes instead of feel. Local per device, 5 days, at most 400 entries.
+  const SIGNAL_LOG_KEY = "pt_signal_log_v1"; // [{ k, n, src, t, p0, buy, sell, p6, p24, p72 }]
+  const signalLogSeen = {};
+  function signalLog() {
+    try { return JSON.parse(localStorage.getItem(SIGNAL_LOG_KEY) || "[]") || []; } catch (_) { return []; }
+  }
+  // entries: [{ k, n, src, price, green, buy, sell }] as seen now; at most once a minute per source.
+  function signalLogTouch(src, entries) {
+    if (Date.now() - (signalLogSeen[src] || 0) < 60000) return;
+    signalLogSeen[src] = Date.now();
+    const log = signalLog();
+    const now = Date.now();
+    const byKey = new Map();
+    log.forEach(entry => { if (!byKey.has(entry.k)) byKey.set(entry.k, []); byKey.get(entry.k).push(entry); });
+    let changed = false;
+    entries.forEach(item => {
+      if (!(item.price > 0)) return;
+      (byKey.get(item.k) || []).forEach(entry => {
+        [[6, "p6"], [24, "p24"], [72, "p72"]].forEach(([hours, field]) => {
+          const age = now - entry.t;
+          if (entry[field] == null && age >= hours * 3600000 && age < (hours + 12) * 3600000) { entry[field] = item.price; changed = true; }
+        });
+      });
+      if (item.green && !(byKey.get(item.k) || []).some(entry => now - entry.t < 24 * 3600000)) {
+        const entry = { k: item.k, n: item.n, src, t: now, p0: item.price, buy: item.buy, sell: item.sell };
+        log.push(entry);
+        byKey.set(item.k, [...(byKey.get(item.k) || []), entry]);
+        changed = true;
+      }
+    });
+    if (!changed) return;
+    const kept = log.filter(entry => now - entry.t < 5 * 86400000).slice(-400);
+    try { localStorage.setItem(SIGNAL_LOG_KEY, JSON.stringify(kept)); } catch (_) { /* next time */ }
+  }
+  // "📒 12 signals · 24h +2.1% (8)": average change from the signal price, per horizon that has data.
+  function signalLogSummary() {
+    const log = signalLog();
+    if (!log.length) return "";
+    const avg = field => {
+      const done = log.filter(entry => entry[field] > 0 && entry.p0 > 0);
+      if (!done.length) return "";
+      const mean = done.reduce((sum, entry) => sum + (entry[field] / entry.p0 - 1), 0) / done.length;
+      return ` · ${field.slice(1)}${L("u", "h")} ${flipPct(mean * 100, 1)} (${done.length})`;
+    };
+    return L(`📒 ${log.length} signalen`, `📒 ${log.length} signals`) + avg("p6") + avg("p24") + avg("p72");
   }
 
   // Icon per signal; the texts are st_<status> (long) and sts_<status> (short) in FLIP_TEXT.
@@ -8763,10 +8910,10 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   // Version of the stored analysis: a check made by an older version (e.g. without the 72 h data of v2) is
   // still shown and used until it expires, but counts as "to check again" for 📊 and for the 🔔 alert.
-  const FUTBIN_STATS_VERSION = 2;
+  const FUTBIN_STATS_VERSION = 3; // 3: recent 8 h, BIN-only P25, drift
   // Days a card has been on the market by FUTBIN (daily averages, or the first sale when FUTBIN has every
   // sale). 0 = not new (3+ days, or unknown). New cards (TOTW, new content) still find their price.
-  const FUTBIN_YOUNG_DAYS = 2;
+  const FUTBIN_YOUNG_DAYS = 5; // review: promo cards settle over 5-7 days, not 2
   function futbinYoung(stats) {
     const fh = stats && stats.h72;
     if (!fh) return 0;
@@ -8865,7 +9012,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       max: sorted[sorted.length - 1] || 0,
       unsold: futbinPct(unsold, 0.5), // what unsold listings asked: people ask it, nobody pays it
       outliers: raw.filter(odd),
-      p10: futbinPct(sorted, 0.1), p25: futbinPct(sorted, 0.25), median: futbinPct(sorted, 0.5), p75: futbinPct(sorted, 0.75), p90: futbinPct(sorted, 0.9)
+      p10: futbinPct(sorted, 0.1), p25: futbinPct(sorted, 0.25), median: futbinPct(sorted, 0.5), p60: futbinPct(sorted, 0.6), p75: futbinPct(sorted, 0.75), p90: futbinPct(sorted, 0.9)
     };
   }
 
@@ -8883,6 +9030,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (abs >= 10000) return `${sign}${Math.round(abs / 100) / 10}K`;
     return sign + flipShort(abs);
   }
+  // Buy (Buy Now) = P25 of the BIN sales (P10 mixes in bid wins: that is the bid price). Sell = P75, lowered in
+  // a slow market, and never above the P60 of the last 8 h (yesterday's P75 in a falling market is not a sell
+  // price). The buy price always leaves 8% after tax; selling at the recent median must still leave 3%.
   function futbinPrices(fb) {
     const p75 = roundDownToStep(fb.p75);
     const median = fb.median || 0;
@@ -8890,19 +9040,24 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (fb.unsold24 && fb.unsold24 <= fb.p75 * 1.03) reasons.push("unsold");
     if (fb.listings24 >= 10 && fb.sellThrough < 0.2) reasons.push("slow");
     if (fb.h72 && fb.h72.demand === "falling") reasons.push("demand");
-    let buy = roundDownToStep(fb.p10);
+    const bid = roundDownToStep(fb.p10);
+    let buy = roundDownToStep(fb.binP25 != null ? fb.binP25 : fb.p25 || fb.p10);
     let sell = p75;
-    const adjusted = reasons.length > 0 && median > 0 && fb.p75 > median;
-    if (adjusted) {
-      sell = roundDownToStep(median + 0.6 * (fb.p75 - median));
-      buy = Math.min(buy, roundDownToStep(sell * (1 - EA_TAX) / (1 + FB_MIN_PROFIT)));
-    }
+    if (reasons.length && median > 0 && fb.p75 > median) sell = roundDownToStep(median + 0.6 * (fb.p75 - median));
+    const recent = fb.recent && fb.recent.s >= 4 && fb.recent.p60 > 0 ? fb.recent : null;
+    if (recent && roundDownToStep(recent.p60) < sell) { sell = roundDownToStep(recent.p60); reasons.push("recent"); }
+    const adjusted = sell < p75;
+    buy = Math.min(buy, roundDownToStep(sell * (1 - EA_TAX) / (1 + FB_MIN_PROFIT)));
+    const refMedian = recent ? recent.md : median;
+    const medianOk = !(refMedian > 0) || Math.floor(refMedian * (1 - EA_TAX)) - buy >= buy * 0.03;
     const profit = Math.floor(sell * (1 - EA_TAX)) - buy;
-    return { buy, sell, p75, median, adjusted, reasons, slow: adjusted && reasons.some(r => r !== "unsold"), profit, pct: buy > 0 ? profit / buy * 100 : 0 };
+    return { buy, bid: Math.min(bid, buy), sell, p75, median, refMedian, adjusted, reasons, medianOk,
+      slow: adjusted && reasons.some(r => r === "slow" || r === "demand"), profit, pct: buy > 0 ? profit / buy * 100 : 0 };
   }
   function sellLoweredWarning(prices, fb) {
     const why = prices.reasons.map(r => (r === "unsold" ? L(`onverkocht vraagt ${scK(fb.unsold24)}`, `unsold ask ${scK(fb.unsold24)}`)
       : r === "slow" ? L(`${Math.round(fb.sellThrough * 100)}% verkocht`, `${Math.round(fb.sellThrough * 100)}% sold`)
+        : r === "recent" ? L(`laatste 8u P60 ${scK(fb.recent.p60)}`, `last 8h P60 ${scK(fb.recent.p60)}`)
         : L("vraag daalt", "demand falling"))).join(", ");
     return ft("w_sellLowered", { sell: scK(prices.sell), p75: scK(prices.p75), why });
   }
@@ -9119,9 +9274,45 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
   // A card's own dip vs the market: whole-market drops and a market still falling make it risky.
   const MARKET_CRASH = -0.05; // smoothed 24 h change of the FUTBIN index
+  // FUT calendar in UK time: promos drop Friday 18:00, TOTW Wednesday 18:00, rewards Thursday.
+  function ukTime(t = Date.now()) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", weekday: "short", hour: "2-digit", minute: "2-digit", hour12: false }).formatToParts(new Date(t));
+      const get = type => (parts.find(part => part.type === type) || {}).value || "";
+      return { day: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(get("weekday")), hour: (Number(get("hour")) % 24) + Number(get("minute")) / 60 };
+    } catch (_) {
+      const d = new Date(t);
+      return { day: d.getUTCDay(), hour: d.getUTCHours() + d.getUTCMinutes() / 60 };
+    }
+  }
+  // No green from Thursday 17:00 to Friday 21:00 UK: the new promo's supply is about to hit.
+  function promoWindow(t = Date.now()) { const u = ukTime(t); return (u.day === 4 && u.hour >= 17) || (u.day === 5 && u.hour < 21); }
+  // No "turn confirmed" from Friday 18:00 to Saturday 18:00 UK: the first bounce after a promo drop rarely holds.
+  function turnBlackout(t = Date.now()) { const u = ukTime(t); return (u.day === 5 && u.hour >= 18) || (u.day === 6 && u.hour < 18); }
+  // Hysteresis (review): on at −5% (smoothed 24 h); off only after 12 h and then on a confirmed turn or once
+  // the 24 h change is back above −2% (a +1.5% bounce of a noisy index no longer ends it). Kept per platform.
+  const MARKET_CRASH_KEY = "pt_market_crash_v1"; // { pc: { on, since } }
+  const marketCrashCache = {};
   function marketCrash(platform) {
+    const key = futbinPlatform(platform);
+    const hit = marketCrashCache[key];
+    if (hit && Date.now() - hit.at < 60000) return hit.on;
     const mk = marketStats(platform);
-    return !!(mk && mk.s24 != null && mk.s24 <= MARKET_CRASH && !(mk.s6 != null && mk.s6 >= 0.015) && marketTurn(platform).level !== "confirmed");
+    let all = {};
+    try { all = JSON.parse(localStorage.getItem(MARKET_CRASH_KEY) || "{}") || {}; } catch (_) { all = {}; }
+    const before = all[key] || { on: false, since: 0 };
+    let state = before;
+    if (mk && mk.s24 != null) {
+      if (!before.on && mk.s24 <= MARKET_CRASH) state = { on: true, since: Date.now() };
+      else if (before.on && Date.now() - before.since >= 12 * 3600000 && (mk.s24 > -0.02 || marketTurn(platform).level === "confirmed")) state = { on: false, since: Date.now() };
+    }
+    if (state !== before) {
+      all[key] = state;
+      try { localStorage.setItem(MARKET_CRASH_KEY, JSON.stringify(all)); } catch (_) { /* memory only */ }
+    }
+    const on = !!(state.on && mk);
+    marketCrashCache[key] = { at: Date.now(), on };
+    return on;
   }
   // Past sales (the 24 h window is on average half a day old) were made in a higher market: lower the sell
   // price by half of the market's smoothed 24 h drop (at most 10 %).
@@ -9129,19 +9320,44 @@ function priceWatchMain(SCRIPT_VERSION) {
     const mk = marketStats(platform);
     return mk && mk.s24 != null && mk.s24 < -0.01 ? 1 + Math.max(mk.s24, -0.2) / 2 : 1;
   }
+  // Median FUTBIN trend (last 24 h vs the 24 h before) of your fresh checks: the market of YOUR cards,
+  // better than Index 100 (top-end meta cards). null below 30 checks. Cached a minute.
+  let universeCache = { at: 0, key: "", value: null };
+  function universeTrend(platform) {
+    const key = futbinPlatform(platform);
+    if (universeCache.key === key && Date.now() - universeCache.at < 60000) return universeCache.value;
+    const now = Date.now();
+    const trends = Object.entries(futbinStore(FUTBIN_SALES_KEY))
+      .filter(([k, e]) => k.endsWith(`|${key}`) && e && now - e.fetchedAt < FUTBIN_FRESH_MS && e.trend != null)
+      .map(([, e]) => e.trend).sort((a, b) => a - b);
+    const value = trends.length >= 30 ? trends[Math.floor(trends.length / 2)] : null;
+    universeCache = { at: now, key, value };
+    return value;
+  }
+  // Haircut for a card whose own recent sales are not known: half a day of market drift (your checked cards,
+  // else Index 100), full above 200K, half from 20K to 200K, none below (fodder has its own cycle). Max 10%.
+  function marketHaircut(price, fb, platform) {
+    if (fb && fb.recent && fb.recent.s >= 4) return 0; // its own last 8 h are already in the sell price
+    const band = price > 200000 ? 1 : price >= 20000 ? 0.5 : 0;
+    if (!band) return 0;
+    const universe = universeTrend(platform);
+    const mk = marketStats(platform);
+    const drift = universe != null ? universe / 2 : mk && mk.s24 != null ? mk.s24 / 2 : null;
+    return drift != null && drift < -0.01 ? Math.max(drift, -0.1) * band : 0;
+  }
   function marketCheck(cardChange, platform, warnings) {
     const mk = marketStats(platform);
     if (!mk) return false;
     if (marketCrash(platform)) {
-      warnings.unshift(ft("w_marketCrash", { pct: flipPct(mk.s24 * 100, 1) }));
+      warnings.unshift(ft("w_marketCrash", { pct: flipPct((mk.s24 != null ? mk.s24 : mk.ch24 || 0) * 100, 1) }));
       return true;
     }
-    if (mk.ch24 != null && mk.ch24 <= -0.03 && cardChange != null && cardChange < 0 && cardChange - mk.ch24 > -0.04) {
-      warnings.push(ft("w_marketWide", { market: flipPct(mk.ch24 * 100, 1), card: flipPct(cardChange * 100, 1) }));
+    if (mk.s24 != null && mk.s24 <= -0.03 && cardChange != null && cardChange < 0 && cardChange - mk.s24 > -0.04) {
+      warnings.push(ft("w_marketWide", { market: flipPct(mk.s24 * 100, 1), card: flipPct(cardChange * 100, 1) }));
       return true;
     }
-    if (mk.ch6 != null && mk.ch6 <= -0.02) {
-      warnings.push(ft("w_marketFalling", { pct: flipPct(mk.ch6 * 100, 1) }));
+    if (mk.s6 != null && mk.s6 <= -0.02) {
+      warnings.push(ft("w_marketFalling", { pct: flipPct(mk.s6 * 100, 1) }));
       return true;
     }
     return false;
@@ -9204,19 +9420,29 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (now && h1 && h2 && low < Infinity) {
         const rise = now / low - 1;
         const drop = low / peak - 1;
-        index = { on: drop <= -0.05 && rise >= 0.02 && lastT - lowT >= 3 * H && now > h1 && h1 > h2, rise, drop, lowT };
+        const yesterday = mean4(lastT - 24 * H); // above the same hour yesterday: not just the daily rhythm
+        // review: +2% from a 3 h old low was ~1.5 sigma of this index; now +4% from a low 8+ h old
+        index = { on: drop <= -0.05 && rise >= 0.04 && lastT - lowT >= 8 * H && now > h1 && h1 > h2 && (!yesterday || now > yesterday), rise, drop, lowT };
       }
     }
     // B: breadth
     let breadth = null;
     const points = ((all.br || {})[futbinPlatform(platform)] || []).filter(point => Date.now() - point[0] < 72 * H);
-    if (points.length >= 2 && Date.now() - points[points.length - 1][0] < 45 * 60000) {
-      const [a, b] = points.slice(-2);
-      const weakBefore = points.filter(point => point[0] >= b[0] - 24 * H && point[0] < a[0]).some(point => point[1] <= 0.4);
-      breadth = { on: a[1] >= 0.55 && b[1] >= 0.55 && a[2] >= 0.3 && b[2] >= 0.3 && weakBefore, up: b[1], med: b[2] };
+    if (points.length && Date.now() - points[points.length - 1][0] < 45 * 60000) {
+      const last = points[points.length - 1];
+      // review: two fetches 15 min apart are the same data; now 4+ fetches over 90+ minutes, all strong
+      const span = points.filter(point => point[0] >= last[0] - 100 * 60000);
+      const strong = span.length >= 4 && last[0] - span[0][0] >= 90 * 60000 && span.every(point => point[1] >= 0.55 && point[2] >= 0.3);
+      breadth = { on: strong, up: last[1], med: last[2] };
     }
-    const count = (index && index.on ? 1 : 0) + (breadth && breadth.on ? 1 : 0);
-    return { level: count === 2 ? "confirmed" : count === 1 ? "possible" : "none", index, breadth };
+    // Third confirmation: your checked cards' sales no longer falling, or fodder 84-88 back at its week.
+    const uni = universeTrend(platform);
+    const fod = fbFodderMarket();
+    const confirm = { on: (uni != null && uni > -0.01) || (fod != null && fod.value >= 0), uni, fod: fod ? fod.value : null };
+    const count = (index && index.on ? 1 : 0) + (breadth && breadth.on ? 1 : 0) + (confirm.on ? 1 : 0);
+    const blackout = turnBlackout(); // post-promo crashes usually bottom Saturday evening/Sunday
+    const level = count === 3 && !blackout ? "confirmed" : (index && index.on) || (breadth && breadth.on) ? "possible" : "none";
+    return { level, index, breadth, confirm, blackout };
   }
 
   // Crash help (pc, via ntfy + a toast): "falling hard" when the index drops >= 3% in 6 h, and "turning"
@@ -9234,7 +9460,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const stored = (() => { try { return JSON.parse(localStorage.getItem(MARKET_ALERT_KEY) || "{}") || {}; } catch (_) { return {}; } })();
     const drop = low[1] / peak - 1;
     const up = mk.now / low[1] - 1;
-    const fall = mk.ch6 != null && mk.ch6 <= -0.03 && now - (stored.fallAt || 0) > 12 * 3600000;
+    const fall = mk.s6 != null && mk.s6 <= -0.03 && now - (stored.fallAt || 0) > 12 * 3600000;
     const turnState = marketTurn(platform);
     const turnLow = turnState.index ? turnState.index.lowT : low[0];
     const turn = turnState.level === "confirmed" && turnLow !== stored.lowT && now - (stored.turnAt || 0) > 12 * 3600000;
@@ -9252,13 +9478,15 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (state.turn) {
       title = L("📈 Markt draait", "📈 Market is turning");
       const ts = state.turnState;
-      text = L(`Twee signalen eens: Index 100 (${name}, gemiddeld over 4u) ${pct(ts.index.rise)} boven de bodem na ${pct(ts.index.drop)}, en ${Math.round(ts.breadth.up * 100)}% van je FUT.GG-lijst stijgt (6u). Tijd om weer naar kopen te kijken.`,
-        `Both signals agree: Index 100 (${name}, 4 h average) ${pct(ts.index.rise)} above the low after ${pct(ts.index.drop)}, and ${Math.round(ts.breadth.up * 100)}% of your FUT.GG list is rising (6h). Time to look at buying again.`);
+      const third = ts.confirm.uni != null && ts.confirm.uni > -0.01 ? L(`je gecheckte kaarten verkopen weer stabiel (${pct(ts.confirm.uni)})`, `your checked cards sell steady again (${pct(ts.confirm.uni)})`)
+        : L(`fodder 84-88 terug op zijn week (${pct(ts.confirm.fod)})`, `fodder 84-88 back at its week (${pct(ts.confirm.fod)})`);
+      text = L(`Drie signalen eens: Index 100 (${name}, gemiddeld over 4u) ${pct(ts.index.rise)} boven de bodem na ${pct(ts.index.drop)}, ${Math.round(ts.breadth.up * 100)}% van je FUT.GG-lijst stijgt (6u), en ${third}. Tijd om weer naar kopen te kijken.`,
+        `Three signals agree: Index 100 (${name}, 4 h average) ${pct(ts.index.rise)} above the low after ${pct(ts.index.drop)}, ${Math.round(ts.breadth.up * 100)}% of your FUT.GG list is rising (6h), and ${third}. Time to look at buying again.`);
       Object.assign(stored, { turnAt: Date.now(), lowT: low[0] });
     } else {
       title = L("📉 Markt zakt hard", "📉 Market falling hard");
-      text = L(`Index 100 (${name}) ${pct(mk.ch6)} in 6 uur (nu ${mk.now.toFixed(1)}). Niet bijkopen; verkopen kan nog.`,
-        `Index 100 (${name}) ${pct(mk.ch6)} in 6 hours (now ${mk.now.toFixed(1)}). Don't buy more; you can still sell.`);
+      text = L(`Index 100 (${name}) ${pct(mk.s6)} in 6 uur (gemiddeld over 2u, nu ${mk.now.toFixed(1)}). Niet bijkopen; verkopen kan nog.`,
+        `Index 100 (${name}) ${pct(mk.s6)} in 6 hours (2 h average, now ${mk.now.toFixed(1)}). Don't buy more; you can still sell.`);
       stored.fallAt = Date.now();
     }
     try { localStorage.setItem(MARKET_ALERT_KEY, JSON.stringify(stored)); } catch (_) { /* may repeat once */ }
@@ -9402,6 +9630,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     const twoDays = futbinWindow(rows, end - 2 * 86400000, end);
     const base = day.sales >= 5 ? day : twoDays;
     const all = futbinWindow(rows, 0, end);
+    // Review 2026-11-14: buy and sell from the same 24-48 h window turn a falling price into "profit". So also:
+    // the last 8 h (sell ≤ its P60) and Buy Now sales only (a BIN buy price; bid wins are cheaper).
+    const recent = futbinWindow(rows, end - 8 * 3600000, end);
+    const binRows = rows.filter(row => row.type !== "bid");
+    const binBase = futbinWindow(binRows, day.sales >= 5 ? end - 86400000 : end - 2 * 86400000, end);
     // Compact table for the sales check: last 24 h, the 24 h before, the whole page.
     const compact = w => ({ s: w.sales, l: w.listings, b: w.bids, p10: w.p10, md: w.median, p75: w.p75, p90: w.p90, mn: w.min, mx: w.max, u: w.unsold });
     return {
@@ -9416,6 +9649,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       p10: base.p10, p25: base.p25, median: base.median, p75: base.p75, p90: base.p90,
       outliers: base.outliers,
       salesInBase: base.sales,
+      recent: { s: recent.sales, md: recent.median, p60: recent.p60 },
+      binP25: binBase.sales >= 5 ? binBase.p25 : null,
+      binN: binBase.sales,
+      drift: recent.sales >= 4 && base.median ? recent.median / base.median - 1 : null,
       newest,
       h72: futbinHistory72(doc, platform, rows, now)
     };
@@ -9703,13 +9940,24 @@ function priceWatchMain(SCRIPT_VERSION) {
       return { buy: 0, sell: 0, profit: 0, pct: 0, gap: 1, warnings: [ft("w_mNoFutbin"), ...warnings], status: "unk", risky: true, futbin: null, move };
     }
     const fbPrices = futbinPrices(futbin);
-    const buy = fbPrices.buy;
-    const sellFactor = marketSellFactor(platform);
-    const sell = sellFactor < 1 ? roundDownToStep(fbPrices.sell * sellFactor) : fbPrices.sell;
+    let buy = fbPrices.buy;
+    let sell = fbPrices.sell;
     let fbRisky = false;
-    if (sellFactor < 1) warnings.push(ft("w_marketSell", { pct: ((1 - sellFactor) * 100).toFixed(1), from: flipShort(fbPrices.sell), to: flipShort(sell) }));
+    const cut = marketHaircut(card.now, futbin, platform);
+    if (cut < 0) {
+      const cutSell = roundDownToStep(fbPrices.p75 * (1 + cut));
+      if (cutSell < sell) { warnings.push(ft("w_marketSell", { pct: (-cut * 100).toFixed(1), from: flipShort(sell), to: flipShort(cutSell) })); sell = cutSell; }
+      buy = Math.min(buy, roundDownToStep(buy * (1 + cut)));
+    }
     if (fbPrices.adjusted) { warnings.push(sellLoweredWarning(fbPrices, futbin)); if (fbPrices.slow) fbRisky = true; }
     if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); fbRisky = true; }
+    // Liquidity you can exit (review): 20+ sales a day (10+ above 300K) and 25%+ of listings selling.
+    const minSales = card.now > 300000 ? 10 : 20;
+    if (futbin.salesPerDay < minSales || (futbin.listings24 >= 10 && futbin.sellThrough < 0.25)) {
+      warnings.push(ft("w_illiquid", { n: Math.round(futbin.salesPerDay), min: minSales, pct: Math.round(futbin.sellThrough * 100) }));
+      fbRisky = true;
+    }
+    if (!fbPrices.medianOk) { warnings.push(ft("w_medianThin", { median: flipShort(fbPrices.refMedian) })); fbRisky = true; }
     const fh = futbin.h72;
     if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); fbRisky = true; }
     const youngDays = futbinYoung(futbin);
@@ -9722,10 +9970,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     const pct = buy > 0 ? profit / buy * 100 : 0;
     const gap = buy > 0 ? card.now / buy - 1 : 1;
     const marketRisky = marketCheck(card.m24 != null ? card.m24 / 100 : null, platform, warnings);
-    const risky = falling || fbRisky || marketRisky;
+    const promo = promoWindow();
+    if (promo) warnings.unshift(ft("w_promoWindow"));
+    const risky = falling || fbRisky || marketRisky || promo;
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
-    return { buy, sell, profit, pct, gap, warnings, status, risky, futbin, move };
+    return { buy, bid: Math.min(fbPrices.bid, buy), sell, profit, pct, gap, warnings, status, risky, futbin, move };
   }
 
   // "Now" of a momentum card: FUT.GG's price index (the same PC feed as the Spelers tab, checked every
@@ -10330,6 +10580,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (fb && fb.h72 && fb.h72.state) pair(facts, ft("d_course"), ft(`course_${fb.h72.state}`), ["downLong", "down"].includes(fb.h72.state) ? "pt-flip-minus" : ["recovering", "up"].includes(fb.h72.state) ? "pt-flip-plus" : "");
       pair(facts, ft("d_nowSrc"), item.nowSrc === "index" ? ft("d_nowIndex", { time: formatTime(futggPricesAt) }) : item.src === "futgg" ? ft("d_nowList") : ft("d_nowFodderOnly"));
       pair(facts, "FUTBIN", fb ? ft("d_checkedAgo", { time: formatTime(fb.fetchedAt), min: Math.round((Date.now() - fb.fetchedAt) / 60000) }) : ft("sts_unk"));
+      if (!noPrice) {
+        if (calc.bid > 0 && calc.bid < calc.buy) pair(facts, L("Bieden ≤", "Bid ≤"), flipShort(calc.bid));
+        const plan = flipPlan(item, calc, fb, getFlip().platform);
+        if (plan.known) pair(facts, L("Max inzet", "Max stake"), plan.qtyText);
+        pair(facts, L("Uitstap", "Exit"), plan.exitText);
+      }
       const todo = section(ft("d_todo"));
       const searchNow = el("button", "pt-fx-btn pt-fx-primary pt-fx-wide pt-flip-search", noPrice ? ft("d_searchNoMax") : ft("d_searchMax", { max: flipShort(calc.buy) }));
       searchNow.type = "button";
@@ -10413,6 +10669,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         shown = rankFlipOpportunities(flipRows(data, state).filter(deal), state.platform);
         if (state.sort === "signal" || state.platform !== "pc") shown.sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
       }
+      signalLogTouch(momentum ? "futgg" : "fodder", shown.map(row => ({ k: `${row.card.id}|${state.platform}`, n: row.card.name, price: row.card.now,
+        green: row.calc.status === "buy", buy: row.calc.buy, sell: row.calc.sell })));
       const listSize = shown.length;
       const checkedCount = shown.filter(row => row.calc.futbin).length;
       if (filterText.trim()) shown = shown.filter(matchesFilter);
@@ -10458,6 +10716,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (syncText) status.textContent += ` · ${syncText}`;
       const marketLine = marketText(state.platform);
       if (marketLine) status.textContent += ` · ${marketLine}`;
+      const logLine = signalLogSummary();
+      if (logLine) status.textContent += ` · ${logLine}`;
       status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
       if (momentum) {
         const set = momentumData && momentumData[state.platform];
@@ -10473,6 +10733,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (syncLine) status.textContent += ` · ${syncLine}`;
         const marketInfo = marketText(state.platform);
         if (marketInfo) status.textContent += ` · ${marketInfo}`;
+        const logInfo = signalLogSummary();
+        if (logInfo) status.textContent += ` · ${logInfo}`;
       }
 
       tbody.textContent = "";

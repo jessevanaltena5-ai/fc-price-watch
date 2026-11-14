@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.82.1
+// @version      2.82.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9710,7 +9710,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     // Tick many cards at once (instead of one by one): presets for the shown rows.
     const SELECTIONS = ["default", "deals", "profit", "top10", "top20", "all", "none"];
     const selectMenu = el("select", "pt-stock-select pt-mode-select pt-flip-select");
-    selectMenu.append(new Option("", ""), ...SELECTIONS.map(key => new Option("", key)));
+    selectMenu.append(new Option(ft("sel_placeholder"), ""), ...SELECTIONS.map(key => new Option(ft(`sel_${key}`), key)));
     selectMenu.addEventListener("change", () => {
       const key = selectMenu.value;
       selectMenu.value = "";
@@ -9758,8 +9758,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     status.className = "pt-watch-status pt-fx-status";
     row2.append(sortSeg.box, dealsBox, selectMenu, recheckButton, watchButton, el("span", "pt-fx-spacer"), refresh, alertButton, settingsButton, helpButton, langButton);
     // Phone: one compact first row (title, source, platform, search); the action buttons slide in row 2.
-    if (IS_PHONE) row2.prepend(runButton, bidButton, futbinButton);
-    toolbar.append(row1, row2, status);
+    // The FUTBIN chip gets its own full-width line there (at the end of the sliding row it fell off the screen).
+    const rowFb = el("div", "pt-fx-row pt-fx-rowfb");
+    if (IS_PHONE) { row2.prepend(runButton, bidButton); rowFb.appendChild(futbinButton); }
+    toolbar.append(row1, ...(IS_PHONE ? [rowFb] : []), row2, status);
     card.appendChild(toolbar);
 
     // ⚙ Settings (open by itself while there is no link yet).
@@ -9862,6 +9864,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       selectMenu.title = ft("sel_title");
       selectMenu.options[0].textContent = ft("sel_placeholder");
       SELECTIONS.forEach((key, i) => { selectMenu.options[i + 1].textContent = ft(`sel_${key}`); });
+      selectMenu.selectedIndex = 0; // iPhone Safari keeps showing the old (empty) text until the selection is set again
       help.textContent = "";
       ["score", "dot", "prices", "trend", "futbin", "momentum", "details", "self"].forEach(key => {
         const line = el("div", "pt-flip-help-line");
@@ -10306,7 +10309,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Short label with a fixed width (it used to grow while scanning and push the chip to the next line);
       // the round and the stop hint sit in the hover text.
       futbinButton.appendChild(el("span", "pt-fx-cover-label", futbinState.busy
-        ? `📊 ${checkedCount}/${listSize}${eta ? ` · ~${eta}m` : ""} ■`
+        ? `📊 ${checkedCount}/${listSize}${eta ? ` · ~${eta}m` : ""}` // click = stop (in the hover text)
         : `FUTBIN ${checkedCount}/${listSize}${paused ? ft("fbPausedMark", { time: formatTime(futbinAutoPause) }) : ""}`));
       const track = el("span", "pt-fx-track");
       const fill = el("i");
@@ -13593,9 +13596,11 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-card button.pt-fx-cover { appearance: none; display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .14); background: rgba(255, 255, 255, .02); color: #8392ab; font: 600 12.5px inherit; font-family: inherit; cursor: pointer; white-space: nowrap; text-transform: none; }
 .pt-flip-card button.pt-fx-cover:hover { border-color: rgba(76, 180, 255, .5); color: #e8eef9; }
 .pt-flip-card .pt-fx-cover.pt-fx-busy { color: #e8eef9; border-color: rgba(76, 180, 255, .45); }
-.pt-flip-card .pt-fx-cover-label { display: inline-block; min-width: 9.2em; font-variant-numeric: tabular-nums; text-align: left; }
-.pt-flip-card .pt-fx-track { width: 80px; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; display: inline-block; }
-.pt-flip-card .pt-fx-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4cb4ff, #2fe39a); }
+/* Progress = a thin line along the bottom of the chip (was a separate 80 px bar that looked odd and fell off on the phone). */
+.pt-flip-card button.pt-fx-cover { position: relative; overflow: hidden; justify-content: center; min-width: 11em; max-width: 100%; }
+.pt-flip-card .pt-fx-cover-label { display: inline-block; font-variant-numeric: tabular-nums; text-align: center; }
+.pt-flip-card .pt-fx-track { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: rgba(255, 255, 255, .06); overflow: hidden; }
+.pt-flip-card .pt-fx-track i { display: block; height: 100%; background: linear-gradient(90deg, #4cb4ff, #2fe39a); transition: width .4s ease; }
 .pt-flip-card button.pt-fx-btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid rgba(148, 178, 230, .2); background: rgba(255, 255, 255, .03); color: #e8eef9; font: 600 13px inherit; font-family: inherit; cursor: pointer; white-space: nowrap; text-transform: none; }
 .pt-flip-card button.pt-fx-btn:hover:not(:disabled) { border-color: #4cb4ff; }
 .pt-flip-card button.pt-fx-btn:disabled { opacity: .5; cursor: default; }
@@ -14083,6 +14088,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
   .pt-flip-card .pt-fx-row2 { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
   .pt-flip-card .pt-fx-row2::-webkit-scrollbar { display: none; }
   .pt-flip-card .pt-fx-row2 > * { flex: 0 0 auto; }
+  .pt-flip-card .pt-fx-rowfb button.pt-fx-cover { flex: 1 1 100%; width: 100%; }
   .pt-flip-card .pt-fx-row2 .pt-fx-spacer { display: none; }
 
   /* Flip list: one card per player */

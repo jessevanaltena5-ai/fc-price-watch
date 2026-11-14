@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.81.1
+// @version      2.82.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -864,7 +864,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // "Check for update" (Flip → ⚙): newest version on GitHub vs this one; a newer one opens the install
-  // link, where Tampermonkey shows its own update page. Only on a click, no background checks.
+  // link, where Tampermonkey shows its own update page. Plus an automatic check with a popup (below).
   const UPDATE_URL = "https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/main/price-watch.user.js";
   function versionNewer(a, b) { // is a newer than b?
     const x = String(a || "").split(".").map(Number);
@@ -874,18 +874,63 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     return false;
   }
+  const updateInstallUrl = sha => (sha ? `https://raw.githubusercontent.com/jessevanaltena5-ai/fc-price-watch/${sha}/price-watch.user.js` : UPDATE_URL);
+  // Automatic check: 30 s after start, then every 3 h. A newer version → a small popup (not a browser
+  // dialog, which would block the web app) with Install / Later; "Later" hides that version for 12 h.
+  const UPDATE_SNOOZE_KEY = "pt_update_snooze_v1"; // { version, until }
+  let updatePopupShown = "";
+  async function autoUpdateCheck() {
+    let info;
+    try { info = await relayCall("checkUpdate", {}); } catch (_) { return; } // offline / no Tampermonkey part: next time
+    if (!info || !info.version || !versionNewer(info.version, SCRIPT_VERSION) || updatePopupShown === info.version) return;
+    let snooze = null;
+    try { snooze = JSON.parse(localStorage.getItem(UPDATE_SNOOZE_KEY) || "null"); } catch (_) { /* none */ }
+    if (snooze && snooze.version === info.version && Date.now() < snooze.until) return;
+    showUpdatePopup(info);
+  }
+  function showUpdatePopup(info) {
+    updatePopupShown = info.version;
+    document.querySelectorAll(".pt-update-pop").forEach(node => node.remove());
+    const pop = el("div", "pt-update-pop");
+    pop.appendChild(el("b", "", L(`⬆ Update klaar: v${info.version}`, `⬆ Update ready: v${info.version}`)));
+    pop.appendChild(el("div", "pt-muted", L(`Jij hebt v${SCRIPT_VERSION}`, `You have v${SCRIPT_VERSION}`)));
+    if (info.message) pop.appendChild(el("div", "pt-update-msg", info.message.replace(/^v[\d.]+:\s*/, "")));
+    const buttons = el("div", "pt-update-buttons");
+    const install = el("button", "pt-watch-refresh pt-primary", L("Installeren", "Install"));
+    install.type = "button";
+    install.addEventListener("click", () => {
+      window.open(updateInstallUrl(info.sha), "_blank");
+      pop.remove();
+    });
+    const later = el("button", "pt-watch-refresh", L("Later", "Later"));
+    later.type = "button";
+    later.addEventListener("click", () => {
+      try { localStorage.setItem(UPDATE_SNOOZE_KEY, JSON.stringify({ version: info.version, until: Date.now() + 12 * 3600000 })); } catch (_) { /* asks again next time */ }
+      pop.remove();
+    });
+    buttons.append(install, later);
+    pop.append(buttons, el("div", "pt-muted pt-update-hint", L("Tampermonkey opent een tab: klik daar op Update, ververs dan de web app.", "Tampermonkey opens a tab: click Update there, then refresh the web app.")));
+    document.body.appendChild(pop);
+  }
+  window.setTimeout(() => {
+    autoUpdateCheck();
+    window.setInterval(autoUpdateCheck, 3 * 3600000);
+  }, 30000);
   function updateButton() {
     const box = el("span", "pt-update");
     const button = el("button", "pt-watch-refresh", L("🔄 Zoek naar update", "🔄 Check for update"));
     button.type = "button";
     const note = el("span", "pt-muted pt-update-note", `v${SCRIPT_VERSION || "?"}`);
     let latest = "";
+    let latestSha = "";
     button.addEventListener("click", async () => {
-      if (latest && versionNewer(latest, SCRIPT_VERSION)) { window.open(UPDATE_URL, "_blank"); return; }
+      if (latest && versionNewer(latest, SCRIPT_VERSION)) { window.open(updateInstallUrl(latestSha), "_blank"); return; }
       button.disabled = true;
       note.textContent = L("zoeken…", "checking…");
       try {
-        latest = ((await relayCall("checkUpdate", {})) || {}).version || "";
+        const info = (await relayCall("checkUpdate", {})) || {};
+        latest = info.version || "";
+        latestSha = info.sha || "";
         if (latest && versionNewer(latest, SCRIPT_VERSION)) {
           button.textContent = L(`⬆ Update naar v${latest}`, `⬆ Update to v${latest}`);
           note.textContent = L(`jij hebt v${SCRIPT_VERSION}: klik, dan in Tampermonkey op Update`, `you have v${SCRIPT_VERSION}: click, then Update in Tampermonkey`);
@@ -13927,6 +13972,14 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-picker-current { color: #27d98b; font-weight: 700; }
 .pt-picker-cancel { color: #8d9aae; text-align: center; border-bottom: 0; }
 
+.pt-update-pop { position: fixed; right: 16px; bottom: 24px; z-index: 100001; width: 300px; max-width: calc(100vw - 32px); box-sizing: border-box;
+  padding: 14px 16px; background: #0c1119; border: 1px solid #4cb4ff; border-radius: 10px; box-shadow: 0 10px 30px rgba(0, 0, 0, .55);
+  color: #e8eef9; font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+.pt-update-pop b { font-size: 15px; }
+.pt-update-pop .pt-update-msg { font-size: 13px; color: #c9d4e6; }
+.pt-update-pop .pt-update-buttons { display: flex; gap: 8px; margin-top: 4px; }
+.pt-update-pop .pt-update-hint { font-size: 12px; }
+@media (max-width: 700px) { .pt-update-pop { left: 16px; right: 16px; width: auto; top: 70px; bottom: auto; } }
 .pt-toast {
   position: fixed;
   left: 50%;
@@ -14536,12 +14589,17 @@ function L(nl, en) {
       }
       case "notify":
         return notify(message.title, message.text);
-      case "checkUpdate": { // the @version of the newest script on GitHub (public repo, no token)
-        const latest = await request("GET", "https://api.github.com/repos/jessevanaltena5-ai/fc-price-watch/contents/price-watch.user.js?ref=main",
+      case "checkUpdate": { // the newest script on GitHub (public repo, no token): @version, commit and its message
+        const REPO = "https://api.github.com/repos/jessevanaltena5-ai/fc-price-watch";
+        const commits = await request("GET", `${REPO}/commits?path=price-watch.user.js&per_page=1`);
+        const head = commits.status === 200 && Array.isArray(commits.json) && commits.json[0];
+        const sha = head && /^[0-9a-f]{40}$/.test(head.sha) ? head.sha : "";
+        const latest = await request("GET", `${REPO}/contents/price-watch.user.js?ref=${sha || "main"}`,
           undefined, { Accept: "application/vnd.github.raw" });
         const found = latest.status === 200 && /\/\/\s*@version\s+([\d.]+)/.exec(latest.text.slice(0, 2000));
         if (!found) throw new Error(L(`GitHub: ${githubError(latest)}`, `GitHub: ${githubError(latest)}`));
-        return { version: found[1] };
+        const message = head && head.commit && typeof head.commit.message === "string" ? head.commit.message.split("\n")[0].slice(0, 160) : "";
+        return { version: found[1], sha, message };
       }
       default:
         throw new Error(L(`onbekend verzoek ${message.type}`, `unknown request ${message.type}`));

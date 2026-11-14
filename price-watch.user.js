@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.87.1
+// @version      2.88.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1060,12 +1060,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (data.sl) mergeSignalLog(data.sl);
     if (data.fc) mergeCalibration(data.fc);
     if (data.dev) mergeDevices(data.dev);
+    if (data.dp) mergeDayPrices(data.dp);
   }
   // For the gist: this pc's calibration next to the others it knows; device heartbeats.
   function calibrationForRelay() {
     const out = {};
     try { Object.assign(out, JSON.parse(localStorage.getItem(CAL_OTHERS_KEY) || "{}") || {}); } catch (_) { /* none */ }
     try { out[deviceId()] = JSON.parse(localStorage.getItem(FODDER_CAL_KEY) || "{}") || {}; } catch (_) { /* none */ }
+    return out;
+  }
+  // Day/night prices of the cards checked in the last 3 days (for the night-dip signal on every device).
+  function dayPricesForRelay() {
+    const store = dayPriceStore();
+    const fresh = futbinStore(FUTBIN_SALES_KEY);
+    const out = {};
+    Object.keys(store).forEach(key => { if (fresh[key]) out[key] = store[key]; });
     return out;
   }
   function devicesForRelay() {
@@ -1110,7 +1119,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (remote) mergeShared(JSON.parse(remote));
       } catch (_) { /* first push, or GitHub busy: send what we have */ }
       const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(),
-        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), v: SCRIPT_VERSION || "" };
+        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
@@ -7877,6 +7886,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_medianThin: ["Verkoop je tegen de recente mediaan ({median}), dan blijft minder dan 3% over", "Selling at the recent median ({median}) leaves less than 3%"],
     w_marketSell: ["Verkoopprijs {pct}% omlaag voor de dalende markt ({from} → {to})", "Sell price lowered {pct}% for the falling market ({from} → {to})"],
     w_marketFalling: ["De markt zakt nu nog ({pct} in 6u): wacht tot hij draait", "The market is still falling ({pct} in 6h): wait until it turns"],
+    w_marketFallingYday: ["De markt staat {pct} onder gisteren rond deze tijd: wacht tot hij draait", "The market is {pct} below yesterday at this time: wait until it turns"],
+    w_nightDip: ["🌙 Nachtdip: {pct} onder zijn dagprijs van gisteren ({day}). Koop ≤ {buy}; zet hem vanaf 09:00 te koop voor {day}", "🌙 Night dip: {pct} under yesterday's day price ({day}). Buy ≤ {buy}; list from 09:00 (UK 08:00) at {day}"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
     miss_fbHistory: ["verloop van de echte verkopen (te weinig verkopen of data)", "course of the real sales (too few sales or data)"],
     pos_cheapStable: ["Goedkoop, terwijl de echte verkoopprijzen stabiel blijven", "Cheap, while real sale prices hold"],
@@ -8188,6 +8199,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     const promo = promoWindow();
     if (promo) warnings.unshift(ft("w_promoWindow"));
     const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky || marketRisky || promo;
+    // 🌙 Night dip (00-07 UK): bought under yesterday's day price, sold from 09:00; all conditions in nightDip().
+    const night = platform && useFutbin ? nightDip(card, futbin, platform) : null;
+    if (night) {
+      const nightProfit = Math.floor(night.sell * (1 - EA_TAX)) - night.buy;
+      return { buy: night.buy, bid: 0, sell: night.sell, profit: nightProfit, pct: night.buy > 0 ? nightProfit / night.buy * 100 : 0, gap: card.now / night.buy - 1,
+        warnings: [ft("w_nightDip", { pct: flipPct(night.dip * 100, 1), day: flipShort(night.day), buy: flipShort(night.buy) }), ...warnings],
+        status: card.now <= night.buy * 1.02 ? "buy" : "near", risky: false, night: true, futbin };
+    }
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, bid: useFutbin ? Math.min(futbinPrices(futbin).bid, buy) : 0, sell, profit, pct, gap, warnings, status, risky, futbin: useFutbin ? futbin : null };
@@ -8207,6 +8226,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     const qtyText = (qty ? L(`${qty} stuks`, `${qty} cards`) : L("geen (te weinig coins)", "none (not enough coins)"))
       + L(` (≤10% van je coins${bySales != null ? `, ≤10% van ${Math.round(fb.salesPerDay)} verkopen/dag` : ""})`, ` (≤10% of your coins${bySales != null ? `, ≤10% of ${Math.round(fb.salesPerDay)} sales/day` : ""})`)
       + (crash ? L(" · crash: in totaal max 40% van je coins", " · crash: at most 40% of your coins in total") : "");
+    if (calc.night) {
+      return { qty, known: byCoins != null || bySales != null, qtyText,
+        exitText: L(`zet hem vanaf 09:00 te koop voor ${flipShort(calc.sell)} (dagprijs); niet verkocht om 18:00 → opnieuw voor de avondpiek; weg vóór 19:00 (nieuwe content)`,
+          `list from 09:00 (UK 08:00) at ${flipShort(calc.sell)} (day price); unsold by 18:00 → relist for the evening peak; out before 18:00 UK (new content)`) };
+    }
     const relist = fb ? roundDownToStep(fb.recent && fb.recent.s >= 4 ? fb.recent.md : fb.median) : 0;
     const stop = roundDownToStep(calc.buy * 0.93);
     const exitText = L(`na 6u niet verkocht → opnieuw te koop voor ${relist ? flipShort(relist) : "de mediaan"}; stop onder ${flipShort(stop)} (−7%) of als FUTBIN "lang dalend" geeft`,
@@ -9493,8 +9517,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       warnings.push(ft("w_marketWide", { market: flipPct(mk.s24 * 100, 1), card: flipPct(cardChange * 100, 1) }));
       return true;
     }
-    if (mk.s6 != null && mk.s6 <= -0.02) {
-      warnings.push(ft("w_marketFalling", { pct: flipPct(mk.s6 * 100, 1) }));
+    // Review (night trading): a normal night is lower than the evening before, so compare with the same hours
+    // yesterday (s24); only a sharp drop within 6 h (−4%) counts on its own.
+    if ((mk.s24 != null && mk.s24 <= -0.02) || (mk.s6 != null && mk.s6 <= -0.04)) {
+      const yday = mk.s24 != null && mk.s24 <= -0.02;
+      warnings.push(ft(yday ? "w_marketFallingYday" : "w_marketFalling", { pct: flipPct((yday ? mk.s24 : mk.s6) * 100, 1) }));
       return true;
     }
     return false;
@@ -9791,8 +9818,106 @@ function priceWatchMain(SCRIPT_VERSION) {
       binN: binBase.sales,
       drift: recent.sales >= 4 && base.median ? recent.median / base.median - 1 : null,
       newest,
-      h72: futbinHistory72(doc, platform, rows, now)
+      h72: futbinHistory72(doc, platform, rows, now),
+      dayParts: futbinDayParts(rows)
     };
+  }
+
+  // Night trading (review): FUTBIN shows only the last ~500 sales, so a busy card's daytime prices are gone by
+  // the night. Every check keeps, per UK date, the median Buy Now price of 12:00-22:00 UK ("day") and of
+  // 01:00-07:00 UK ("night"), in a store of its own (4 dates each), shared between devices via the gist.
+  const DAYPRICE_KEY = "pt_dayprice_v1"; // { "id|pc": { d: { "2026-11-14": [median, n] }, n: { ... } } }
+  let ukDateFormat = null;
+  function ukDateKey(t) {
+    try {
+      if (!ukDateFormat) ukDateFormat = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" });
+      return ukDateFormat.format(new Date(t));
+    } catch (_) { return new Date(t).toISOString().slice(0, 10); }
+  }
+  function futbinDayParts(rows) {
+    const day = {};
+    const night = {};
+    rows.forEach(row => {
+      if (!(row.sold > 0) || row.type === "bid") return;
+      const hour = ukTime(row.at).hour;
+      const bucket = hour >= 12 && hour < 22 ? day : hour >= 1 && hour < 7 ? night : null;
+      if (!bucket) return;
+      const key = ukDateKey(row.at);
+      (bucket[key] = bucket[key] || []).push(row.sold);
+    });
+    const med = list => { const sorted = list.slice().sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
+    const pack = bucket => Object.fromEntries(Object.entries(bucket).map(([key, list]) => [key, [Math.round(med(list)), list.length]]));
+    return { d: pack(day), n: pack(night) };
+  }
+  function dayPriceStore() {
+    try { return JSON.parse(localStorage.getItem(DAYPRICE_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  // Keep, per date, the reading with the most sales (a later check may see only part of that day).
+  function dayPriceMerge(store, key, parts) {
+    if (!parts) return false;
+    const entry = store[key] || { d: {}, n: {} };
+    let changed = false;
+    ["d", "n"].forEach(kind => {
+      Object.entries(parts[kind] || {}).forEach(([date, value]) => {
+        const old = entry[kind][date];
+        if (!old || value[1] > old[1]) { entry[kind][date] = value; changed = true; }
+      });
+      const dates = Object.keys(entry[kind]).sort();
+      dates.slice(0, -4).forEach(date => { delete entry[kind][date]; changed = true; });
+    });
+    store[key] = entry;
+    return changed;
+  }
+  function dayPriceSave(store) {
+    const keys = Object.keys(store);
+    if (keys.length > 1500) keys.slice(0, keys.length - 1500).forEach(key => delete store[key]);
+    try { localStorage.setItem(DAYPRICE_KEY, JSON.stringify(store)); } catch (_) { /* next time */ }
+  }
+  function mergeDayPrices(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    const store = dayPriceStore();
+    let changed = false;
+    Object.entries(incoming).forEach(([key, parts]) => { if (dayPriceMerge(store, key, parts)) changed = true; });
+    if (changed) dayPriceSave(store);
+  }
+  // Night of UK date D = 00:00-07:00 UK on D; its "yesterday" day price = D−1 (12-22 UK). Blocked nights
+  // (judgement, review): Wed→Thu (rewards), Thu→Fri (promo), Sun→Mon (after Weekend League).
+  function indexBouncedYesterday(platform, now = Date.now()) {
+    const set = getMarket()[futbinPlatform(platform)];
+    if (!set || !set.live) return null;
+    const yday = ukDateKey(now - 24 * 3600000);
+    const early = [];
+    const late = [];
+    set.live.forEach(([t, v]) => {
+      if (ukDateKey(t) !== yday) return;
+      const hour = ukTime(t).hour;
+      if (hour >= 2 && hour < 6) early.push(v);
+      else if (hour >= 9 && hour < 12) late.push(v);
+    });
+    if (early.length < 4 || late.length < 4) return null;
+    const mean = list => list.reduce((a, b) => a + b, 0) / list.length;
+    return mean(late) / mean(early) - 1;
+  }
+  function nightDip(card, fb, platform, now = Date.now()) {
+    const uk = ukTime(now);
+    if (uk.hour >= 7 || [1, 4, 5].includes(uk.day)) return null; // 00-07 UK, not Mon/Thu/Fri mornings
+    if (!fb || !(card.now >= 15000 && card.now <= 500000) || !(fb.salesPerDay >= 30)) return null;
+    if (fb.trend != null && fb.trend < -0.03) return null;
+    if (futbinYoung(fb) || (fb.h72 && fb.h72.state === "downLong")) return null;
+    const mk = marketStats(platform);
+    if (!mk || mk.s24 == null || mk.s24 <= -0.02 || marketCrash(platform)) return null;
+    const bounce = indexBouncedYesterday(platform, now);
+    if (bounce == null || bounce < 0.015) return null;
+    const entry = dayPriceStore()[`${card.id}|${futbinPlatform(platform)}`];
+    if (!entry) return null;
+    const day = entry.d[ukDateKey(now - 24 * 3600000)];
+    if (!day || day[1] < 8) return null;
+    const maxBuy = roundDownToStep(day[0] * (1 - EA_TAX) / 1.04); // ≥ 4% after tax at the day median
+    if (card.now > maxBuy) return null;
+    const today = ukDateKey(now);
+    const nights = Object.entries(entry.n).filter(([date, value]) => date !== today && value[1] >= 5).map(([, value]) => value[0]).sort((a, b) => a - b);
+    if (nights.length >= 2 && card.now > nights[Math.floor(nights.length / 2)] * 0.97) return null; // not deeper than a normal night
+    return { buy: Math.min(maxBuy, roundDownToStep(card.now)), sell: roundDownToStep(day[0]), day: day[0], dip: card.now / day[0] - 1 };
   }
 
   async function futbinCheckCard(card, platform) {
@@ -9802,8 +9927,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!known) await new Promise(resolve => window.setTimeout(resolve, 1200 + Math.random() * 800)); // after a search only
     const salesPath = path.replace("/player/", "/sales/");
     const doc = await futbinHtml(`https://www.futbin.com${salesPath}?platform=${futbinPlatform(platform)}`);
-    const stats = futbinAnalyse(doc, platform);
-    if (!stats) return { notFound: true };
+    const analysed = futbinAnalyse(doc, platform);
+    if (!analysed) return { notFound: true };
+    const { dayParts, ...stats } = analysed;
+    const prices = dayPriceStore();
+    if (dayPriceMerge(prices, `${card.id}|${futbinPlatform(platform)}`, dayParts)) dayPriceSave(prices);
     const store = futbinStore(FUTBIN_SALES_KEY);
     // Keep the store small: drop entries older than a day.
     Object.keys(store).forEach(key => { if (Date.now() - store[key].fetchedAt > 86400000) delete store[key]; });
@@ -10110,6 +10238,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     const promo = promoWindow();
     if (promo) warnings.unshift(ft("w_promoWindow"));
     const risky = falling || fbRisky || marketRisky || promo;
+    // 🌙 Night dip (00-07 UK): bought under yesterday's day price, sold from 09:00; all conditions in nightDip().
+    const night = futbin ? nightDip(card, futbin, platform) : null;
+    if (night) {
+      const nightProfit = Math.floor(night.sell * (1 - EA_TAX)) - night.buy;
+      return { buy: night.buy, bid: 0, sell: night.sell, profit: nightProfit, pct: night.buy > 0 ? nightProfit / night.buy * 100 : 0, gap: card.now / night.buy - 1,
+        warnings: [ft("w_nightDip", { pct: flipPct(night.dip * 100, 1), day: flipShort(night.day), buy: flipShort(night.buy) }), ...warnings],
+        status: card.now <= night.buy * 1.02 ? "buy" : "near", risky: false, night: true, futbin, move };
+    }
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, bid: Math.min(fbPrices.bid, buy), sell, profit, pct, gap, warnings, status, risky, futbin, move };

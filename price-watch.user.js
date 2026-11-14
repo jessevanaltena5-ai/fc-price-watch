@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.81.0
+// @version      2.81.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10251,15 +10251,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       futbinButton.classList.toggle("pt-fx-busy", futbinState.busy);
       const left = Math.max(0, listSize - checkedCount);
       const eta = futbinState.busy && left > futbinState.total - futbinState.done ? Math.max(1, Math.round(left * futbinPerCardMs() / 60000)) : 0;
+      // Short label with a fixed width (it used to grow while scanning and push the chip to the next line);
+      // the round and the stop hint sit in the hover text.
       futbinButton.appendChild(el("span", "pt-fx-cover-label", futbinState.busy
-        ? ft("futbinBusy", { done: futbinState.done, total: futbinState.total }) + (eta ? L(` · lijst ${checkedCount}/${listSize}, nog ~${eta} min`, ` · list ${checkedCount}/${listSize}, ~${eta} min left`) : "")
+        ? `📊 ${checkedCount}/${listSize}${eta ? ` · ~${eta}m` : ""} ■`
         : `FUTBIN ${checkedCount}/${listSize}${paused ? ft("fbPausedMark", { time: formatTime(futbinAutoPause) }) : ""}`));
       const track = el("span", "pt-fx-track");
       const fill = el("i");
-      fill.style.width = `${listSize ? Math.round((futbinState.busy ? futbinState.done / Math.max(1, futbinState.total) : checkedCount / listSize) * 100) : 0}%`;
+      fill.style.width = `${listSize ? Math.round(checkedCount / listSize * 100) : 0}%`;
       track.appendChild(fill);
       futbinButton.appendChild(track);
-      futbinButton.title = ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
+      futbinButton.title = futbinState.busy
+        ? L(`FUTBIN-check bezig: ronde ${futbinState.done}/${futbinState.total}, lijst ${checkedCount}/${listSize}${eta ? `, nog ~${eta} min` : ""}. Klik = stoppen.`,
+          `FUTBIN check running: round ${futbinState.done}/${futbinState.total}, list ${checkedCount}/${listSize}${eta ? `, ~${eta} min left` : ""}. Click = stop.`)
+        : ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
 
       const count = key => shown.filter(row => row.calc.status === key).length;
       setTabBadge("flip", count("buy"), true);
@@ -13536,6 +13541,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-card button.pt-fx-cover { appearance: none; display: inline-flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(148, 178, 230, .14); background: rgba(255, 255, 255, .02); color: #8392ab; font: 600 12.5px inherit; font-family: inherit; cursor: pointer; white-space: nowrap; text-transform: none; }
 .pt-flip-card button.pt-fx-cover:hover { border-color: rgba(76, 180, 255, .5); color: #e8eef9; }
 .pt-flip-card .pt-fx-cover.pt-fx-busy { color: #e8eef9; border-color: rgba(76, 180, 255, .45); }
+.pt-flip-card .pt-fx-cover-label { display: inline-block; min-width: 9.2em; font-variant-numeric: tabular-nums; text-align: left; }
 .pt-flip-card .pt-fx-track { width: 80px; height: 5px; border-radius: 999px; background: rgba(255, 255, 255, .08); overflow: hidden; display: inline-block; }
 .pt-flip-card .pt-fx-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4cb4ff, #2fe39a); }
 .pt-flip-card button.pt-fx-btn { appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 14px; border-radius: 9px; border: 1px solid rgba(148, 178, 230, .2); background: rgba(255, 255, 255, .03); color: #e8eef9; font: 600 13px inherit; font-family: inherit; cursor: pointer; white-space: nowrap; text-transform: none; }

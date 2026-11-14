@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.80.1
+// @version      2.81.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4287,6 +4287,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const header = lines.find(line => /console/i.test(line) && /\bpc\b/i.test(line));
     const pcColumn = header ? (header.toLowerCase().indexOf("pc") < header.toLowerCase().indexOf("console") ? 0 : 1) : 0;
     const platform = userPlatform();
+    const perPlatformSlash = /\bboth\b/i.test(text);
 
     const ratings = [];
     lines.forEach(rawLine => {
@@ -4298,8 +4299,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       const columns = match[2].split(/\s+\/\s+/).map(column => column.replace(/[<≤~k]/gi, "").trim()).filter(Boolean);
       if (!columns.length) return;
       const column = columns[Math.min(header && platform === "pc" ? pcColumn : header ? 1 - pcColumn : 0, columns.length - 1)];
-      const values = column.split("/").map(fodderCoins).filter(Boolean);
+      let values = column.split("/").map(fodderCoins).filter(Boolean);
       if (!values.length) return;
+      // A tip that says "both" on some lines ("87s: 6.4k both") uses "a/b" for console/PC on the others
+      // ("89s: 18.25k/16k"): take your platform's price, not a range (console first unless a header says otherwise).
+      if (perPlatformSlash && values.length === 2 && !/\bboth\b/i.test(rawLine)) {
+        const pcIndex = header ? pcColumn : 1;
+        values = [values[platform === "pc" ? pcIndex : 1 - pcIndex]];
+      }
       // "<10.5/11": max = the upper end, ideal = the lower end (like "<650-700" in stock tips).
       ratings.push({ rating, max: Math.max(...values), ideal: values.length > 1 ? Math.min(...values) : null, enabled: true });
     });
@@ -9249,9 +9256,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   async function futbinCheckCard(card, platform) {
+    const known = !!futbinStore(FUTBIN_IDS_KEY)[card.id];
     const path = await futbinPathFor(card);
     if (!path) return { notFound: true };
-    await new Promise(resolve => window.setTimeout(resolve, 1200 + Math.random() * 800));
+    if (!known) await new Promise(resolve => window.setTimeout(resolve, 1200 + Math.random() * 800)); // after a search only
     const salesPath = path.replace("/player/", "/sales/");
     const doc = await futbinHtml(`https://www.futbin.com${salesPath}?platform=${futbinPlatform(platform)}`);
     const stats = futbinAnalyse(doc, platform);
@@ -9287,6 +9295,18 @@ function priceWatchMain(SCRIPT_VERSION) {
     return true;
   }
 
+  // Pace of the auto rounds: starts at ~2.5 s between cards, a bit faster after 30 clean checks (min 2 s),
+  // twice as slow after a block (max 8 s). A block pauses the auto check 5 min, then 20, then 60.
+  const FUTBIN_GAP_MIN = 2000;
+  const FUTBIN_GAP_MAX = 8000;
+  let futbinGap = 2500;
+  let futbinCleanRun = 0;
+  let futbinBlocks = 0;
+  let futbinLastBlockAt = 0;
+  const futbinMissingAt = {}; // cards FUTBIN did not find: auto rounds skip them for 3 h
+  const futbinMissingRecently = card => Date.now() - (futbinMissingAt[card.id] || 0) < FUTBIN_FRESH_MS;
+  const FUTBIN_PARALLEL = 2; // auto rounds check 2 cards at the same time
+  const futbinPerCardMs = () => (futbinGap * 1.2 + 1500) / FUTBIN_PARALLEL; // gap + page time, per line
   async function futbinCheckCards(cards, platform, quiet, options = {}) {
     if (futbinState.busy) return { done: 0, error: "", busy: true };
     if (!quiet) futbinAutoPause = 0; // checking by hand = you want FUTBIN now: the auto pause ends too
@@ -9299,17 +9319,30 @@ function priceWatchMain(SCRIPT_VERSION) {
     Object.assign(futbinState, { busy: true, done: 0, total: todo.length, error: "", stop: false });
     listeners.forEach(listener => listener());
     const missing = [];
-    try {
-      for (const card of todo) {
-        if (futbinState.stop) break;
-        const result = await futbinCheckCard(card, platform);
-        if (result && result.notFound) missing.push(card.name);
+    // Auto rounds: FUTBIN_PARALLEL lines take cards from one queue (the second starts half a pause later);
+    // the first error stops both. Checks by hand: one line.
+    const queue = todo.slice();
+    const wait = ms => new Promise(resolve => window.setTimeout(resolve, ms));
+    const line = async index => {
+      if (index) await wait(futbinGap / 2 + Math.random() * 500);
+      while (queue.length && !futbinState.stop && !futbinState.error) {
+        const card = queue.shift();
+        let result;
+        try {
+          result = await futbinCheckCard(card, platform);
+        } catch (error) {
+          if (!futbinState.error) futbinState.error = error && error.message ? error.message : String(error);
+          return;
+        }
+        if (result && result.notFound) { missing.push(card.name); futbinMissingAt[card.id] = Date.now(); }
         futbinState.done++;
+        if (++futbinCleanRun >= 30) { futbinGap = Math.max(FUTBIN_GAP_MIN, Math.round(futbinGap * 0.85)); futbinCleanRun = 0; }
         listeners.forEach(listener => listener());
-        await new Promise(resolve => window.setTimeout(resolve, options.calm ? 5000 + Math.random() * 3000 : 2500 + Math.random() * 1500));
+        if (queue.length) await wait(options.calm ? futbinGap + Math.random() * futbinGap * 0.4 : 2500 + Math.random() * 1500);
       }
-    } catch (error) {
-      futbinState.error = error && error.message ? error.message : String(error);
+    };
+    try {
+      await Promise.all(Array.from({ length: options.calm ? FUTBIN_PARALLEL : 1 }, (_, index) => line(index)));
     } finally {
       futbinState.busy = false;
       listeners.forEach(listener => listener());
@@ -9328,7 +9361,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Auto (pc with FUT Genie only): after every fetched list a round over the cards whose FUTBIN check is
   // missing or older than 45 min, most important first. Both lists are fetched in the background (fodder.gg
   // every 10 min, FUT.GG every 15 min) while the web app is open, so in time every card of both lists is
-  // checked (a check is used for 3 h): 40 per round for both lists, with calm pauses (5-8 s).
+  // checked (a check is used for 3 h): 40 per round, rounds follow each other while cards are due,
+  // with an adaptive pause (~2.5 s, slower after a block).
   const FUTBIN_AUTO_TOP = 40;
   // FUT.GG momentum: 40 per round with calm pauses (about 6-10 min, well inside the 15-min refresh), in
   // order: turning first (what you can act on), then dips without a label, still-falling cards last.
@@ -9350,7 +9384,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         .sort((a, b) => group(a) - group(b)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0) // never checked first, then the old checks
           || a.card.m24 - b.card.m24)
-        .slice(0, MOMENTUM_AUTO_TOP).map(row => row.card);
+        .map(row => row.card).filter(card => !futbinMissingRecently(card)).slice(0, MOMENTUM_AUTO_TOP);
     } else {
       if (!flipData || flipData.token !== state.token) return;
       // Every card of the list: by score, cards without profit (by the sheet) last; never checked first.
@@ -9358,18 +9392,34 @@ function priceWatchMain(SCRIPT_VERSION) {
         .filter(row => futbinAutoDue(row, state.platform))
         .sort((a, b) => (a.calc.status === "skip" ? 1 : 0) - (b.calc.status === "skip" ? 1 : 0)
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0)) // stable: keeps the score order inside
-        .slice(0, FUTBIN_AUTO_TOP)
-        .map(row => row.card);
+        .map(row => row.card)
+        .filter(card => !futbinMissingRecently(card))
+        .slice(0, FUTBIN_AUTO_TOP);
     }
     if (!cards.length || Date.now() < futbinAutoPause) return;
-    const result = await futbinCheckCards(cards, state.platform, true, { max: source === "futgg" ? MOMENTUM_AUTO_TOP : FUTBIN_AUTO_TOP, calm: true });
-    // Only an error in THIS round pauses the auto check: blocked / rate limit (403, 429, Cloudflare) for an
-    // hour, anything else (time-out, network) for 10 minutes. Clicking 📊 yourself ends the pause.
+    const max = source === "futgg" ? MOMENTUM_AUTO_TOP : FUTBIN_AUTO_TOP;
+    const result = await futbinCheckCards(cards, state.platform, true, { max, calm: true });
+    // Only an error in THIS round pauses the auto check. Blocked / rate limit (403, 429, Cloudflare): slower
+    // from now on and a pause of 5, 20, then 60 min (the count resets after 2 h without a block); anything
+    // else (time-out, network) 10 minutes. Clicking 📊 yourself ends the pause.
     if (result && result.error) {
       const blocked = /HTTP (403|429)|cloudflare|captcha/i.test(result.error);
-      futbinAutoPause = Date.now() + (blocked ? 60 : 10) * 60 * 1000;
+      if (blocked) {
+        if (Date.now() - futbinLastBlockAt > 2 * 3600000) futbinBlocks = 0;
+        futbinBlocks++;
+        futbinLastBlockAt = Date.now();
+        futbinGap = Math.min(FUTBIN_GAP_MAX, futbinGap * 2);
+        futbinCleanRun = 0;
+      }
+      futbinAutoPause = Date.now() + (blocked ? [5, 20, 60][Math.min(futbinBlocks, 3) - 1] : 10) * 60 * 1000;
       showToast(ft("fbAutoPaused", { time: formatTime(futbinAutoPause) }), false);
       listeners.forEach(listener => listener());
+      return;
+    }
+    // A full round and more cards due: go on right away instead of waiting for the next list fetch
+    // (10-15 min), until every card of the list has a fresh check.
+    if (result && result.done >= max) {
+      window.setTimeout(() => futbinAutoTop(source).catch(error => console.warn(L("Price Watch: FUTBIN auto-check mislukt.", "Price Watch: FUTBIN auto-check failed."), error)), 3000);
     }
   }
 
@@ -10199,8 +10249,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       const paused = state.autoFutbin && Date.now() < futbinAutoPause;
       futbinButton.textContent = "";
       futbinButton.classList.toggle("pt-fx-busy", futbinState.busy);
+      const left = Math.max(0, listSize - checkedCount);
+      const eta = futbinState.busy && left > futbinState.total - futbinState.done ? Math.max(1, Math.round(left * futbinPerCardMs() / 60000)) : 0;
       futbinButton.appendChild(el("span", "pt-fx-cover-label", futbinState.busy
-        ? ft("futbinBusy", { done: futbinState.done, total: futbinState.total })
+        ? ft("futbinBusy", { done: futbinState.done, total: futbinState.total }) + (eta ? L(` · lijst ${checkedCount}/${listSize}, nog ~${eta} min`, ` · list ${checkedCount}/${listSize}, ~${eta} min left`) : "")
         : `FUTBIN ${checkedCount}/${listSize}${paused ? ft("fbPausedMark", { time: formatTime(futbinAutoPause) }) : ""}`));
       const track = el("span", "pt-fx-track");
       const fill = el("i");

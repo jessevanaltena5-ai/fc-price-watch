@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.86.1
+// @version      2.87.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10839,38 +10839,45 @@ function priceWatchMain(SCRIPT_VERSION) {
         : history && history.times.length
           ? ft("histStatus", { n: history.times.length, span: formatSpan(history.times[history.times.length - 1] - history.times[0]), time: formatTime(history.times[history.times.length - 1]), remote: pcDevice() ? "" : ft("histRemote") })
           : ft(pcDevice() ? "histBuilding" : "histNone");
-      status.textContent = !state.token
-        ? ft("statusNoLink")
-        : flipLoading
-          ? ft("statusLoading")
-          : data
-            ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) })
-              + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
-              + (flipError ? ft("statusError", { error: flipError }) : "")
-            : flipError ? ft("statusFailed", { error: flipError }) : ft("statusEmpty");
-      const syncText = flipSyncText();
-      if (syncText) status.textContent += ` · ${syncText}`;
-      const marketLine = marketText(state.platform);
-      if (marketLine) status.textContent += ` · ${marketLine}`;
-      const logLine = signalLogSummary();
-      if (logLine) status.textContent += ` · ${logLine}`;
-      status.title = data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : "";
-      if (momentum) {
-        const set = momentumData && momentumData[state.platform];
-        status.textContent = momentumLoading
-          ? ft("mLoading", { n: momentumPages })
-          : set
-            ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) })
-              + (state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }) : "")
-              + (momentumError ? ft("statusError", { error: momentumError }) : "")
-            : momentumError ? ft("statusFailed", { error: momentumError }) : ft("mEmpty");
-        status.title = ft("mStatusTitle");
-        const syncLine = flipSyncText();
-        if (syncLine) status.textContent += ` · ${syncLine}`;
-        const marketInfo = marketText(state.platform);
-        if (marketInfo) status.textContent += ` · ${marketInfo}`;
-        const logInfo = signalLogSummary();
-        if (logInfo) status.textContent += ` · ${logInfo}`;
+      // Simple status (user: "braindead"): one sentence with what to do, one short line, the rest behind ⓘ.
+      const set = momentum ? momentumData && momentumData[state.platform] : null;
+      const haveData = momentum ? !!set : !!data;
+      const loadingNow = momentum ? momentumLoading : flipLoading;
+      const errorNow = momentum ? momentumError : flipError;
+      const mainText = momentum
+        ? (set ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) }) : "")
+        : (data ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) }) : "");
+      const crashNow = marketCrash(state.platform);
+      const turnNow = marketTurn(state.platform).level;
+      let verdict;
+      let tone;
+      if (!momentum && !state.token) { verdict = ft("statusNoLink"); tone = "info"; }
+      else if (!haveData) {
+        verdict = loadingNow ? (momentum ? ft("mLoading", { n: momentumPages }) : ft("statusLoading"))
+          : errorNow ? ft("statusFailed", { error: errorNow }) : momentum ? ft("mEmpty") : ft("statusEmpty");
+        tone = loadingNow ? "info" : "bad";
+      } else if (crashNow) { verdict = L("📉 Markt crasht — niets kopen, wacht op de draai", "📉 Market is crashing — buy nothing, wait for the turn"); tone = "bad"; }
+      else if (count("buy")) {
+        verdict = L(`🟢 ${count("buy")} om te kopen`, `🟢 ${count("buy")} to buy`) + (turnNow === "confirmed" ? L(" · 📈 de markt draait", " · 📈 the market is turning") : "");
+        tone = "good";
+      } else if (turnNow === "confirmed") { verdict = L("📈 Markt draait — kijk weer naar kopen", "📈 Market is turning — look at buying again"); tone = "good"; }
+      else if (turnNow === "possible") { verdict = L("🔄 Markt draait misschien — nog even afwachten", "🔄 Market may be turning — wait a little longer"); tone = "maybe"; }
+      else if (count("near")) { verdict = L(`🟡 ${count("near")} bijna op koopprijs — nog niet kopen`, `🟡 ${count("near")} almost at buy price — don't buy yet`); tone = "maybe"; }
+      else { verdict = L("⚪ Nu niets om te kopen", "⚪ Nothing to buy right now"); tone = "calm"; }
+      const time = momentum ? (set ? formatTime(set.at) : "") : (data ? formatTime(data.fetchedAt) : "");
+      const summary = haveData
+        ? `${shown.length} ${L("kaarten", "cards")} · 🟢 ${count("buy")} · 🟡 ${count("near")} · 🟠 ${count("risk")}${time ? ` · ${time}` : ""}${loadingNow ? " · ⏳" : ""}${errorNow ? " · ⚠" : ""}`
+        : "";
+      const detailLines = [mainText, state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }).replace(/^ · /, "") : "",
+        errorNow ? ft("statusError", { error: errorNow }).replace(/^ · /, "") : "", flipSyncText(), marketText(state.platform), signalLogSummary(),
+        momentum ? ft("mStatusTitle") : data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : ""].filter(Boolean);
+      status.textContent = "";
+      status.title = "";
+      status.appendChild(el("div", `pt-fx-verdict pt-fx-verdict-${tone}`, verdict));
+      if (summary || detailLines.length) {
+        const line = el("div", "pt-fx-summary", summary);
+        if (detailLines.length) line.appendChild(fgInfo(L("Details", "Details"), detailLines));
+        status.appendChild(line);
       }
 
       tbody.textContent = "";
@@ -14103,6 +14110,12 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-card .pt-fx-spacer { flex: 1; }
 .pt-flip-card .pt-fx-title { font-size: 22px; font-weight: 800; letter-spacing: .3px; color: #e8eef9; margin-right: 2px; }
 .pt-flip-card .pt-fx-status { font-size: 12px; color: #8392ab; margin: 0; padding-left: 2px; }
+.pt-flip-card .pt-fx-verdict { font-size: 15px; font-weight: 700; line-height: 1.35; margin: 2px 0 2px; color: #c9d4e6; }
+.pt-flip-card .pt-fx-verdict-bad { color: #ff8a80; }
+.pt-flip-card .pt-fx-verdict-good { color: #27d98b; }
+.pt-flip-card .pt-fx-verdict-maybe { color: #f5c46b; }
+.pt-flip-card .pt-fx-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pt-flip-card .pt-fx-summary .pt-fgs-tip { left: -6px; right: auto; width: 300px; max-width: 80vw; }
 .pt-flip-card .pt-fx-seg { display: inline-flex; padding: 3px; gap: 2px; background: rgba(0, 0, 0, .28); border: 1px solid rgba(148, 178, 230, .12); border-radius: 10px; }
 .pt-flip-card button.pt-fx-seg-btn { appearance: none; border: 0; background: none; color: #8392ab; font: 600 13px/1 inherit; font-family: inherit; padding: 7px 12px; border-radius: 7px; cursor: pointer; text-transform: none; min-height: 0; height: auto; }
 .pt-flip-card button.pt-fx-seg-btn:hover { color: #e8eef9; }

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.87.0
+// @version      2.87.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9425,8 +9425,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   function promoWindow(t = Date.now()) { const u = ukTime(t); return (u.day === 4 && u.hour >= 17) || (u.day === 5 && u.hour < 21); }
   // No "turn confirmed" from Friday 18:00 to Saturday 18:00 UK: the first bounce after a promo drop rarely holds.
   function turnBlackout(t = Date.now()) { const u = ukTime(t); return (u.day === 5 && u.hour >= 18) || (u.day === 6 && u.hour < 18); }
-  // Hysteresis (review): on at −5% (smoothed 24 h); off only after 12 h and then on a confirmed turn or once
-  // the 24 h change is back above −2% (a +1.5% bounce of a noisy index no longer ends it). Kept per platform.
+  // Hysteresis: on at −5% (smoothed 24 h). Off right away on a confirmed turn (three signals already need
+  // hours), or once the 24 h change is back above −2% after at least 6 h on (a +1.5% bounce of a noisy index
+  // no longer ends it). Kept per platform.
   const MARKET_CRASH_KEY = "pt_market_crash_v1"; // { pc: { on, since } }
   const marketCrashCache = {};
   function marketCrash(platform) {
@@ -9440,7 +9441,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     let state = before;
     if (mk && mk.s24 != null) {
       if (!before.on && mk.s24 <= MARKET_CRASH) state = { on: true, since: Date.now() };
-      else if (before.on && Date.now() - before.since >= 12 * 3600000 && (mk.s24 > -0.02 || marketTurn(platform).level === "confirmed")) state = { on: false, since: Date.now() };
+      else if (before.on && (marketTurn(platform).level === "confirmed" || (mk.s24 > -0.02 && Date.now() - before.since >= 6 * 3600000))) state = { on: false, since: Date.now() };
     }
     if (state !== before) {
       all[key] = state;

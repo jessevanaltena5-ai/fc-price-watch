@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.82.0
+// @version      2.82.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8293,7 +8293,13 @@ function priceWatchMain(SCRIPT_VERSION) {
   // FUTBIN checks pc → phone (same gist file, field "fb"): the pc checks, the phone shows the same scores,
   // signals and sales check. Fresh checks only, newest first, kept under ~160 KB (the phone reads the file
   // every 2 minutes). The phone keeps whichever check is newer per card.
-  const RELAY_FB_MAX_BYTES = 160 * 1024;
+  // Since the 2-line scan (~35 checks a minute) 160 KB (~124 checks) was too small: checks between two
+  // pushes never reached the phone. Now every fresh check goes (≈ 500 checks ≈ 600 KB, ~100 KB gzipped
+  // over the wire), numbers rounded; past the limit the newest go first, as before.
+  const RELAY_FB_MAX_BYTES = 750 * 1024;
+  const relayRound = value => (Array.isArray(value) ? value.map(relayRound)
+    : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([k, v]) => [k, relayRound(v)]))
+    : typeof value === "number" && !Number.isInteger(value) ? Math.round(value * 1000) / 1000 : value);
   function futbinForRelay() {
     const store = futbinStore(FUTBIN_SALES_KEY);
     const now = Date.now();
@@ -8301,7 +8307,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       .sort((a, b) => b[1].fetchedAt - a[1].fetchedAt);
     const out = {};
     let bytes = 2;
-    for (const [key, entry] of entries) {
+    for (const [key, full] of entries) {
+      const entry = relayRound(full);
       const text = JSON.stringify(entry);
       if (bytes + text.length + key.length + 4 > RELAY_FB_MAX_BYTES) break;
       out[key] = entry;

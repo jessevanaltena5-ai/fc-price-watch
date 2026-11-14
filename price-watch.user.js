@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.76.1
+// @version      2.79.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4230,7 +4230,39 @@ function priceWatchMain(SCRIPT_VERSION) {
   // List: { id, type: "fodder", name, createdAt, mode: "bid" | "bin", windows,
   //         ratings: [{ rating, max, ideal, enabled }], done: {} }
 
+  // The platform of the logged-in EA persona (the club you trade with), on pc and phone alike.
+  // Read defensively: only clear yes/no flags or a platform name count; anything else → unknown (null).
+  let eaPlatformCache = null;
+  function eaPlatform() {
+    if (eaPlatformCache) return eaPlatformCache;
+    try {
+      const user = window.services && services.User && services.User.getUser && services.User.getUser();
+      const persona = user && user.getSelectedPersona && user.getSelectedPersona();
+      if (!persona) return null;
+      const read = key => { const value = persona[key]; return typeof value === "function" ? value.call(persona) : value; };
+      let found = null;
+      if (read("isPC") === true) found = "pc";
+      else if (read("isPlaystation") === true || read("isXbox") === true || read("isPS") === true) found = "console";
+      else {
+        const name = String(read("platform") || read("getPlatform") || "").toLowerCase();
+        if (/^(pc|pcc)$/.test(name)) found = "pc";
+        else if (/^(ps4|ps5|playstation|xbox|xbsx|xone|xbo|console)$/.test(name)) found = "console";
+      }
+      if (found) eaPlatformCache = found;
+      return found;
+    } catch (_) {
+      return null;
+    }
+  }
+  // Where the platform comes from: "ea" (your account), "genie", or "setting".
+  function userPlatformSource() {
+    if (eaPlatform()) return "ea";
+    try { if (genie() && genie().getBulkPricePlatform()) return "genie"; } catch (_) { /* setting */ }
+    return "setting";
+  }
   function userPlatform() {
+    const fromEa = eaPlatform();
+    if (fromEa) return fromEa;
     try {
       const platform = genie() && genie().getBulkPricePlatform();
       if (platform) return platform === "pc" ? "pc" : "console";
@@ -6352,9 +6384,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   function loadFutggCheapest(force) {
     if (futggCheapestLoading) return futggCheapestLoading;
     if (!force && Date.now() - futggCheapestTriedAt < 30 * 1000) return Promise.resolve(false);
-    if (!force && futggCheapest && Date.now() - futggCheapest.at < FUTGG_CHEAPEST_FRESH_MS) return Promise.resolve(false);
+    if (!force && futggCheapest && futggCheapest.platform === userPlatform() && Date.now() - futggCheapest.at < FUTGG_CHEAPEST_FRESH_MS) return Promise.resolve(false);
     futggCheapestTriedAt = Date.now();
-    futggCheapestLoading = futggRequestJson(`${FUTGG_CHEAPEST_URL_BASE}${userPlatform() === "console" ? "ps" : "pc"}&_=${Date.now()}`).then(json => {
+    const requested = userPlatform();
+    futggCheapestLoading = futggRequestJson(`${FUTGG_CHEAPEST_URL_BASE}${requested === "console" ? "ps" : "pc"}&_=${Date.now()}`).then(json => {
       const data = json && json.data;
       if (!data || typeof data !== "object") throw new Error(L("FUT.GG cheapest-by-rating: geen data", "FUT.GG cheapest-by-rating: no data"));
       const byRating = {};
@@ -6370,7 +6403,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           })
           .sort((a, b) => a.price - b.price);
       });
-      futggCheapest = { at: Date.now(), byRating };
+      futggCheapest = { at: Date.now(), byRating, platform: requested };
       return true;
     }).catch(error => {
       console.warn(L("Price Watch: FUT.GG cheapest-by-rating ophalen mislukt; eigen berekening blijft actief.", "Price Watch: fetching FUT.GG cheapest-by-rating failed; own calculation stays active."), error);
@@ -6383,7 +6416,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   function futggCheapestFor(rating) {
-    if (!futggCheapest || Date.now() - futggCheapest.at > FUTGG_CHEAPEST_FRESH_MS) return null;
+    if (!futggCheapest || Date.now() - futggCheapest.at > FUTGG_CHEAPEST_FRESH_MS || futggCheapest.platform !== userPlatform()) return null;
     const list = futggCheapest.byRating[rating];
     return list && list.length ? list : null;
   }
@@ -6727,11 +6760,176 @@ function priceWatchMain(SCRIPT_VERSION) {
   window.setTimeout(() => {
     const tick = () => {
       if (!pcDevice()) return;
-      Promise.all([loadFgFodder(false), loadFutggCheapest(false)]).then(() => { fgFodderAlert(); fgBuyAlert(); });
+      Promise.all([loadFgFodder(false), loadFbFodder(false), loadFutggCheapest(false)]).then(() => { fgFodderAlert(); fgBuyAlert(); });
     };
     tick();
     window.setInterval(tick, 5 * 60 * 1000);
   }, 20000);
+  // --- FUTBIN fodder prices (futbin.com/27/fodder-prices): 90 days per rating, PC and console -------
+  // Per day: "fodder" = mean of the daily average prices of the 10 cheapest tradeable cards, and the
+  // single cheapest card. Day data (today is not in it yet), so fetched at most every 3 h; a request
+  // carries at most 5 ratings (both platforms, ~800 KB), so 2 requests. "Now" = same measure from FUT.GG live.
+  const FB_FODDER_KEY = "pt_fbfodder_v1"; // { at, pc|ps: { 86: [[t, fodder, cheapest]] } }
+  const FB_FODDER_GROUPS = [[83, 84, 85, 86, 87], [88, 89, 90, 91]];
+  const FB_FODDER_PAGE = "https://www.futbin.com/27/fodder-prices";
+  const FB_FODDER_REFRESH_MS = 3 * 3600000;
+  let fbFodderLoading = null;
+  let fbFodderTriedAt = 0;
+  let fbFodderError = "";
+  function getFbFodder() {
+    try { return JSON.parse(localStorage.getItem(FB_FODDER_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  // The chart data is a JSON object in an inline script: "var page = {…}". Cut it out string-aware.
+  function fbFodderParse(text) {
+    const s = String(text || "");
+    const marker = s.indexOf("var page = {");
+    if (marker < 0) throw new Error(L("geen fodder-grafiek gevonden op FUTBIN", "no fodder chart found on FUTBIN"));
+    const start = marker + 11;
+    let depth = 0, inString = false, escaped = false, end = -1;
+    for (let i = start; i < s.length; i++) {
+      const c = s[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') inString = false;
+        continue;
+      }
+      if (c === '"') inString = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) { end = i; break; }
+    }
+    if (end < 0) throw new Error(L("fodder-grafiek op FUTBIN is onvolledig", "fodder chart on FUTBIN is incomplete"));
+    const page = JSON.parse(s.slice(start, end + 1));
+    const out = { at: Date.now() };
+    ["pc", "ps"].forEach(platform => {
+      const set = {};
+      ((page.ratingsByPlatform || {})[platform] || []).forEach(series => {
+        const points = (series.points || []).filter(p => p && p.x > 0 && p.fodder > 0 && !p.thin)
+          .map(p => [p.x, Math.round(p.fodder), Math.round(p.cheapest || 0)]);
+        if (series.rating > 0 && points.length) set[series.rating] = points;
+      });
+      if (Object.keys(set).length) out[platform] = set;
+    });
+    if (!out.pc && !out.ps) throw new Error(L("geen prijzen in de FUTBIN-fodder-grafiek", "no prices in the FUTBIN fodder chart"));
+    return out;
+  }
+  function loadFbFodder(force) {
+    if (fbFodderLoading) return fbFodderLoading;
+    const current = getFbFodder();
+    if (!force && current.at && Date.now() - current.at < FB_FODDER_REFRESH_MS) return Promise.resolve(false);
+    if (!force && Date.now() - fbFodderTriedAt < 10 * 60 * 1000) return Promise.resolve(false);
+    fbFodderTriedAt = Date.now();
+    const fetchGroup = group => futggRequestJson(`${FB_FODDER_PAGE}?ratings=${group.join(",")}&range=90`, true).then(fbFodderParse);
+    fbFodderLoading = FB_FODDER_GROUPS.reduce((chain, group) => chain.then(parts => fetchGroup(group).then(part => parts.concat([part]))), Promise.resolve([])).then(parts => {
+      const parsed = { at: Date.now() };
+      parts.forEach(part => ["pc", "ps"].forEach(platform => { if (part[platform]) parsed[platform] = { ...(parsed[platform] || {}), ...part[platform] }; }));
+      try { localStorage.setItem(FB_FODDER_KEY, JSON.stringify(parsed)); } catch (_) { throw new Error(L("opslag vol", "storage full")); }
+      fbFodderError = "";
+      listeners.forEach(listener => listener());
+      return true;
+    }).catch(error => {
+      fbFodderError = error && error.message ? error.message : String(error);
+      listeners.forEach(listener => listener());
+      return false;
+    }).finally(() => { fbFodderLoading = null; });
+    return fbFodderLoading;
+  }
+  const fbFodderPlatform = () => (userPlatform() === "console" ? "ps" : "pc");
+  // The usual price of a rating. The dip is measured against its last 7 days (median): in FUTBIN's PC data
+  // (Sep–Nov 2026, 84–88) a day 5%+ under its week rose 10%+ within 7 days in 41 of 49 cases, against
+  // 42–64% on other days; the 30-day median rarely fired and misled in a falling month (88).
+  // Ratings whose 10 cheapest spread wide (89, 90: a few cheap cards, then dearer ones) use the cheapest card.
+  const fbMedian = list => { const sorted = list.slice().sort((a, b) => a - b); return sorted[Math.floor(sorted.length / 2)]; };
+  const FB_DIP = 0.05;
+  const FB_BOUNCE = 0.1; // a dip "worked" when the price rose 10%+ within 7 days
+  function fbFodderRef(rating) {
+    const all = getFbFodder();
+    const points = ((all[fbFodderPlatform()] || {})[rating]) || [];
+    if (points.length < 8 || !all.at || Date.now() - all.at > 3 * 24 * 3600000) return null;
+    const month = points.slice(-30);
+    const fodder = fbMedian(month.map(p => p[1]));
+    const cheapestList = month.map(p => p[2]).filter(v => v > 0);
+    const cheapest = cheapestList.length ? fbMedian(cheapestList) : 0;
+    const byCheapest = cheapest > 0 && fodder / cheapest > 1.25;
+    const col = byCheapest ? 2 : 1;
+    const series = points.map(p => [p[0], p[col]]).filter(p => p[1] > 0);
+    const values = series.map(p => p[1]);
+    return {
+      week: fbMedian(values.slice(-7)), usual: fbMedian(values.slice(-30)), byCheapest,
+      low30: Math.min(...values.slice(-30)), low90: Math.min(...values),
+      last: values[values.length - 1], series, days: points.length, at: all.at
+    };
+  }
+  // Back-test on this rating's own days: each day 5%+ under its previous 7 days → did it reach +target
+  // (FB_BOUNCE) within the 7 days after? { n, hits, rise: median best rise }.
+  function fbFodderBacktest(ref, target) {
+    const v = ref.series.map(p => p[1]);
+    let n = 0, hits = 0;
+    const rises = [];
+    for (let i = 7; i + 7 < v.length; i++) {
+      if (v[i] > fbMedian(v.slice(i - 7, i)) * (1 - FB_DIP)) continue;
+      const best = Math.max(...v.slice(i + 1, i + 8)) / v[i] - 1;
+      n++;
+      if (best >= target) hits++;
+      rises.push(best);
+    }
+    return { n, hits, rise: rises.length ? fbMedian(rises) : 0 };
+  }
+  // Day-of-week pattern over 84–88: each day vs the 7 days around it (median). Needs 4+ weeks.
+  function fbFodderWeekdays() {
+    const set = getFbFodder()[fbFodderPlatform()] || {};
+    const byDay = {};
+    [84, 85, 86, 87, 88].forEach(rating => {
+      const points = (set[rating] || []).filter(p => p[1] > 0);
+      for (let i = 3; i + 3 < points.length; i++) {
+        const around = points.slice(i - 3, i + 4).map(p => p[1]);
+        const day = new Date(points[i][0]).getUTCDay();
+        (byDay[day] = byDay[day] || []).push(points[i][1] / (around.reduce((a, b) => a + b, 0) / 7) - 1);
+      }
+    });
+    const days = Object.keys(byDay).map(Number).filter(day => byDay[day].length >= 8);
+    if (days.length < 7) return null;
+    const effect = {};
+    days.forEach(day => { effect[day] = fbMedian(byDay[day]); });
+    const order = days.slice().sort((a, b) => effect[a] - effect[b]);
+    const today = new Date().getDay();
+    const todayKind = effect[today] <= -0.02 ? "cheap" : effect[today] >= 0.02 ? "dear" : "normal";
+    return { effect, cheap: order.slice(0, 2), dear: order.slice(-2).reverse(), today, todayKind };
+  }
+  function weekdayName(day) {
+    return new Date(Date.UTC(2026, 10, 1 + day)).toLocaleDateString(uiLang() === "nl" ? "nl-NL" : "en-GB", { weekday: "long", timeZone: "UTC" });
+  }
+  // The same measure live from FUT.GG's list: mean of the 10 cheapest regular cards (or the cheapest one).
+  function fbFodderLive(rating, byCheapest) {
+    const regular = (futggCheapestFor(rating) || []).filter(item => !item.special).map(item => item.price).sort((a, b) => a - b);
+    if (byCheapest) return regular.length ? regular[0] : 0;
+    const ten = regular.slice(0, 10);
+    return ten.length >= 5 ? Math.round(ten.reduce((sum, v) => sum + v, 0) / ten.length) : 0;
+  }
+  function fbFodderDip(rating) {
+    const ref = fbFodderRef(rating);
+    if (!ref) return null;
+    const live = fbFodderLive(rating, ref.byCheapest);
+    const now = live || ref.last;
+    if (!now) return null;
+    return { value: now / ref.week - 1, month: now / ref.usual - 1, kind: live ? "fb" : "fbday", now, ref };
+  }
+  // The whole fodder market vs its week: median dip of 84–88 (the ratings SBCs eat most).
+  function fbFodderMarket() {
+    const dips = [84, 85, 86, 87, 88].map(rating => ({ rating, dip: fbFodderDip(rating) })).filter(item => item.dip);
+    if (dips.length < 3) return null;
+    const value = fbMedian(dips.map(item => item.dip.value));
+    const level = value <= -FB_DIP ? "good" : value >= 0.08 ? "bad" : "ok";
+    return { value, level, dips, live: dips.some(item => item.dip.kind === "fb"), at: dips[0].dip.ref.at, weekdays: fbFodderWeekdays() };
+  }
+  // Market level for the buy steps: FUTBIN's week first, else futgenie.gg's 2 weeks.
+  function fodderMarketLevel() {
+    const fb = fbFodderMarket();
+    if (fb) return fb.level;
+    const st = fgFodderStats(userPlatform() === "console" ? "console" : "pc");
+    return st ? st.level : "ok";
+  }
+
   // Own price history per rating ({ pc|console: { 85: [[t, price]] } }), to see a dip against its own week.
   const FG_HIST_KEY = "pt_fgfodder_hist_v1";
   function fgHistory() {
@@ -6751,6 +6949,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
   // Price now vs this rating's own week (median), once there are 2 days of points; else the page's 24 h change.
   function fgDip(platform, rating, priceNow) {
+    const fb = fbFodderDip(rating); // FUTBIN's month when it has this rating
+    if (fb) return fb;
     const list = ((fgHistory()[platform] || {})[rating] || []).filter(p => Date.now() - p[0] < 7 * 24 * 3600000);
     if (list.length >= 2 && Date.now() - list[0][0] >= 48 * 3600000) {
       const sorted = list.map(p => p[1]).sort((a, b) => a - b);
@@ -6761,8 +6961,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const row = set && (set.rows || []).find(item => item.r === rating);
     return row && row.ch != null ? { value: row.ch, kind: "24h" } : null;
   }
-  // BUY / MAYBE / SKIP per rating: a dip (5%+), not too dear per point (≤ 30% above the cheapest rating),
-  // enough profit when listed (6%+). The whole index expensive → nothing is BUY.
+  // BUY / MAYBE / SKIP per rating: a dip (5%+ under its week), not too dear per point (≤ 30% above the
+  // cheapest rating), enough profit when listed (6%+), and earlier dips of this rating mostly reached the
+  // 10%+ within 7 days (FUTBIN back-test, when 4+ dips). The whole market expensive → nothing is BUY.
   function fgSignals(level) {
     const platform = userPlatform() === "console" ? "console" : "pc";
     const set = getFgFodder()[platform];
@@ -6775,23 +6976,46 @@ function priceWatchMain(SCRIPT_VERSION) {
       const perPoint = row && bestPer1k ? row.per1k / bestPer1k - 1 : null;
       const profitPct = trade.net / trade.buy;
       const dip = fgDip(platform, rating, row ? row.price : trade.now);
+      // FUTBIN: how did this rating's earlier dips end? (rose 10%+ within 7 days)
+      const backtest = dip && dip.ref && dip.ref.series ? fbFodderBacktest(dip.ref, FB_BOUNCE) : null;
+      const weakHistory = backtest && backtest.n >= 4 && backtest.hits / backtest.n < 0.6;
       let kind = "maybe";
       if ((perPoint != null && perPoint > 0.3) || profitPct < 0.05 || (dip && dip.value >= 0.05)) kind = "skip";
-      else if (dip && dip.value <= -0.05 && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.06 && level !== "bad") kind = "buy";
-      return { rating, trade, perPoint, profitPct, dip, kind };
+      else if (dip && dip.value <= -0.05 && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.06 && level !== "bad" && !weakHistory) kind = "buy";
+      return { rating, trade, perPoint, profitPct, dip, backtest, weakHistory, kind };
     }).filter(Boolean).sort((a, b) => ({ buy: 0, maybe: 1, skip: 2 })[a.kind] - ({ buy: 0, maybe: 1, skip: 2 })[b.kind]
       || (a.perPoint == null ? 9 : a.perPoint) - (b.perPoint == null ? 9 : b.perPoint));
   }
   function fgWhy(item) {
     const pct = value => `${value > 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
     const lines = [];
-    if (item.dip) {
+    if (item.dip && (item.dip.kind === "fb" || item.dip.kind === "fbday")) {
+      const ref = item.dip.ref;
+      const what = ref.byCheapest ? L("goedkoopste kaart", "cheapest card") : L("gem. 10 goedkoopste", "avg of 10 cheapest");
+      lines.push(L(`${pct(item.dip.value)} tegen zijn laatste 7 dagen (${what}: nu ${priceFormat.format(item.dip.now)}, week ${priceFormat.format(ref.week)})`,
+        `${pct(item.dip.value)} vs its last 7 days (${what}: now ${priceFormat.format(item.dip.now)}, week ${priceFormat.format(ref.week)})`));
+      const bt = item.backtest;
+      if (bt && bt.n) {
+        lines.push(L(`Eerdere dips (5%+ onder de week): ${bt.hits} van ${bt.n} keer binnen 7 dagen 10%+ gestegen, meestal tot +${Math.round(bt.rise * 100)}%`,
+          `Earlier dips (5%+ under the week): ${bt.hits} of ${bt.n} times up 10%+ within 7 days, usually to +${Math.round(bt.rise * 100)}%`));
+        const listRise = item.trade.list / item.trade.now - 1;
+        if (bt.n >= 4 && listRise > bt.rise + 0.05) {
+          const realistic = roundUpToStep(item.trade.now * (1 + bt.rise));
+          lines.push(L(`Je verkoopprijs (+${Math.round(listRise * 100)}%) werd na dips zelden gehaald: reken eerder op ±${priceFormat.format(realistic)}`,
+            `Your list price (+${Math.round(listRise * 100)}%) was rarely reached after dips: expect about ${priceFormat.format(realistic)}`));
+        }
+      } else lines.push(L("Nog geen eerdere dips van deze rating om mee te vergelijken", "No earlier dips of this rating to compare with yet"));
+      lines.push(L(`Maand: normaal ${priceFormat.format(ref.usual)} (${pct(item.dip.month)}), laagste 30 dagen ${priceFormat.format(ref.low30)}, 90 dagen ${priceFormat.format(ref.low90)} · FUTBIN${item.dip.kind === "fbday" ? ", prijs van gisteren" : ""}`,
+        `Month: usual ${priceFormat.format(ref.usual)} (${pct(item.dip.month)}), lowest 30 days ${priceFormat.format(ref.low30)}, 90 days ${priceFormat.format(ref.low90)} · FUTBIN${item.dip.kind === "fbday" ? ", yesterday's price" : ""}`));
+    } else if (item.dip) {
       lines.push(item.dip.kind === "week"
         ? L(`${pct(item.dip.value)} tegen zijn eigen week`, `${pct(item.dip.value)} vs its own week`)
         : L(`${pct(item.dip.value)} vandaag`, `${pct(item.dip.value)} today`));
     } else lines.push(L("Nog geen prijsverloop", "No price trend yet"));
     if (item.perPoint != null) lines.push(item.perPoint <= 0.001 ? L("Goedkoopste per SBC-punt", "Cheapest per SBC point")
       : L(`${Math.round(item.perPoint * 100)}% duurder per SBC-punt dan de goedkoopste rating`, `${Math.round(item.perPoint * 100)}% dearer per SBC point than the cheapest rating`));
+    if (item.trade.waitForDip) lines.push(L(`Koopprijs ${priceFormat.format(item.trade.buy)}: daar zit hij 5% onder zijn week, zoals bij eerdere dips die goed afliepen. Nu goedkoopst: ${priceFormat.format(item.trade.now)}`,
+      `Buy price ${priceFormat.format(item.trade.buy)}: that is 5% under its week, like earlier dips that worked out. Cheapest now: ${priceFormat.format(item.trade.now)}`));
     lines.push(L(`Verkocht voor ${priceFormat.format(item.trade.list)} houd je ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) over na belasting`,
       `Listed at ${priceFormat.format(item.trade.list)} you keep ${item.trade.net > 0 ? "+" : ""}${priceFormat.format(item.trade.net)} (${Math.round(item.profitPct * 100)}%) after tax`));
     return lines;
@@ -6812,10 +7036,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   function fgBuyAlert() {
     if (!pcDevice()) return;
     const st = fgFodderStats(userPlatform() === "console" ? "console" : "pc");
-    if (!st || Date.now() - st.set.at > 2 * FG_FODDER_REFRESH_MS) return;
+    const fb = fbFodderMarket();
+    if (!(fb && fb.live) && (!st || Date.now() - st.set.at > 2 * FG_FODDER_REFRESH_MS)) return;
     let seen = {};
     try { seen = JSON.parse(localStorage.getItem(FG_BUY_ALERT_KEY) || "{}") || {}; } catch (_) { seen = {}; }
-    const fresh = fgSignals(st.level).filter(item => item.kind === "buy" && Date.now() - (seen[item.rating] || 0) > 24 * 3600000);
+    const fresh = fgSignals(fodderMarketLevel()).filter(item => item.kind === "buy" && Date.now() - (seen[item.rating] || 0) > 24 * 3600000);
     if (!fresh.length) return;
     fresh.forEach(item => { seen[item.rating] = Date.now(); });
     try { localStorage.setItem(FG_BUY_ALERT_KEY, JSON.stringify(seen)); } catch (_) { /* again later */ }
@@ -6827,7 +7052,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // Buy and list price per rating (fodder bought to sell when an SBC pushes prices up). Buy: 1 price step
-  // under the typical cheapest regular card (2 at a normal index, 3 when expensive). List: markup per rating after a
+  // under the typical cheapest regular card (2 at a normal index, 3 when expensive), and never above the price
+  // where it would be 5% under its FUTBIN week. List: markup per rating after a
   // trader's rule of thumb (84 <800-850 → 1.2-1.4K, 85 <2.2-2.3K → 2.8-3.2K, 86 <4.8-5K → 5.6-6K, 87 <7-7.1K → 7.7-8.2K).
   const FODDER_MARKUP = { 83: 0.55, 84: 0.55, 85: 0.33, 86: 0.18, 87: 0.13, 88: 0.1, 89: 0.08 }; // 90+: 0.06, ≤82: 0.55
   function fodderTrade(rating, level) {
@@ -6841,9 +7067,18 @@ function priceWatchMain(SCRIPT_VERSION) {
     let buy = now;
     for (let i = 0; i < (level === "bad" ? 3 : level === "ok" ? 2 : 1); i++) buy = priceStepBelow(buy);
     buy = Math.max(150, buy);
+    // FUTBIN: not 5% under its week yet → buy only at the price where it would be (the dips that worked
+    // before). The dip is measured on FUTBIN's measure (avg of 10 cheapest); scaled to this price.
+    let dipCap = 0;
+    const dip = fbFodderDip(rating);
+    if (dip && dip.now > 0 && dip.value > -FB_DIP) {
+      dipCap = roundDownToStep(now * (1 - FB_DIP) * dip.ref.week / dip.now);
+      if (dipCap < buy) buy = Math.max(150, dipCap);
+      else dipCap = 0;
+    }
     const markup = FODDER_MARKUP[rating] != null ? FODDER_MARKUP[rating] : rating >= 90 ? 0.06 : 0.55;
     const list = roundUpToStep(buy * (1 + markup));
-    return { now, buy, list, net: Math.floor(list * (1 - EA_TAX)) - buy, source: regular.length ? "futgg" : "index" };
+    return { now, buy, list, net: Math.floor(list * (1 - EA_TAX)) - buy, source: regular.length ? "futgg" : "index", waitForDip: dipCap > 0 };
   }
   function drawFodderTrade(box, level) {
     const ratings = fodderRatings().map(rating => ({ rating, trade: fodderTrade(rating, level) })).filter(item => item.trade);
@@ -6882,9 +7117,31 @@ function priceWatchMain(SCRIPT_VERSION) {
     box.textContent = "";
     const platform = userPlatform() === "console" ? "console" : "pc";
     const st = fgFodderStats(platform);
-    const level = st ? st.level : "ok";
+    const fb = fbFodderMarket();
+    const level = fodderMarketLevel();
     const head = el("div", "pt-fgs-head");
-    if (st) {
+    const pct = value => `${value > 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
+    box.appendChild(platformCheck());
+    if (fb) {
+      const word = { good: L("goedkoop", "cheap"), ok: L("normaal geprijsd", "normally priced"), bad: L("duur", "expensive") }[level];
+      const text = el("span", "");
+      text.append(`${{ good: "🟢", ok: "🟡", bad: "🔴" }[level]} ${L("Fodder is nu ", "Fodder is ")}`, el("b", `pt-fgi-${level}`, word),
+        `${L("", " right now")} (${pct(fb.value)} ${L("tegen de week", "vs its week")})`);
+      const wk = fb.weekdays;
+      if (wk && wk.todayKind !== "normal") text.append(el("span", "pt-muted", wk.todayKind === "cheap"
+        ? L(` · ${weekdayName(wk.today)} is meestal een goedkope dag`, ` · ${weekdayName(wk.today)} is usually a cheap day`)
+        : L(` · ${weekdayName(wk.today)} is meestal duur: liever verkopen`, ` · ${weekdayName(wk.today)} is usually dear: rather sell`)));
+      const lines = [
+        L("Prijs nu tegen de laatste 7 dagen (mediaan), per rating:", "Price now vs the last 7 days (median), per rating:"),
+        ...fb.dips.map(item => `${item.rating}: ${pct(item.dip.value)} (${priceFormat.format(item.dip.now)} / ${priceFormat.format(item.dip.ref.week)})${item.dip.now <= item.dip.ref.low30 ? L(" · laagste van de maand", " · lowest of the month") : ""}`),
+        ...(fb.weekdays ? [L(`Meestal goedkoopst op ${fb.weekdays.cheap.map(weekdayName).join(" en ")}, duurst op ${fb.weekdays.dear.map(weekdayName).join(" en ")}`,
+          `Usually cheapest on ${fb.weekdays.cheap.map(weekdayName).join(" and ")}, dearest on ${fb.weekdays.dear.map(weekdayName).join(" and ")}`)] : []),
+        L(`Bron FUTBIN fodder prices (gem. 10 goedkoopste) · ${platform === "pc" ? "PC" : "console"} · opgehaald ${formatTime(fb.at)}${fb.live ? " · nu = FUT.GG live" : " · nu = gisteren"}`,
+          `Source FUTBIN fodder prices (avg of 10 cheapest) · ${platform === "pc" ? "PC" : "console"} · fetched ${formatTime(fb.at)}${fb.live ? " · now = FUT.GG live" : " · now = yesterday"}`)
+      ];
+      if (st) lines.push(L(`1.000 SBC-punten: ${priceFormat.format(st.now)} (futgenie.gg)`, `1,000 SBC points: ${priceFormat.format(st.now)} (futgenie.gg)`));
+      head.append(text, fgInfo(L("Fodder-markt", "Fodder market"), lines));
+    } else if (st) {
       const word = { good: L("goedkoop", "cheap"), ok: L("normaal geprijsd", "normally priced"), bad: L("duur", "expensive") }[level];
       const extra = st.kind === "low14" ? L(" (laagste van 2 weken)", " (lowest of 2 weeks)") : st.kind === "low7" ? L(" (laagste van de week)", " (lowest of the week)")
         : st.kind === "near" ? L(" (bijna laagst van de week)", " (almost lowest of the week)") : "";
@@ -6910,8 +7167,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         const body = el("div", "pt-fgs-body");
         body.appendChild(el("b", "", word));
         const line = el("div", "");
-        if (item.kind === "skip") line.textContent = item.perPoint != null && item.perPoint > 0.3 ? L("te duur", "too expensive") : item.dip && item.dip.value >= 0.05 ? L("stijgt nu", "rising now") : L("te weinig winst", "too little profit");
-        else line.append(L("voor ", "at "), el("strong", "", `≤ ${priceFormat.format(item.trade.buy)}`), L(` · verkoop ${priceFormat.format(item.trade.list)}`, ` · sell ${priceFormat.format(item.trade.list)}`));
+        if (item.kind === "skip") line.textContent = item.perPoint != null && item.perPoint > 0.3 ? L("te duur", "too expensive") : item.dip && item.dip.value >= 0.05 ? (item.dip.ref ? L("duurder dan zijn week", "dearer than its week") : L("stijgt nu", "rising now")) : L("te weinig winst", "too little profit");
+        else line.append(item.trade.waitForDip ? L("⏳ bied ", "⏳ bid ") : L("voor ", "at "), el("strong", "", `≤ ${priceFormat.format(item.trade.buy)}`), L(` · verkoop ${priceFormat.format(item.trade.list)}`, ` · sell ${priceFormat.format(item.trade.list)}`));
         body.appendChild(line);
         tile.append(el("span", "pt-fgs-n", String(item.rating)), body,
           fgInfo(L(`Waarom ${word.toLowerCase()} ${item.rating}?`, `Why ${word.toLowerCase()} ${item.rating}?`), fgWhy(item)));
@@ -6943,6 +7200,42 @@ function priceWatchMain(SCRIPT_VERSION) {
       box.appendChild(details);
     }
   }
+  // Which platform's prices you see, and a warning when this phone and your pc disagree.
+  function platformCheck() {
+    const row = el("div", "pt-fgs-plat");
+    const platform = userPlatform();
+    const name = p => (p === "console" ? L("🎮 Console", "🎮 Console") : "💻 PC");
+    const chip = el("button", `pt-fgs-chip pt-fgs-chip-${platform}`, `${L("Prijzen:", "Prices:")} ${name(platform)}`);
+    chip.type = "button";
+    const source = userPlatformSource();
+    const viaGenie = source === "genie";
+    const viaEa = source === "ea";
+    if (viaEa) chip.textContent += L(" · van je EA-account ✓", " · from your EA account ✓");
+    const seen = !pcDevice() && !viaEa ? pcPlatformSeen() : null; // a phone that heard from the pc follows it
+    chip.disabled = viaEa || viaGenie || !!seen;
+    chip.title = viaEa ? L("Platform gelezen uit je ingelogde EA-account", "Platform read from your logged-in EA account")
+      : viaGenie ? L("Platform komt uit FUT Genie", "Platform comes from FUT Genie")
+      : seen ? L("Je telefoon volgt het platform van je pc", "Your phone follows your pc's platform")
+      : L("Tik om te wisselen tussen PC en console", "Tap to switch between PC and console");
+    chip.addEventListener("click", () => setUserPlatform(platform === "console" ? "pc" : "console"));
+    row.appendChild(chip);
+    if (seen && seen.platform !== platform) {
+      const warn = el("span", "pt-fgs-warn", L(`⚠ Je pc gebruikt ${name(seen.platform)}`, `⚠ Your pc uses ${name(seen.platform)}`));
+      const fix = el("button", "pt-watch-refresh", L(`Zet op ${name(seen.platform)}`, `Switch to ${name(seen.platform)}`));
+      fix.type = "button";
+      fix.addEventListener("click", () => setUserPlatform(seen.platform));
+      row.append(warn, fix);
+    }
+    row.appendChild(fgInfo(L("Welk platform?", "Which platform?"), [
+      L("FUT.GG en FUTBIN worden apart per platform opgevraagd; futgenie.gg wordt geweigerd als het het andere platform teruggeeft.",
+        "FUT.GG and FUTBIN are asked per platform; futgenie.gg is rejected when it returns the other platform."),
+      viaEa ? L("Het platform komt uit je ingelogde EA-account, op pc én telefoon: geen instelling nodig.", "The platform comes from your logged-in EA account, on pc and phone alike: no setting needed.")
+        : viaGenie ? L("Op de pc bepaalt FUT Genie het platform; je telefoon neemt dat over.", "On the pc FUT Genie decides the platform; your phone follows it.")
+        : pcDevice() ? L("Deze instelling (dezelfde als in Flip ⚙) geldt ook voor je telefoon.", "This setting (the same as in Flip ⚙) also counts for your phone.")
+        : L("Je telefoon volgt het platform van je pc; wissel het daar.", "Your phone follows your pc's platform; switch it there.")
+    ]));
+    return row;
+  }
   function drawFgFodderDetails(box) {
     const platform = userPlatform() === "console" ? "console" : "pc";
     const st = fgFodderStats(platform);
@@ -6952,11 +7245,17 @@ function priceWatchMain(SCRIPT_VERSION) {
     link.href = FG_FODDER_URL;
     link.target = "_blank";
     link.rel = "noopener";
+    const fbLink = el("a", "pt-link-btn", "FUTBIN fodder ↗");
+    fbLink.href = `${FB_FODDER_PAGE}?ratings=86&range=90`;
+    fbLink.target = "_blank";
+    fbLink.rel = "noopener";
+    fbLink.title = fbFodderError ? L(`FUTBIN fodder prices: ${fbFodderError}`, `FUTBIN fodder prices: ${fbFodderError}`)
+      : fbFodderLoading ? L("FUTBIN fodder prices ophalen…", "Fetching FUTBIN fodder prices…") : L("90 dagen fodderprijzen per rating", "90 days of fodder prices per rating");
     if (!st) {
       top.append(el("span", "pt-muted", fgFodderLoading ? L("Fodder-index ophalen…", "Fetching fodder index…")
-        : fgFodderError ? L(`Fodder-index: ${fgFodderError}`, `Fodder index: ${fgFodderError}`) : L("Fodder-index: nog niet opgehaald", "Fodder index: not fetched yet")), link);
+        : fgFodderError ? L(`Fodder-index: ${fgFodderError}`, `Fodder index: ${fgFodderError}`) : L("Fodder-index: nog niet opgehaald", "Fodder index: not fetched yet")), link, fbLink);
       box.appendChild(top);
-      drawFodderTrade(box, "ok");
+      drawFodderTrade(box, fodderMarketLevel());
       return;
     }
     const verdict = {
@@ -6970,7 +7269,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     main.append(el("b", "pt-fgi-now", priceFormat.format(st.now)), el("span", "pt-muted", L(" per 1.000 SBC-punten", " per 1,000 SBC points")));
     const facts = el("div", "pt-muted pt-fgi-facts", L(`laagste week ${priceFormat.format(st.low7)} · laagste 2 weken ${priceFormat.format(st.low)} (${new Date(st.lowAt).toLocaleDateString("nl-NL", { weekday: "short", day: "numeric", month: "short" })}) · normaal ${priceFormat.format(st.usual)} · ${platform === "pc" ? "PC" : "console"} · ${formatTime(st.set.at)}`,
       `week low ${priceFormat.format(st.low7)} · 2-week low ${priceFormat.format(st.low)} (${new Date(st.lowAt).toLocaleDateString("en-GB", { weekday: "short", day: "numeric", month: "short" })}) · usual ${priceFormat.format(st.usual)} · ${platform === "pc" ? "PC" : "console"} · ${formatTime(st.set.at)}`));
-    top.append(main, el("span", `pt-fgi-verdict pt-fgi-${st.level}`, verdict), link);
+    top.append(main, el("span", `pt-fgi-verdict pt-fgi-${st.level}`, verdict), link, fbLink);
     box.appendChild(top);
     box.appendChild(facts);
     // Chart: one point a day, the dashed line = usual.
@@ -7001,7 +7300,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         `${row.r} · ${priceFormat.format(row.price)} · ${priceFormat.format(row.per1k)}/1k`)));
       box.appendChild(list);
     }
-    drawFodderTrade(box, st.level);
+    drawFodderTrade(box, fodderMarketLevel());
   }
 
   function buildFodderSection(root) {
@@ -7040,6 +7339,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       loadFodderMarket(true);
       loadFodderCheapest(true);
       loadFgFodder(true);
+      loadFbFodder(true);
     });
     inventory.title = L("Telt je gewone kaarten per rating in je club, transferlijst, unassigned en gewonnen transfer targets. Geen transfermarkt-zoekopdrachten.", "Counts your regular cards per rating in your club, transfer list, unassigned and won transfer targets. No transfer market searches.");
     inventory.addEventListener("click", () => updateFodderInventory());
@@ -7079,6 +7379,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         loadFodderMarket(false);
         loadFodderCheapest(false);
         loadFgFodder(false);
+        loadFbFodder(false);
       }
       drawFgFodder(fgIndex);
 
@@ -7245,7 +7546,10 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (state.minPct === 2) state.minPct = 5;
       state.minPct5 = true;
     }
-    return Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "en", autoFutbin: true, source: "fodder" }, state || {});
+    const out = Object.assign({ token: "", platform: "pc", maxPrice: 500000, minPct: 5, minPct5: true, onlyDeals: false, alert: false, sort: "score", lang: "en", autoFutbin: true, source: "fodder" }, state || {});
+    const fromEa = eaPlatform(); // your EA account's platform beats a saved setting
+    if (fromEa) out.platform = fromEa;
+    return out;
   }
   function saveFlip(state, keepTime) {
     // Remember when a synced setting changed (link, source, platform, max price, min profit): pc ↔ phone.
@@ -8096,19 +8400,45 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Flip settings pc → phone ("fs"): link, source, platform, max price, min profit. The newest change wins,
   // so a setting you change on the phone stays until you change it on the pc again. Language stays per device.
   const FLIP_SYNC_FIELDS = ["token", "source", "platform", "maxPrice", "minPct"];
+  const PC_PLATFORM_KEY = "pt_pc_platform_v1"; // phone: the platform the pc last sent { platform, sure, at }
+  function pcPlatformSeen() {
+    try { return JSON.parse(localStorage.getItem(PC_PLATFORM_KEY) || "null"); } catch (_) { return null; }
+  }
+  function setUserPlatform(platform) {
+    const state = getFlip();
+    state.platform = platform === "console" ? "console" : "pc";
+    saveFlip(state);
+    futggCheapest = null; // that list is per platform: fetch the other one now
+    loadFutggCheapest(true);
+    listeners.forEach(listener => listener());
+  }
   function flipSettingsForRelay() {
     const state = getFlip();
     const out = { at: state.changedAt || 0 };
     FLIP_SYNC_FIELDS.forEach(field => { out[field] = state[field]; });
+    // The pc's platform always wins on the phone (one account, one platform): FUT Genie's when it is
+    // installed, else the pc's own setting (Flip ⚙ / the chip on Fodder).
+    out.platform = userPlatform();
+    out.platformSure = true;
     return out;
   }
   function syncFlipSettings(incoming) {
     if (pcDevice() || !incoming || typeof incoming !== "object") return false;
     const state = getFlip();
+    let platformFixed = false;
+    if (incoming.platform === "pc" || incoming.platform === "console") {
+      try { localStorage.setItem(PC_PLATFORM_KEY, JSON.stringify({ platform: incoming.platform, sure: !!incoming.platformSure, at: Date.now() })); } catch (_) { /* check skipped */ }
+      // the pc's platform always wins: one account, one platform
+      if (incoming.platformSure && incoming.platform !== state.platform && !eaPlatform()) {
+        state.platform = incoming.platform;
+        try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
+        platformFixed = true;
+      }
+    }
     const fill = !state.token && incoming.token; // a phone without a link always takes the pc's
-    if (!fill && (incoming.at || 0) <= (state.changedAt || 0)) return false;
+    if (!fill && (incoming.at || 0) <= (state.changedAt || 0)) return platformFixed;
     const changed = FLIP_SYNC_FIELDS.some(field => incoming[field] != null && incoming[field] !== state[field]);
-    if (!changed) return false;
+    if (!changed) return platformFixed;
     FLIP_SYNC_FIELDS.forEach(field => { if (incoming[field] != null) state[field] = incoming[field]; });
     state.changedAt = Math.max(incoming.at || 0, state.changedAt || 0);
     try { localStorage.setItem(FLIP_KEY, JSON.stringify(state)); } catch (_) { /* session only */ }
@@ -9955,6 +10285,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       applyTexts();
       if (document.activeElement !== link) link.value = state.token ? `https://fodder.gg/price-watch/${state.token}` : "";
       platform.value = state.platform;
+      platform.disabled = !!eaPlatform(); // known from your EA account
       if (document.activeElement !== maxPrice.input) maxPrice.input.value = state.maxPrice ? priceFormat.format(state.maxPrice) : "";
       if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
       onlyDeals.checked = !!state.onlyDeals;
@@ -12775,6 +13106,11 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-fgi-trade-wrap + .pt-fgi-best { margin-top: 8px; }
 .pt-fgs-head { display: flex; align-items: center; gap: 10px; font-size: 15px; }
 .pt-fgs-head > .pt-fgs-i { margin-left: auto; }
+.pt-fgs-plat { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; font-size: 13px; }
+.pt-fgs-chip { border: 1px solid rgba(255,255,255,.25); border-radius: 999px; padding: 2px 10px; background: rgba(255,255,255,.06); color: inherit; font: inherit; cursor: pointer; }
+.pt-fgs-chip:disabled { cursor: default; opacity: .85; }
+.pt-fgs-chip-console { border-color: #f5a623; color: #f5c46b; }
+.pt-fgs-warn { color: #ff8a80; font-weight: 600; }
 .pt-fgs-label { font-size: 10px; letter-spacing: .6px; text-transform: uppercase; color: #ffd166; font-weight: 800; margin: 12px 0 6px; }
 .pt-fgs-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
 .pt-fgs-tile { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 34px 12px 14px; border-radius: 12px; border: 1px solid rgba(148, 178, 230, .16); }
@@ -14313,12 +14649,13 @@ try {
     const futbinPage = parsed.hostname === "www.futbin.com" &&
       ((parsed.pathname === "/players" && /^[?]search=[^&]+$/.test(parsed.search)) ||
        (/^[/]\d{2}[/]sales[/]\d+[/][a-z0-9-]+$/.test(parsed.pathname) && /^[?]platform=(pc|ps)$/.test(parsed.search)) ||
-       (/^[/]\d{2}[/]market$/.test(parsed.pathname) && !parsed.search)); // market index (Index 100), pc only, every 30 min
+       (/^[/]\d{2}[/]market$/.test(parsed.pathname) && !parsed.search) || // market index (Index 100), pc only, every 30 min
+       (/^[/]\d{2}[/]fodder-prices$/.test(parsed.pathname) && /^[?]ratings=\d{2}(,\d{2})*&range=\d{1,3}$/.test(parsed.search))); // fodder prices per rating, every 3 h
     // futgenie.gg fodder index; "#pc" / "#console" picks the platform (sent as its fg_platform cookie).
     const fgPlatform = parsed.hostname === "www.futgenie.gg" && parsed.pathname === "/fodder" && !parsed.search && /^#(pc|console)$/.test(parsed.hash) ? parsed.hash.slice(1) : "";
     const htmlPage = fodderWatch || futbinPage || !!fgPlatform;
     if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi && !htmlPage)) {
-      reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch, FUTBIN search/sales/market and futgenie.gg/fodder are allowed") });
+      reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales/market/fodder-prices en futgenie.gg/fodder toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch, FUTBIN search/sales/market/fodder-prices and futgenie.gg/fodder are allowed") });
       return;
     }
     if (typeof GM_xmlhttpRequest !== "function") {

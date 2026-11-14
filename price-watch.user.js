@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.83.0
+// @version      2.84.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9121,7 +9121,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const MARKET_CRASH = -0.05; // smoothed 24 h change of the FUTBIN index
   function marketCrash(platform) {
     const mk = marketStats(platform);
-    return !!(mk && mk.s24 != null && mk.s24 <= MARKET_CRASH && !(mk.s6 != null && mk.s6 >= 0.015));
+    return !!(mk && mk.s24 != null && mk.s24 <= MARKET_CRASH && !(mk.s6 != null && mk.s6 >= 0.015) && marketTurn(platform).level !== "confirmed");
   }
   // Past sales (the 24 h window is on average half a day old) were made in a higher market: lower the sell
   // price by half of the market's smoothed 24 h drop (at most 10 %).
@@ -9146,9 +9146,81 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     return false;
   }
+  // --- Market turn: two independent signals ---------------------------------------------------------
+  // A (FUTBIN Index 100, smoothed): the 4 h mean rose 2 hours in a row, is 2%+ above its lowest 4 h mean
+  //   of the last 36 h (that low 3+ h old) and that low was 5%+ under the 72 h high. The raw index jumps
+  //   ±5% an hour: the old raw-point rule fired 4 times in 2.5 days and 3 times the market was lower 12 h later.
+  // B (breadth of the FUT.GG momentum list, ~580 special cards, every 15 min): in the last two fetches 55%+
+  //   of the cards up over 6 h and the median card +0.3%+, after a weak phase (some fetch in the last 24 h
+  //   with 40% or fewer up).
+  // One = "possible turn" (status line), both = "turn confirmed" (ntfy, and crash mode ends).
+  function breadthAdd(platform, cards) {
+    const m6 = cards.map(card => card.m6).filter(value => value != null && Number.isFinite(value)).sort((a, b) => a - b);
+    if (m6.length < 50) return;
+    const key = futbinPlatform(platform);
+    const all = getMarket();
+    const br = { ...(all.br || {}) };
+    const now = Date.now();
+    const list = (br[key] || []).filter(point => now - point[0] < 72 * 3600000);
+    list.push([now, Math.round(m6.filter(value => value > 0).length / m6.length * 1000) / 1000, m6[Math.floor(m6.length / 2)]]);
+    br[key] = list;
+    saveMarket({ ...all, br });
+  }
+  // Cached per platform for a minute and until the stored data changes (it's asked for every card).
+  const marketTurnCache = {};
+  function marketTurn(platform) {
+    const all = getMarket();
+    const set0 = all[futbinPlatform(platform)];
+    const brList = (all.br || {})[futbinPlatform(platform)] || [];
+    const stamp = `${set0 ? set0.at : 0}|${brList.length ? brList[brList.length - 1][0] : 0}|${Math.floor(Date.now() / 60000)}`;
+    const hit = marketTurnCache[platform];
+    if (hit && hit.stamp === stamp) return hit.value;
+    const value = marketTurnCompute(platform, all);
+    marketTurnCache[platform] = { stamp, value };
+    return value;
+  }
+  function marketTurnCompute(platform, all) {
+    const H = 3600000;
+    // A: index
+    let index = null;
+    const set = all[futbinPlatform(platform)];
+    const live = set && set.live && Date.now() - set.at < 3 * H ? set.live : null;
+    if (live && live.length >= 40 && live[live.length - 1][0] - live[0][0] >= 30 * H) {
+      const lastT = live[live.length - 1][0];
+      const mean4 = T => {
+        const values = live.filter(([x]) => x > T - 4 * H && x <= T).map(point => point[1]);
+        return values.length >= 8 ? values.reduce((a, b) => a + b, 0) / values.length : null;
+      };
+      const now = mean4(lastT);
+      const h1 = mean4(lastT - H);
+      const h2 = mean4(lastT - 2 * H);
+      let low = Infinity, lowT = 0, peak = 0;
+      live.forEach(([x]) => {
+        const value = mean4(x);
+        if (!value) return;
+        if (x >= lastT - 36 * H && value < low) { low = value; lowT = x; }
+        if (value > peak) peak = value;
+      });
+      if (now && h1 && h2 && low < Infinity) {
+        const rise = now / low - 1;
+        const drop = low / peak - 1;
+        index = { on: drop <= -0.05 && rise >= 0.02 && lastT - lowT >= 3 * H && now > h1 && h1 > h2, rise, drop, lowT };
+      }
+    }
+    // B: breadth
+    let breadth = null;
+    const points = ((all.br || {})[futbinPlatform(platform)] || []).filter(point => Date.now() - point[0] < 72 * H);
+    if (points.length >= 2 && Date.now() - points[points.length - 1][0] < 45 * 60000) {
+      const [a, b] = points.slice(-2);
+      const weakBefore = points.filter(point => point[0] >= b[0] - 24 * H && point[0] < a[0]).some(point => point[1] <= 0.4);
+      breadth = { on: a[1] >= 0.55 && b[1] >= 0.55 && a[2] >= 0.3 && b[2] >= 0.3 && weakBefore, up: b[1], med: b[2] };
+    }
+    const count = (index && index.on ? 1 : 0) + (breadth && breadth.on ? 1 : 0);
+    return { level: count === 2 ? "confirmed" : count === 1 ? "possible" : "none", index, breadth };
+  }
+
   // Crash help (pc, via ntfy + a toast): "falling hard" when the index drops >= 3% in 6 h, and "turning"
-  // when, after a drop of >= 5% below its 3-day high, it is >= 1.5% above the day's low with 6 h up again.
-  // Each at most once per 12 h, and a turn only once per low.
+  // when both turn signals agree (marketTurn). Each at most once per 12 h, and a turn only once per low.
   const MARKET_ALERT_KEY = "pt_market_alert_v1"; // { fallAt, turnAt, lowT }
   function marketAlertState(platform, now = Date.now()) {
     const set = getMarket()[futbinPlatform(platform)];
@@ -9163,8 +9235,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const drop = low[1] / peak - 1;
     const up = mk.now / low[1] - 1;
     const fall = mk.ch6 != null && mk.ch6 <= -0.03 && now - (stored.fallAt || 0) > 12 * 3600000;
-    const turn = drop <= -0.05 && up >= 0.015 && mk.ch6 != null && mk.ch6 > 0 && low[0] !== stored.lowT && now - (stored.turnAt || 0) > 12 * 3600000;
-    return { mk, drop, up, low, fall, turn, stored };
+    const turnState = marketTurn(platform);
+    const turnLow = turnState.index ? turnState.index.lowT : low[0];
+    const turn = turnState.level === "confirmed" && turnLow !== stored.lowT && now - (stored.turnAt || 0) > 12 * 3600000;
+    return { mk, drop, up, low: [turnLow, low[1]], fall, turn, stored, turnState };
   }
   function marketAlert(platform) {
     if (!pcDevice()) return;
@@ -9177,8 +9251,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     let text;
     if (state.turn) {
       title = L("📈 Markt draait", "📈 Market is turning");
-      text = L(`Index 100 (${name}) zakte ${pct(drop)} onder de top van 3 dagen en staat nu ${pct(up)} boven de bodem (6u ${pct(mk.ch6)}). Tijd om weer naar kopen te kijken.`,
-        `Index 100 (${name}) dropped ${pct(drop)} below its 3-day high and is now ${pct(up)} above the low (6h ${pct(mk.ch6)}). Time to look at buying again.`);
+      const ts = state.turnState;
+      text = L(`Twee signalen eens: Index 100 (${name}, gemiddeld over 4u) ${pct(ts.index.rise)} boven de bodem na ${pct(ts.index.drop)}, en ${Math.round(ts.breadth.up * 100)}% van je FUT.GG-lijst stijgt (6u). Tijd om weer naar kopen te kijken.`,
+        `Both signals agree: Index 100 (${name}, 4 h average) ${pct(ts.index.rise)} above the low after ${pct(ts.index.drop)}, and ${Math.round(ts.breadth.up * 100)}% of your FUT.GG list is rising (6h). Time to look at buying again.`);
       Object.assign(stored, { turnAt: Date.now(), lowT: low[0] });
     } else {
       title = L("📉 Markt zakt hard", "📉 Market falling hard");
@@ -9195,8 +9270,13 @@ function priceWatchMain(SCRIPT_VERSION) {
     const mk = marketStats(platform);
     if (!mk) return marketError && pcDevice() ? L(`📈 markt: ${marketError}`, `📈 market: ${marketError}`) : "";
     const p = value => (value == null ? "—" : flipPct(value * 100, 1));
-    return L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(mk.ch24)} · 6u ${p(mk.ch6)}`,
-      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(mk.ch24)} · 6h ${p(mk.ch6)}`);
+    const turn = marketTurn(platform);
+    const br = turn.breadth;
+    const tail = (br ? L(` · ${Math.round(br.up * 100)}% stijgt`, ` · ${Math.round(br.up * 100)}% rising`) : "")
+      + (turn.level === "confirmed" ? L(" · 📈 draai bevestigd", " · 📈 turn confirmed") : turn.level === "possible" ? L(" · 🔄 mogelijke draai", " · 🔄 possible turn")
+        : marketCrash(platform) ? L(" · 📉 crash", " · 📉 crash") : "");
+    return L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(mk.ch24)} · 6u ${p(mk.ch6)}${tail}`,
+      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(mk.ch24)} · 6h ${p(mk.ch6)}${tail}`);
   }
 
   // --- 72 h of real FUTBIN sales, from the same sales page (no extra request) -------------------------
@@ -9580,6 +9660,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!list.length) throw new Error(ft("mEmptyFetch"));
       momentumData = { ...(momentumData || {}), [platform]: { at: Date.now(), cards: list } };
       try { localStorage.setItem(MOMENTUM_KEY, JSON.stringify(momentumData)); } catch (_) { /* memory only */ }
+      breadthAdd(platform, list);
       futbinAutoTop("futgg").catch(error => console.warn(L("Price Watch: FUTBIN auto-check (momentum) mislukt.", "Price Watch: FUTBIN auto-check (momentum) failed."), error));
       return true;
     })()

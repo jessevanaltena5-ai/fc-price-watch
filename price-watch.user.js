@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.90.0
+// @version      2.90.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10053,10 +10053,6 @@ function priceWatchMain(SCRIPT_VERSION) {
           || (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0) // never checked first, then the old checks
           || a.card.m24 - b.card.m24)
         .map(row => row.card).filter(card => !futbinMissingRecently(card) && myScanShare(card.id)).slice(0, MOMENTUM_AUTO_TOP);
-    } else if (source === "meta") {
-      cards = metaRows(state).filter(row => futbinAutoDue(row, state.platform))
-        .sort((a, b) => (a.calc.futbin ? 1 : 0) - (b.calc.futbin ? 1 : 0)) // never checked first
-        .map(row => row.card).filter(card => !futbinMissingRecently(card) && myScanShare(card.id)).slice(0, FUTBIN_AUTO_TOP);
     } else {
       if (!flipData || flipData.token !== state.token) return;
       // Every card of the list: by score, cards without profit (by the sheet) last; never checked first.
@@ -10281,87 +10277,6 @@ function priceWatchMain(SCRIPT_VERSION) {
   // everything else (score breakdown, fodder.gg prices, FUTBIN sales, all warnings) opens with a click
   // on the row. Settings (link, max price, min profit) and the explanation sit behind ⚙ and ?.
   // All texts come from FLIP_TEXT (ft) and are set on every render, so NL/EN switches at once.
-
-  // --- Meta tab: only the real meta cards ------------------------------------------------------------
-  // Source: FUTBIN's popular players (the 250 most viewed cards) with FUTBIN's own FB rating; "real meta" =
-  // FB rating ≥ 89.5 and, once checked, 30+ sales a day. Same FUTBIN checks, prices and rules as Flip
-  // (crash mode, night dip, liquidity); "now" = FUT.GG's live price of the exact card.
-  const META_KEY = "pt_meta_v1"; // { at, cards: [{ id, path, name, r, fb, special }] }
-  const META_URL = "https://www.futbin.com/27/popular";
-  const META_MIN_FB = 89.5;
-  const META_MIN_SALES = 30;
-  const META_REFRESH_MS = 60 * 60 * 1000;
-  let metaLoading = null;
-  let metaError = "";
-  let metaTriedAt = 0;
-  function getMeta() {
-    try { return JSON.parse(localStorage.getItem(META_KEY) || "{}") || {}; } catch (_) { return {}; }
-  }
-  function metaParse(text) {
-    const doc = new DOMParser().parseFromString(String(text || ""), "text/html");
-    const seen = new Map();
-    doc.querySelectorAll('a.playercard-wrapper[href*="/player/"]').forEach(wrapper => {
-      const leaves = [...wrapper.querySelectorAll("*")].filter(node => node.children.length === 0);
-      const leaf = test => { const node = leaves.find(item => test(String(item.className || ""))); return node ? node.textContent.trim() : ""; };
-      const image = [...wrapper.querySelectorAll("img")].map(img => (img.getAttribute("src") || img.getAttribute("data-src") || "").match(/players\/(p?)(\d+)\.png/)).find(Boolean);
-      const path = (wrapper.getAttribute("href") || "").replace(/^https?:\/\/[^/]+/, "");
-      const card = {
-        id: image ? Number(image[2]) : 0, path, special: !!(image && image[1] === "p"),
-        name: leaf(cls => /name/.test(cls)), r: Number(leaf(cls => /rating/.test(cls) && !/futbin/.test(cls))) || 0,
-        fb: Number(leaf(cls => /futbin-rating/.test(cls))) || 0
-      };
-      if (card.id > 0 && /^\/\d{2}\/player\/\d+\//.test(path) && !seen.has(path)) seen.set(path, card);
-    });
-    const cards = [...seen.values()];
-    if (cards.length < 50) throw new Error(L("geen populaire spelers gevonden op FUTBIN", "no popular players found on FUTBIN"));
-    return { at: Date.now(), cards };
-  }
-  function loadMeta(force) {
-    if (metaLoading) return metaLoading;
-    const current = getMeta();
-    if (!force && current.at && Date.now() - current.at < META_REFRESH_MS) return Promise.resolve(false);
-    if (!force && Date.now() - metaTriedAt < 10 * 60 * 1000) return Promise.resolve(false);
-    metaTriedAt = Date.now();
-    metaLoading = futggRequestJson(META_URL, true).then(text => {
-      const parsed = metaParse(text);
-      try { localStorage.setItem(META_KEY, JSON.stringify(parsed)); } catch (_) { /* memory only next time */ }
-      // FUTBIN paths are known already: no player search needed for these checks
-      const ids = futbinStore(FUTBIN_IDS_KEY);
-      parsed.cards.forEach(card => { if (!ids[card.id]) ids[card.id] = card.path; });
-      futbinSave(FUTBIN_IDS_KEY, ids);
-      metaError = "";
-      listeners.forEach(listener => listener());
-      if (pcDevice()) futbinAutoTop("meta").catch(() => { /* next round */ });
-      return true;
-    }).catch(error => {
-      metaError = error && error.message ? error.message : String(error);
-      listeners.forEach(listener => listener());
-      return false;
-    }).finally(() => { metaLoading = null; });
-    return metaLoading;
-  }
-  function metaRows(state) {
-    const platform = state.platform;
-    return (getMeta().cards || []).filter(item => item.fb >= META_MIN_FB).map(item => {
-      const live = futggPlatform === (platform === "pc" ? "pc" : "console") ? Number(futggPrices[String(item.id)]) : 0;
-      const fb = futbinSalesFor({ id: item.id }, platform);
-      // 24 h / 6 h from its own FUTBIN sales (median of the last 24 h vs the day before; last 8 h vs 24 h)
-      const card = { id: item.id, name: item.name, rating: item.r, holo: false, now: live || (fb ? Math.round(fb.median) : 0), nowSrc: live ? "index" : "list",
-        m24: fb && fb.trend != null ? fb.trend * 100 : 0, m6: fb && fb.drift != null ? fb.drift * 100 : null, src: "futgg", meta: true, fbRating: item.fb, special: item.special,
-        rarity: `${item.special ? L("Special", "Special") : L("Goud", "Gold")} · FB ${item.fb.toFixed(1)}` };
-      return { card, calc: card.now > 0 ? momentumCalc(card, platform) : { buy: 0, sell: 0, profit: 0, pct: 0, gap: 1, warnings: [], status: "unk", risky: true, futbin: null } };
-    })
-      .filter(row => !state.maxPrice || !(row.card.now > 0) || row.card.now <= state.maxPrice)
-      .filter(row => !row.calc.futbin || row.calc.futbin.salesPerDay >= META_MIN_SALES)
-      .sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.card.fbRating - a.card.fbRating);
-  }
-  // Background (pc): the meta list every hour, its FUTBIN checks in the auto rounds.
-  window.setTimeout(() => {
-    const tick = () => { if (pcDevice() && getFlip().autoFutbin) loadMeta(false).then(() => futbinAutoTop("meta")).catch(() => {}); };
-    tick();
-    window.setInterval(tick, 15 * 60 * 1000);
-  }, 45000);
-
   function buildFlipSection(root) {
     const card = el("div", "pt-watch-card pt-flip-card");
     root.appendChild(card);
@@ -10394,7 +10309,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (on) loadFlipSheet(false);
     });
     const sourceSelect = el("select", "pt-stock-select pt-mode-select pt-flip-select");
-    sourceSelect.append(new Option("", "fodder"), new Option("", "futgg"), new Option("", "meta"));
+    sourceSelect.append(new Option("", "fodder"), new Option("", "futgg"));
     sourceSelect.addEventListener("change", () => {
       update(state => { state.source = sourceSelect.value; });
       ticked.clear();
@@ -10406,9 +10321,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     futbinButton.addEventListener("click", () => {
       if (futbinState.busy) { futbinState.stop = true; return; }
       const state = getFlip();
-      const cards = state.source === "meta"
-        ? shown.filter(row => row.calc.status !== "skip").slice(0, FUTBIN_BATCH_MAX).map(row => row.card)
-        : state.source === "futgg"
+      const cards = state.source === "futgg"
         // momentum: nothing has a buy price before FUTBIN, so take the biggest dips (as shown)
         ? shown.filter(row => row.calc.status !== "skip" && row.card.m24 < 0).slice(0, FUTBIN_BATCH_MAX).map(row => row.card)
         : shown.filter(row => ["buy", "near", "risk"].includes(row.calc.status)).map(row => row.card);
@@ -10464,7 +10377,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       select.value = value;
       select.dispatchEvent(new Event("change"));
     };
-    const sourceSeg = seg(["fodder", "futgg", "meta"], value => pick(sourceSelect, value));
+    const sourceSeg = seg(["fodder", "futgg"], value => pick(sourceSelect, value));
     const platformSeg = seg(["pc", "console"], value => pick(platform, value));
     const sortSeg = seg(["score", "signal"], value => pick(sortSelect, value));
     const filterInput = el("input", "pt-fx-filter");
@@ -10552,7 +10465,6 @@ function priceWatchMain(SCRIPT_VERSION) {
       textsLang = flipLang();
       sourceSeg.buttons[0].textContent = "fodder.gg";
       sourceSeg.buttons[1].textContent = ft("srcFutggShort");
-      sourceSeg.buttons[2].textContent = "Meta";
       sourceSeg.box.title = ft("srcTitle");
       platformSeg.buttons[0].textContent = "PC";
       platformSeg.buttons[1].textContent = "Console";
@@ -10563,7 +10475,6 @@ function priceWatchMain(SCRIPT_VERSION) {
       filterInput.title = ft("filterTitle");
       sourceSelect.options[0].textContent = ft("srcFodder");
       sourceSelect.options[1].textContent = ft("srcFutgg");
-      sourceSelect.options[2].textContent = L("Meta (FUTBIN populair, FB ≥ 89,5)", "Meta (FUTBIN popular, FB ≥ 89.5)");
       sourceSelect.title = ft("srcTitle");
       sortSelect.options[0].textContent = ft("sortScore");
       sortSelect.options[1].textContent = ft("sortSignal");
@@ -10671,7 +10582,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       ticked.clear();
       loadFlipSheet(true);
     });
-    platform.addEventListener("change", () => { update(state => { state.platform = platform.value; }); ticked.clear(); if (getFlip().source === "futgg") loadMomentum(false); if (getFlip().source === "meta") loadMeta(false); });
+    platform.addEventListener("change", () => { update(state => { state.platform = platform.value; }); ticked.clear(); if (getFlip().source === "futgg") loadMomentum(false); });
     sortSelect.addEventListener("change", () => update(state => { state.sort = sortSelect.value; }));
     maxPrice.input.addEventListener("change", () => update(state => { state.maxPrice = parsePrice(maxPrice.input.value) || 0; }));
     minPct.input.addEventListener("change", () => update(state => {
@@ -10679,7 +10590,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       state.minPct = Number.isFinite(value) ? value : 5;
     }));
     onlyDeals.addEventListener("change", () => update(state => { state.onlyDeals = onlyDeals.checked; }));
-    refresh.addEventListener("click", () => (getFlip().source === "meta" ? loadMeta(true) : getFlip().source === "futgg" ? loadMomentum(true) : loadFlipSheet(true)));
+    refresh.addEventListener("click", () => (getFlip().source === "futgg" ? loadMomentum(true) : loadFlipSheet(true)));
 
     // Only cards with a buy price (a momentum card without FUTBIN check has none) go into a run/list.
     const selectedRows = () => shown.filter(row => isTicked(row) && row.calc.buy > 0);
@@ -10698,7 +10609,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const list = {
           id,
           type: "players",
-          name: `${bids ? "🔨 Flip bids" : "Flip sheet"}${state.source === "futgg" ? " FUT.GG" : state.source === "meta" ? " Meta" : ""} ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
+          name: `${bids ? "🔨 Flip bids" : "Flip sheet"}${state.source === "futgg" ? " FUT.GG" : ""} ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
           createdAt: Date.now(),
           profit: null,
           windows: [],
@@ -10817,7 +10728,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       pair(prices, ft("d_status"), `${FLIP_ICON[calc.status]} ${ft(`sts_${calc.status}`)}`);
       if (item.src === "futgg") {
         pair(prices, ft("d_nowSrc"), item.nowSrc === "index" ? ft("d_nowIndex", { time: formatTime(futggPricesAt) }) : ft("d_nowList"));
-        pair(prices, item.meta ? L("24u (FUTBIN-verkopen)", "24h (FUTBIN sales)") : ft("d_m24"), flipPct(item.m24, 1), item.m24 < 0 ? "pt-flip-minus" : "pt-flip-plus");
+        pair(prices, ft("d_m24"), flipPct(item.m24, 1), item.m24 < 0 ? "pt-flip-minus" : "pt-flip-plus");
         pair(prices, ft("d_m6"), item.m6 == null ? ft("d_noData") : flipPct(item.m6, 1), item.m6 < 0 ? "pt-flip-minus" : item.m6 > 0 ? "pt-flip-plus" : "");
         pair(prices, ft("d_move"), calc.move ? ft(`m_${calc.move}`) : ft("m_none"), calc.move === "falling" ? "pt-flip-minus" : calc.move === "turning" ? "pt-flip-plus" : "");
         if (opp && opp.normal) pair(prices, ft("d_normalFb"), money(opp.normal), "pt-flip-fbval");
@@ -11002,9 +10913,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
       onlyDeals.checked = !!state.onlyDeals;
       autoCheck.checked = !!state.autoFutbin;
-      const meta = state.source === "meta";
-      const momentum = state.source === "futgg" || meta; // meta rows work like momentum rows
-      sourceSelect.value = meta ? "meta" : momentum ? "futgg" : "fodder";
+      const momentum = state.source === "futgg";
+      sourceSelect.value = momentum ? "futgg" : "fodder";
       sortSelect.value = state.sort === "signal" ? "signal" : "score";
       sortSelect.style.display = state.platform === "pc" || momentum ? "" : "none";
       sourceSeg.buttons.forEach(item => item.classList.toggle("pt-fx-on", item.dataset.value === sourceSelect.value));
@@ -11025,16 +10935,14 @@ function priceWatchMain(SCRIPT_VERSION) {
 
       const data = flipData && flipData.token === state.token ? flipData : null;
       const deal = row => !state.onlyDeals || row.calc.status === "buy" || row.calc.status === "near";
-      if (meta) {
-        shown = rankMomentum(metaRows(state).filter(deal), state.sort === "signal");
-      } else if (momentum) {
+      if (momentum) {
         shown = rankMomentum(momentumRows(state).filter(deal), state.sort === "signal"); // score from FUTBIN 72 h
       } else {
         // Score per row (PC), highest first; "green first" (and console, no score) keeps the old order.
         shown = rankFlipOpportunities(flipRows(data, state).filter(deal), state.platform);
         if (state.sort === "signal" || state.platform !== "pc") shown.sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
       }
-      signalLogTouch(meta ? "meta" : momentum ? "futgg" : "fodder", shown.map(row => ({ k: `${row.card.id}|${state.platform}`, n: row.card.name, price: row.card.now,
+      signalLogTouch(momentum ? "futgg" : "fodder", shown.map(row => ({ k: `${row.card.id}|${state.platform}`, n: row.card.name, price: row.card.now,
         green: row.calc.status === "buy", buy: row.calc.buy, sell: row.calc.sell })));
       const listSize = shown.length;
       const checkedCount = shown.filter(row => row.calc.futbin).length;
@@ -11069,15 +10977,11 @@ function priceWatchMain(SCRIPT_VERSION) {
           ? ft("histStatus", { n: history.times.length, span: formatSpan(history.times[history.times.length - 1] - history.times[0]), time: formatTime(history.times[history.times.length - 1]), remote: pcDevice() ? "" : ft("histRemote") })
           : ft(pcDevice() ? "histBuilding" : "histNone");
       // Simple status (user: "braindead"): one sentence with what to do, one short line, the rest behind ⓘ.
-      const metaSet = meta ? getMeta() : null;
-      const set = meta ? (metaSet.cards ? metaSet : null) : momentum ? momentumData && momentumData[state.platform] : null;
+      const set = momentum ? momentumData && momentumData[state.platform] : null;
       const haveData = momentum ? !!set : !!data;
-      const loadingNow = meta ? !!metaLoading : momentum ? momentumLoading : flipLoading;
-      const errorNow = meta ? metaError : momentum ? momentumError : flipError;
-      const mainText = meta
-        ? (set ? L(`${state.platform === "pc" ? "PC" : "Console"} · Meta (FUTBIN populair, FB ≥ ${META_MIN_FB}, ${META_MIN_SALES}+ verkopen/dag) · ${shown.length} kaarten · lijst ${formatTime(set.at)}`,
-          `${state.platform === "pc" ? "PC" : "Console"} · Meta (FUTBIN popular, FB ≥ ${META_MIN_FB}, ${META_MIN_SALES}+ sales/day) · ${shown.length} cards · list ${formatTime(set.at)}`) : "")
-        : momentum
+      const loadingNow = momentum ? momentumLoading : flipLoading;
+      const errorNow = momentum ? momentumError : flipError;
+      const mainText = momentum
         ? (set ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) }) : "")
         : (data ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) }) : "");
       const crashNow = marketCrash(state.platform);
@@ -11086,8 +10990,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       let tone;
       if (!momentum && !state.token) { verdict = ft("statusNoLink"); tone = "info"; }
       else if (!haveData) {
-        verdict = loadingNow ? (meta ? L("⏳ Meta-lijst ophalen bij FUTBIN…", "⏳ Fetching the meta list from FUTBIN…") : momentum ? ft("mLoading", { n: momentumPages }) : ft("statusLoading"))
-          : errorNow ? ft("statusFailed", { error: errorNow }) : meta ? L("Nog geen meta-lijst", "No meta list yet") : momentum ? ft("mEmpty") : ft("statusEmpty");
+        verdict = loadingNow ? (momentum ? ft("mLoading", { n: momentumPages }) : ft("statusLoading"))
+          : errorNow ? ft("statusFailed", { error: errorNow }) : momentum ? ft("mEmpty") : ft("statusEmpty");
         tone = loadingNow ? "info" : "bad";
       } else if (crashNow) { verdict = L("📉 Markt crasht — niets kopen, wacht op de draai", "📉 Market is crashing — buy nothing, wait for the turn"); tone = "bad"; }
       else if (count("buy")) {
@@ -11103,8 +11007,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         : "";
       const detailLines = [mainText, state.platform === "pc" && futggPricesAt ? ft("mPricesAt", { time: formatTime(futggPricesAt) }).replace(/^ · /, "") : "",
         errorNow ? ft("statusError", { error: errorNow }).replace(/^ · /, "") : "", flipSyncText(), marketText(state.platform), signalLogSummary(),
-        meta ? L("Echt meta = in FUTBIN's 250 populairste spelers, FB Rating ≥ 89,5 en na de FUTBIN-check 30+ verkopen per dag. 24u/6u komen hier uit de eigen FUTBIN-verkopen.", "Real meta = in FUTBIN's 250 most popular players, FB rating ≥ 89.5 and after the FUTBIN check 30+ sales a day. 24h/6h come from its own FUTBIN sales here.")
-          : momentum ? ft("mStatusTitle") : data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : ""].filter(Boolean);
+        momentum ? ft("mStatusTitle") : data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : ""].filter(Boolean);
       status.textContent = "";
       status.title = "";
       status.appendChild(el("div", `pt-fx-verdict pt-fx-verdict-${tone}`, verdict));
@@ -11221,8 +11124,8 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     // Refresh when the tab opens and every 10 minutes while it is visible.
     flipOnShow = () => {
-      const source = ["futgg", "meta"].includes(getFlip().source) ? getFlip().source : "fodder";
-      Promise.resolve(source === "meta" ? loadMeta(false) : source === "futgg" ? loadMomentum(false) : loadFlipSheet(false))
+      const source = getFlip().source === "futgg" ? "futgg" : "fodder";
+      Promise.resolve(source === "futgg" ? loadMomentum(false) : loadFlipSheet(false))
         .then(fetched => { if (!fetched) return futbinAutoTop(source); }) // a fetch starts its own round
         .catch(error => console.warn(L("Price Watch: FUTBIN auto-check mislukt.", "Price Watch: FUTBIN auto-check failed."), error));
     };
@@ -11232,7 +11135,6 @@ function priceWatchMain(SCRIPT_VERSION) {
         // With 🔔 on it keeps refreshing (every 10 min) while the web app is open, on any screen.
         if ((visible && visible.offsetParent) || getFlip().alert) loadFlipSheet(false);
         if (visible && visible.offsetParent && getFlip().source === "futgg") loadMomentum(false); // every 15 min
-        if (visible && visible.offsetParent && getFlip().source === "meta") loadMeta(false); // every hour
       }, 60 * 1000);
     }
     return render;
@@ -11303,7 +11205,6 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (flip.platform !== startPlatform) {
         refreshFutggPrices(true);
         if (flip.source === "futgg") loadMomentum(false);
-        if (flip.source === "meta") loadMeta(false);
       }
       if (flip.lang !== startLang && !rebuildPriceWatch()) showToast(L("Taal: Nederlands. Alle tabs wisselen mee als je Price Watch opnieuw opent.", "Language: English. All tabs switch too when you reopen Price Watch."), true);
       listeners.forEach(listener => listener());
@@ -11468,7 +11369,6 @@ function priceWatchMain(SCRIPT_VERSION) {
     let initial = "flip";
     try {
       initial = localStorage.getItem(TAB_KEY) || "flip";
-      if (initial === "meta") initial = "flip";
     } catch (_) {
       // Default tab.
     }
@@ -14352,15 +14252,6 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-flip-card .pt-fx-verdict-good { color: #27d98b; }
 .pt-flip-card .pt-fx-verdict-maybe { color: #f5c46b; }
 .pt-flip-card .pt-fx-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.pt-meta-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-.pt-meta-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
-.pt-meta-row { display: grid; grid-template-columns: 26px minmax(150px, 1.6fr) repeat(5, minmax(64px, 1fr)); align-items: center; gap: 8px; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(148, 178, 230, .12); background: rgba(255, 255, 255, .02); cursor: pointer; border-left-width: 3px; }
-.pt-meta-row:hover { border-color: rgba(76, 180, 255, .45); }
-.pt-meta-row.pt-flip-row-buy { border-left-color: #27d98b; } .pt-meta-row.pt-flip-row-near { border-left-color: #f5c46b; } .pt-meta-row.pt-flip-row-risk { border-left-color: #ff9f43; }
-.pt-meta-who { display: flex; flex-direction: column; min-width: 0; } .pt-meta-who b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pt-meta-cell { display: flex; flex-direction: column; font-variant-numeric: tabular-nums; } .pt-meta-cell .pt-muted { font-size: 11px; }
-.pt-meta-buy span:last-child { color: #4cb4ff; font-weight: 700; }
-@media (max-width: 700px) { .pt-meta-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } .pt-meta-icon { grid-column: 1; justify-self: start; } .pt-meta-who { grid-column: 2 / -1; } }
 .pt-flip-card .pt-fx-summary .pt-fgs-tip { left: -6px; right: auto; width: 300px; max-width: 80vw; }
 .pt-flip-card .pt-fx-seg { display: inline-flex; padding: 3px; gap: 2px; background: rgba(0, 0, 0, .28); border: 1px solid rgba(148, 178, 230, .12); border-radius: 10px; }
 .pt-flip-card button.pt-fx-seg-btn { appearance: none; border: 0; background: none; color: #8392ab; font: 600 13px/1 inherit; font-family: inherit; padding: 7px 12px; border-radius: 7px; cursor: pointer; text-transform: none; min-height: 0; height: auto; }
@@ -15430,7 +15321,6 @@ try {
       ((parsed.pathname === "/players" && /^[?]search=[^&]+$/.test(parsed.search)) ||
        (/^[/]\d{2}[/]sales[/]\d+[/][a-z0-9-]+$/.test(parsed.pathname) && /^[?]platform=(pc|ps)$/.test(parsed.search)) ||
        (/^[/]\d{2}[/]market$/.test(parsed.pathname) && !parsed.search) || // market index (Index 100), pc only, every 30 min
-       (/^[/]\d{2}[/]popular$/.test(parsed.pathname) && !parsed.search) || // meta tab: popular players, every hour
        (/^[/]\d{2}[/]fodder-prices$/.test(parsed.pathname) && /^[?]ratings=\d{2}(,\d{2})*&range=\d{1,3}$/.test(parsed.search))); // fodder prices per rating, every 3 h
     const htmlPage = fodderWatch || futbinPage;
     if (parsed.protocol !== "https:" || (parsed.hostname !== "r2.fut.gg" && !cheapestApi && !htmlPage)) {

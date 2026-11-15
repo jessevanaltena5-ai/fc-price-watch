@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.90.1
+// @version      2.90.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -7163,15 +7163,47 @@ function priceWatchMain(SCRIPT_VERSION) {
     return lines;
   }
   // ⓘ with an explanation: hover on pc, tap on the phone.
+  // An ⓘ that was tapped open stays open when the screen is redrawn in the background (every minute, or when
+  // a FUTBIN check comes in): the open one is remembered by its title. A tap anywhere else closes it.
+  // On the phone the box is placed across the screen (it used to run off the right edge).
+  const fgOpenInfos = new Set();
+  function fgPlaceTip(info) {
+    const tip = info.querySelector(".pt-fgs-tip");
+    if (!tip) return;
+    if (window.innerWidth > 700) { tip.removeAttribute("style"); return; }
+    const rect = info.getBoundingClientRect();
+    const top = Math.min(rect.bottom + 6, window.innerHeight - 120);
+    Object.assign(tip.style, { position: "fixed", left: "12px", right: "12px", width: "auto", maxWidth: "none", top: `${top}px`,
+      maxHeight: `${Math.max(100, window.innerHeight - top - 16)}px`, overflowY: "auto" });
+  }
   function fgInfo(title, lines) {
     const info = el("span", "pt-fgs-i", "i");
     const tip = el("div", "pt-fgs-tip");
     tip.appendChild(el("b", "", title));
     lines.forEach(line => tip.appendChild(el("div", "", `• ${line}`)));
     info.appendChild(tip);
-    info.addEventListener("click", event => { event.stopPropagation(); info.classList.toggle("pt-fgs-open"); });
+    if (fgOpenInfos.has(title)) {
+      info.classList.add("pt-fgs-open");
+      window.requestAnimationFrame(() => fgPlaceTip(info));
+    }
+    info.addEventListener("click", event => {
+      event.stopPropagation();
+      const open = !info.classList.contains("pt-fgs-open");
+      document.querySelectorAll(".pt-fgs-i.pt-fgs-open").forEach(node => node.classList.remove("pt-fgs-open"));
+      fgOpenInfos.clear();
+      if (open) {
+        info.classList.add("pt-fgs-open");
+        fgOpenInfos.add(title);
+        fgPlaceTip(info);
+      }
+    });
     return info;
   }
+  document.addEventListener("click", event => {
+    if (!fgOpenInfos.size || (event.target && event.target.closest && event.target.closest(".pt-fgs-i"))) return;
+    fgOpenInfos.clear();
+    document.querySelectorAll(".pt-fgs-i.pt-fgs-open").forEach(node => node.classList.remove("pt-fgs-open"));
+  }, true);
   let fgDetailsOpen = false;
   // Push (pc, ntfy) when a rating becomes BUY; once per rating per 24 h.
   const FG_BUY_ALERT_KEY = "pt_fodder_buy_alert_v1";

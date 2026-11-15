@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.0
+// @version      2.91.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1061,6 +1061,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (data.fc) mergeCalibration(data.fc);
     if (data.dev) mergeDevices(data.dev);
     if (data.dp) mergeDayPrices(data.dp);
+    if (data.nf) mergeNotFound(data.nf);
   }
   // For the gist: this pc's calibration next to the others it knows; device heartbeats.
   function calibrationForRelay() {
@@ -1119,7 +1120,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (remote) mergeShared(JSON.parse(remote));
       } catch (_) { /* first push, or GitHub busy: send what we have */ }
       const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(),
-        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), v: SCRIPT_VERSION || "" };
+        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), nf: futbinNotFound(), v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
@@ -8255,8 +8256,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const bySales = fb && fb.salesPerDay > 0 ? Math.max(1, Math.floor(fb.salesPerDay * 0.1)) : null;
     const qty = byCoins == null && bySales == null ? 0 : Math.max(byCoins == null ? bySales : bySales == null ? byCoins : Math.min(byCoins, bySales), 0);
     const crash = marketCrash(platform);
-    const qtyText = (qty ? L(`${qty} stuks`, `${qty} cards`) : L("geen (te weinig coins)", "none (not enough coins)"))
-      + L(` (≤10% van je coins${bySales != null ? `, ≤10% van ${Math.round(fb.salesPerDay)} verkopen/dag` : ""})`, ` (≤10% of your coins${bySales != null ? `, ≤10% of ${Math.round(fb.salesPerDay)} sales/day` : ""})`)
+    const qtyText = (qty ? L(`${qty} stuks`, `${qty} cards`)
+      : byCoins === 0 ? L(`0 stuks: ${flipShort(calc.buy)} is meer dan 10% van je coins (max ±${flipShort(coins * 0.1)} per kaart)`, `0 cards: ${flipShort(calc.buy)} is more than 10% of your coins (max ±${flipShort(coins * 0.1)} per card)`)
+      : L("0 stuks", "0 cards"))
+      + (byCoins === 0 && !qty ? "" : L(` (≤10% van je coins${bySales != null ? `, ≤10% van ${Math.round(fb.salesPerDay)} verkopen/dag` : ""})`, ` (≤10% of your coins${bySales != null ? `, ≤10% of ${Math.round(fb.salesPerDay)} sales/day` : ""})`))
       + (crash ? L(" · crash: in totaal max 40% van je coins", " · crash: at most 40% of your coins in total") : "");
     if (calc.night) {
       return { qty, known: byCoins != null || bySales != null, qtyText,
@@ -10034,7 +10037,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           if (!futbinState.error) futbinState.error = error && error.message ? error.message : String(error);
           return;
         }
-        if (result && result.notFound) { missing.push(card.name); futbinMissingAt[card.id] = Date.now(); }
+        if (result && result.notFound) { missing.push(card.name); futbinMissingAt[card.id] = Date.now(); futbinNotFoundAdd(card.id); }
         futbinState.done++;
         if (++futbinCleanRun >= 30) { futbinGap = Math.max(FUTBIN_GAP_MIN, Math.round(futbinGap * 0.85)); futbinCleanRun = 0; }
         listeners.forEach(listener => listener());
@@ -10372,9 +10375,31 @@ function priceWatchMain(SCRIPT_VERSION) {
     }).finally(() => { metaLoading = null; });
     return metaLoading;
   }
+  // Cards FUTBIN has no sales for (SBC / objective cards, not tradeable): kept 24 h, also from other devices.
+  const FUTBIN_NOTFOUND_KEY = "pt_futbin_notfound_v1"; // { id: time }
+  function futbinNotFound() {
+    try { return JSON.parse(localStorage.getItem(FUTBIN_NOTFOUND_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  function futbinNotFoundSave(store) {
+    Object.keys(store).forEach(id => { if (Date.now() - store[id] > 86400000) delete store[id]; });
+    try { localStorage.setItem(FUTBIN_NOTFOUND_KEY, JSON.stringify(store)); } catch (_) { /* next time */ }
+  }
+  function futbinNotFoundAdd(id) {
+    const store = futbinNotFound();
+    store[id] = Date.now();
+    futbinNotFoundSave(store);
+  }
+  function mergeNotFound(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    const store = futbinNotFound();
+    let changed = false;
+    Object.entries(incoming).forEach(([id, at]) => { if (at > (store[id] || 0)) { store[id] = at; changed = true; } });
+    if (changed) futbinNotFoundSave(store);
+  }
   function metaRows(state) {
     const platform = state.platform;
-    return (getMeta().cards || []).filter(item => item.fb >= META_MIN_FB).map(item => {
+    const notFound = futbinNotFound();
+    return (getMeta().cards || []).filter(item => item.fb >= META_MIN_FB && !(Date.now() - (notFound[item.id] || 0) < 86400000)).map(item => {
       const live = futggPlatform === (platform === "pc" ? "pc" : "console") ? Number(futggPrices[String(item.id)]) : 0;
       const fb = futbinSalesFor({ id: item.id }, platform);
       // 24 h / 6 h from its own FUTBIN sales (median of the last 24 h vs the day before; last 8 h vs 24 h)
@@ -10796,15 +10821,41 @@ function priceWatchMain(SCRIPT_VERSION) {
       const low = Math.min(...known.map(point => point.value)) * 0.985;
       const high = Math.max(...known.map(point => point.value)) * 1.015;
       box.appendChild(el("div", "pt-fx-scale"));
-      known.forEach(point => {
-        const mark = el("div", `pt-fx-mark pt-fx-mark-${point.kind}${point.below ? " pt-fx-below" : ""}`);
-        mark.style.left = `${((point.value - low) / (high - low) * 100).toFixed(1)}%`;
-        mark.title = `${point.label}: ${money(point.value)}`;
+      const pos = point => (point.value - low) / (high - low) * 100;
+      // Labels closer than 11% on the same side would overlap (e.g. P90 454K next to normal 450K): their ticks
+      // stay, the texts become one label in the middle ("P90 / normal · 454K / 450K").
+      const clusters = [];
+      [false, true].forEach(below => {
+        known.filter(point => !!point.below === below).sort((a, b) => a.value - b.value).forEach(point => {
+          const last = clusters.length ? clusters[clusters.length - 1] : null;
+          if (last && last.below === below && pos(point) - pos(last.points[last.points.length - 1]) < 11) last.points.push(point);
+          else clusters.push({ below, points: [point] });
+        });
+      });
+      const addMark = (kind, below, left, label, value, title, showText, showTick) => {
+        const mark = el("div", `pt-fx-mark${kind ? ` pt-fx-mark-${kind}` : ""}${below ? " pt-fx-below" : ""}`);
+        mark.style.left = `${left.toFixed(1)}%`;
+        mark.title = title;
         const text = el("span", "pt-fx-mark-text");
-        text.append(el("small", "", point.label), el("b", "", flipShort(point.value)));
+        text.append(el("small", "", label), el("b", "", value));
+        if (!showText) text.style.visibility = "hidden";
         const tickLine = el("i");
-        if (point.below) mark.append(tickLine, text); else mark.append(text, tickLine);
+        if (!showTick) tickLine.style.visibility = "hidden";
+        if (below) mark.append(tickLine, text); else mark.append(text, tickLine);
         box.appendChild(mark);
+      };
+      clusters.forEach(cluster => {
+        const title = cluster.points.map(point => `${point.label}: ${money(point.value)}`).join(" · ");
+        if (cluster.points.length === 1) {
+          const point = cluster.points[0];
+          addMark(point.kind, point.below, pos(point), point.label, flipShort(point.value), title, true, true);
+          return;
+        }
+        cluster.points.forEach(point => addMark(point.kind, point.below, pos(point), point.label, flipShort(point.value), title, false, true));
+        const middle = cluster.points.reduce((sum, point) => sum + pos(point), 0) / cluster.points.length;
+        const sameKind = cluster.points.every(point => point.kind === cluster.points[0].kind) ? cluster.points[0].kind : "";
+        addMark(sameKind, cluster.below, Math.min(92, Math.max(8, middle)), cluster.points.map(point => point.label).join(" / "),
+          cluster.points.map(point => flipShort(point.value)).join(" / "), title, true, false);
       });
       return box;
     }

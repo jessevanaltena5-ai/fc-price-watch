@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.1
+// @version      2.91.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10408,6 +10408,9 @@ function priceWatchMain(SCRIPT_VERSION) {
         rarity: `${item.special ? L("Special", "Special") : L("Goud", "Gold")} · FB ${item.fb.toFixed(1)}` };
       return { card, calc: card.now > 0 ? momentumCalc(card, platform) : { buy: 0, sell: 0, profit: 0, pct: 0, gap: 1, warnings: [], status: "unk", risky: true, futbin: null } };
     })
+      // Not in FUT.GG's live price list = not tradeable (SBC / objective card): never a flip. Only once that list
+      // is loaded, and only where it is the source of "now" (PC).
+      .filter(row => !(platform === "pc" && futggPlatform === "pc" && futggPricesAt && Object.keys(futggPrices).length > 1000) || row.card.nowSrc === "index")
       .filter(row => !state.maxPrice || !(row.card.now > 0) || row.card.now <= state.maxPrice)
       .filter(row => !row.calc.futbin || row.calc.futbin.salesPerDay >= META_MIN_SALES)
       .sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.card.fbRating - a.card.fbRating);

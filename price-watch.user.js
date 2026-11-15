@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.2
+// @version      2.91.3
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4453,11 +4453,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
-  // "6" -> 6000, "10.5" -> 10500, "650" -> 650 (fodder prices are quoted in thousands).
+  // "6" -> 6000, "10.5" -> 10500 (small numbers are thousands); "650", "800" -> coins as they are.
   function fodderCoins(value) {
     const number = parseFloat(String(value).replace(",", "."));
-    if (!Number.isFinite(number)) return null;
-    return Math.round(number < 1000 ? number * 1000 : number);
+    if (!Number.isFinite(number) || number <= 0) return null;
+    return Math.round(number < 100 ? number * 1000 : number);
   }
 
   function parseFodderTip(text) {
@@ -4472,12 +4472,20 @@ function priceWatchMain(SCRIPT_VERSION) {
     lines.forEach(rawLine => {
       const match = rawLine.trim().match(/^(\d{2})\s*s?\b\s*[:\-–]?\s*(.*\d.*)$/i);
       if (!match) return;
+      // "88/89s easy at unc target": two ratings, no price -> skip (it used to read "89" as 89K)
+      if (!/^[<≤~]?\s*\d/.test(match[2].trim())) return;
       const rating = +match[1];
       if (rating < 45 || rating > 99 || ratings.some(entry => entry.rating === rating)) return;
       // "<10/10.5 / <10.5/11" -> columns ["<10/10.5", "<10.5/11"]
       const columns = match[2].split(/\s+\/\s+/).map(column => column.replace(/[<≤~k]/gi, "").trim()).filter(Boolean);
       if (!columns.length) return;
-      const column = columns[Math.min(header && platform === "pc" ? pcColumn : header ? 1 - pcColumn : 0, columns.length - 1)];
+      // Two columns without a header: a column marked "pc" is the PC price ("<2.3 / <2.2pc"); in a tip that
+      // says "both" elsewhere the order is console / PC.
+      const marked = columns.findIndex(text => /pc\s*$/i.test(text));
+      const columnIndex = header ? (platform === "pc" ? pcColumn : 1 - pcColumn)
+        : columns.length === 2 && marked >= 0 ? (platform === "pc" ? marked : 1 - marked)
+        : columns.length === 2 && perPlatformSlash ? (platform === "pc" ? 1 : 0) : 0;
+      const column = columns[Math.min(columnIndex, columns.length - 1)].replace(/\s*(pc|console|ps|xbox)\s*$/i, "");
       let values = column.split("/").map(fodderCoins).filter(Boolean);
       if (!values.length) return;
       // A tip that says "both" on some lines ("87s: 6.4k both") uses "a/b" for console/PC on the others

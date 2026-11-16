@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.7
+// @version      2.91.8
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -2928,6 +2928,17 @@ function priceWatchMain(SCRIPT_VERSION) {
         again.disabled = !!futbinManual;
         again.addEventListener("click", event => { event.stopPropagation(); futbinCheckNow(card, platform).then(() => { box.dataset.key = ""; }); });
         box.appendChild(again);
+      }
+      // The real sales page itself (same page the check read), to look at the sales yourself.
+      if (fb.path) {
+        const open = el("a", "pt-sc-more", L("↗ Open sales op FUTBIN", "↗ Open sales on FUTBIN"));
+        open.href = `https://www.futbin.com${fb.path}?platform=${futbinPlatform(platform)}`;
+        open.target = "_blank";
+        open.rel = "noopener noreferrer";
+        open.style.display = "inline-block";
+        open.style.textDecoration = "none";
+        open.addEventListener("click", event => event.stopPropagation());
+        box.appendChild(open);
       }
     }
     if (!box.isConnected) root.appendChild(box);

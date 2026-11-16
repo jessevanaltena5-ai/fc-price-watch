@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.8
+// @version      2.92.9
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14469,6 +14469,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   background-color: rgba(46, 170, 90, .38) !important; box-shadow: inset 0 0 0 2px #6be38f, inset 0 0 0 2000px rgba(46, 170, 90, .38) !important; }
 .pt-mb-binhot, li.pt-mb-binhot.listFUTItem, li.pt-mb-binhot.listFUTItem.selected, .pt-mb-binhot.selected {
   background-color: rgba(46, 170, 90, .2) !important; animation: pt-mb-binblink .8s ease-in-out infinite !important; }
+/* EA paints the selected row's inner .rowContent dark (rgb(21,29,41)), on top of the row: let the green through. */
+.pt-mb-bin > .rowContent, .pt-mb-binhot > .rowContent { background-color: transparent !important; }
 /* The blink runs on the shadow layer only (an animation beats EA's normal styles, not !important ones). */
 @keyframes pt-mb-binblink {
   0%, 100% { box-shadow: inset 0 0 0 3px #6be38f, inset 0 0 0 2000px rgba(46, 170, 90, .5); }

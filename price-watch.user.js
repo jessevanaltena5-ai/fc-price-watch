@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.6
+// @version      2.92.7
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4304,6 +4304,17 @@ function priceWatchMain(SCRIPT_VERSION) {
     };
   }
 
+  // Buy Now price of an active auction at or under the card's buy target (max). strong = 10%+ under.
+  const MASS_BIN_STRONG = 0.10;
+  function massBinDeal(item, info) {
+    const auction = auctionOf(item);
+    if (!auction || auction.tradeState !== "active" || !info || !(info.max > 0)) return null;
+    const price = Number(auction.buyNowPrice) || 0;
+    if (!(price > 0) || price > info.max) return null;
+    const under = Math.round((1 - price / info.max) * 100);
+    return { price, under, strong: price <= info.max * (1 - MASS_BIN_STRONG) };
+  }
+
   // Badges on auction rows (search results and Transfer Targets), kept current every second.
   const massBidCells = new Set();
   const massBidPanels = new Set();
@@ -4312,7 +4323,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
     if (!root) return;
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
-    root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow");
+    root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow", "pt-mb-bin", "pt-mb-binhot");
     const info = massBidInfo(item);
     if (!info || !auctionOf(item)) return;
     const badge = el("div", "pt-mb-badge");
@@ -4331,6 +4342,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     row.classList.toggle("pt-mb-over", !!(advice && advice.kind === "over"));
     row.classList.toggle("pt-mb-ok", !!(advice && advice.kind === "ok"));
     row.classList.toggle("pt-mb-highest", !!(advice && advice.kind === "highest"));
+    // Buy Now at or under the buy target: green row; 10%+ under: blinking green.
+    const bin = massBinDeal(badge.__ptItem, badge.__ptInfo);
+    row.classList.toggle("pt-mb-bin", !!bin && !bin.strong);
+    row.classList.toggle("pt-mb-binhot", !!bin && bin.strong);
     // FC27's grid shows cards as small tiles: there the badge is a compact strip with its own
     // background at the bottom of the tile, so it never runs over the card picture or EA's text.
     const width = row.offsetWidth;
@@ -4345,10 +4360,12 @@ function priceWatchMain(SCRIPT_VERSION) {
         : advice.kind === "ok" ? `✅ ${L("bied", "bid")} ${priceFormat.format(advice.bid)} · max ${priceFormat.format(badge.__ptInfo.max)}`
           : advice.text.replace(L("jij hoogste ", "you're highest "), L("hoogste ", "highest ")).replace(L("gewonnen voor ", "won for "), "").replace(L(" · verkoop ", " · sell "), " → ");
       badge.title = advice.text;
+      if (bin) badge.append(el("div", "pt-mb-binline", `⚡ BIN ${priceFormat.format(bin.price)} (−${bin.under}%)`));
       badge.append(el("div", "pt-mb-tile-main", short));
       if (advice.left != null) badge.append(el("div", "pt-mb-left", advice.left <= 0 ? L("loopt af", "ending") : L(`nog ${formatLeft(advice.left)}`, `${formatLeft(advice.left)} left`)));
       return;
     }
+    if (bin) badge.append(el("div", "pt-mb-binline", L(`⚡ Buy Now ${priceFormat.format(bin.price)} ≤ max ${priceFormat.format(badge.__ptInfo.max)} (${bin.under}% eronder)`, `⚡ Buy Now ${priceFormat.format(bin.price)} ≤ max ${priceFormat.format(badge.__ptInfo.max)} (${bin.under}% under)`)));
     badge.append(el("span", "", `🎯 ${advice.text}`));
     if (advice.left != null) {
       const endAt = auctionEnds.get((auctionOf(badge.__ptItem) || {}).tradeId);
@@ -14446,6 +14463,10 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-session-pill.pt-session-reload { background: #b86b00; font-size: 14px; padding: 8px 14px; animation: pt-mb-pulse 1s ease-in-out infinite; }
 .pt-session-pill.pt-session-late { background: #b3261e; }
 .pt-mb-hot { box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-pulse 1s ease-in-out infinite; }
+.pt-mb-bin, li.pt-mb-bin.listFUTItem { background-color: rgba(46, 170, 90, .38) !important; box-shadow: inset 0 0 0 2px #6be38f; }
+.pt-mb-binhot, li.pt-mb-binhot.listFUTItem { background-color: rgba(46, 170, 90, .55) !important; box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-binblink .8s ease-in-out infinite; }
+@keyframes pt-mb-binblink { 50% { background-color: rgba(46, 170, 90, .12); box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .3); } }
+.pt-mb-binline { color: #6be38f; font-weight: 800; }
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
 .pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }
 .pt-mb-panel.pt-mb-ok { border-left: 4px solid #6be38f; }

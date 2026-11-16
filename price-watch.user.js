@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.6
+// @version      2.91.7
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4047,6 +4047,32 @@ function priceWatchMain(SCRIPT_VERSION) {
     return pct > 0 && pct < 90 ? pct : MASS_BID_DEFAULT_PCT;
   }
 
+  // Flip-sheet run bar: the sell target. A FUTBIN check of this card (also one made after the list was built)
+  // beats the price stored in the list: P75 of real sales, lowered like in Flip when it sells slowly or the
+  // last 8 h are lower, and the market haircut. Without a check: the list's sell price (sheet/FUT.GG).
+  function runSellTarget(rule) {
+    const stored = rule.player.flipSell || 0;
+    const platform = getFlip().platform;
+    const fb = futbinSalesFor({ id: rule.player.definitionId }, platform);
+    if (!fb || !(fb.salesInBase >= 3)) {
+      return { sell: stored, src: L("flip sheet", "flip sheet"),
+        tip: L("Nog geen FUTBIN-check van deze kaart: verkoopprijs uit de flip sheet. Check FUTBIN voor de echte verkopen.", "No FUTBIN check of this card yet: sell price from the flip sheet. Check FUTBIN for the real sales.") };
+    }
+    const pr = futbinPrices(fb);
+    let sell = pr.sell;
+    const cut = marketHaircut(rule.max || sell, fb, platform);
+    if (cut < 0) sell = Math.min(sell, roundDownToStep(pr.p75 * (1 + cut)));
+    const minutes = Math.round((Date.now() - fb.fetchedAt) / 60000);
+    const src = sell < pr.p75 ? L("FUTBIN, voorzichtig", "FUTBIN, careful") : "FUTBIN P75";
+    const tip = [
+      L(`FUTBIN-verkopen, ${minutes} min geleden gecheckt:`, `FUTBIN sales, checked ${minutes} min ago:`),
+      L(`P75 ${priceFormat.format(pr.p75)} · mediaan ${priceFormat.format(roundDownToStep(pr.median))}`, `P75 ${priceFormat.format(pr.p75)} · median ${priceFormat.format(roundDownToStep(pr.median))}`),
+      sell < pr.p75 ? L(`Richtprijs lager dan P75 (${pr.reasons.length ? "verkoopt traag of laatste 8u lager" : "markt zakt"})`, `Target below P75 (${pr.reasons.length ? "sells slowly or last 8 h lower" : "market falling"})`) : "",
+      rule.max && pr.median ? L(`Snel weg op de mediaan: ${formatSigned(flipNet(roundDownToStep(pr.median), rule.max))}`, `Quick sale at the median: ${formatSigned(flipNet(roundDownToStep(pr.median), rule.max))}`) : ""
+    ].filter(Boolean).join("\n");
+    return { sell, src, tip };
+  }
+
   function massBidSell(player) {
     if (player.sell > 0) return player.sell;
     const entry = geniePrice(player.definitionId);
@@ -6353,11 +6379,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       );
     } else if (rule.player && list.flipSheet) {
       const bids = list.mode === "bid";
-      const sell = rule.player.flipSell || 0;
-      info.append(
-        el("div", "pt-run-title pt-run-big", ft(bids ? "run_bidTitle" : "run_binTitle", { name: rule.player.name, max: rule.max ? priceFormat.format(rule.max) : "—" })),
-        el("div", "pt-run-sub", ft("run_sub", { sell: sell ? priceFormat.format(sell) : "—", profit: sell && rule.max ? formatSigned(flipNet(sell, rule.max)) : "—", list: list.name, i: run.index + 1, n: rules.length }))
-      );
+      const target = runSellTarget(rule);
+      const sell = target.sell;
+      const net = sell && rule.max ? flipNet(sell, rule.max) : null;
+      const sub = el("div", "pt-run-sub", ft("run_sub", { sell: sell ? priceFormat.format(sell) : "—", src: target.src,
+        profit: net != null ? formatSigned(net) : "—", pct: net != null ? `${net >= 0 ? "+" : ""}${(net / rule.max * 100).toFixed(1).replace(".", uiLang() === "nl" ? "," : ".")}%` : "—",
+        list: list.name, i: run.index + 1, n: rules.length }));
+      if (target.tip) sub.title = target.tip;
+      info.append(el("div", "pt-run-title pt-run-big", ft(bids ? "run_bidTitle" : "run_binTitle", { name: rule.player.name, max: rule.max ? priceFormat.format(rule.max) : "—" })), sub);
       if (bids) info.appendChild(el("div", "pt-run-sub pt-mb-steps", ft("run_bidHint")));
     } else if (rule.player && list.massBid) {
       const sell = massBidSell(rule.player);
@@ -7814,7 +7843,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     bidRunStarted: ["Bied-run met {n} kaart(en) gestart · max. bod = koopprijs", "Bid run with {n} card(s) started · max bid = buy price"],
     run_bidTitle: ["🔨 {name} · max bod {max}", "🔨 {name} · max bid {max}"],
     run_binTitle: ["{name} · max BIN {max}", "{name} · max BIN {max}"],
-    run_sub: ["verkoop {sell} → {profit} na 5% · {list} · {i}/{n}", "sell {sell} → {profit} after 5% · {list} · {i}/{n}"],
+    run_sub: ["🎯 verkoop {sell} ({src}) → {profit} winst ({pct}) na belasting · {list} · {i}/{n}", "🎯 sell {sell} ({src}) → {profit} profit ({pct}) after tax · {list} · {i}/{n}"],
     run_bidHint: ["Zoek → bied tot je max op veilingen die bijna aflopen. In Transfer Targets staat bij elke kaart je max.", "Search → bid up to your max on auctions ending soon. Transfer Targets shows your max on every card."],
     mb_flipLine: ["Verkoop {sell} (Flip) · max = je Flip-koopprijs", "Sell {sell} (Flip) · max = your Flip buy price"],
     playersTitle: ["Zet de aangevinkte kaarten op de Spelers-tab, met de koopprijs als doel", "Puts the ticked cards on the Players tab, with the buy price as target"],

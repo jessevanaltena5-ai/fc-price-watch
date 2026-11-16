@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.3
+// @version      2.91.4
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1056,7 +1056,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   function mergeShared(data) {
     if (!data || typeof data !== "object") return;
     if (data.fb) syncFutbinFromRelay(data.fb);
+    if (data.mk && typeof data.mk === "object") mergeMarketIndex(data.mk); // newest FUTBIN index of any pc
     if (data.mk && data.mk.br) mergeBreadth(data.mk.br);
+    if (data.ma) mergeMarketShared(data.ma); // "falling hard" state + which market pushes were sent
     if (data.sl) mergeSignalLog(data.sl);
     if (data.fc) mergeCalibration(data.fc);
     if (data.dev) mergeDevices(data.dev);
@@ -1120,7 +1122,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (remote) mergeShared(JSON.parse(remote));
       } catch (_) { /* first push, or GitHub busy: send what we have */ }
       const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(),
-        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), nf: futbinNotFound(), v: SCRIPT_VERSION || "" };
+        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), nf: futbinNotFound(), ma: marketForRelay(), v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
@@ -1210,13 +1212,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (data.cr && typeof data.cr === "object") listPatch.pcClubRise = data.cr;
       if (data.bm && typeof data.bm === "object") writeJson(BOUGHT_KEY, { ...data.bm, ...readJson(BOUGHT_KEY, {}) });
       if (data.h && typeof data.h === "object") syncFlipHistory(data.h); // flip price history of the pc
-      if (data.mk && typeof data.mk === "object" && !pcDevice()) { // market index of the pc
-        const local = getMarket();
-        const merged = { ...local };
-        ["pc", "ps"].forEach(key => { if (data.mk[key] && (!local[key] || local[key].at < data.mk[key].at)) merged[key] = data.mk[key]; });
-        saveMarket(merged);
-      }
-      mergeShared(data); // FUTBIN checks, breadth, signal logs, fodder calibration of all pcs
+      mergeShared(data); // also the market index of the pc (newest wins) // FUTBIN checks, breadth, signal logs, fodder calibration of all pcs
       listPatch.pcFb = data.fb ? Object.keys(data.fb).length : -1; // -1: the pc doesn't send them (older version)
       listPatch.pcVersion = data.v || "";
       if (data.fs && syncFlipSettings(data.fs)) {
@@ -7120,6 +7116,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const points = sbcPointCosts();
     const middle = [84, 85, 86, 87, 88].map(rating => points.per1k[rating]).filter(v => v > 0);
     const bestPer1k = middle.length >= 3 ? fbMedian(middle) : points.best ? points.per1k[points.best] : 0;
+    const marketFall = marketFalling(getFlip().platform); // same rule as the "falling hard" push: no BUY now
     return fodderRatings().map(rating => {
       const trade = fodderTrade(rating, level);
       if (!trade) return null;
@@ -7132,14 +7129,17 @@ function priceWatchMain(SCRIPT_VERSION) {
       let kind = "maybe";
       // profit is now on the realistic sell price: 4%+ after tax is a buy, under 3% not worth it
       if ((perPoint != null && perPoint > 0.3) || profitPct < 0.03 || (dip && dip.value >= 0.05)) kind = "skip";
-      else if (dip && dip.value <= -trade.threshold && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.04 && level !== "bad" && !weakHistory) kind = "buy";
-      return { rating, trade, perPoint, profitPct, dip, backtest, weakHistory, kind };
+      else if (dip && dip.value <= -trade.threshold && (perPoint == null || perPoint <= 0.3) && profitPct >= 0.04 && level !== "bad" && !weakHistory) kind = marketFall ? "maybe" : "buy";
+      const heldByMarket = !!marketFall && kind === "maybe" && dip && dip.value <= -trade.threshold && profitPct >= 0.04 && level !== "bad" && !weakHistory && (perPoint == null || perPoint <= 0.3);
+      return { rating, trade, perPoint, profitPct, dip, backtest, weakHistory, kind, marketFall: heldByMarket ? marketFall : null };
     }).filter(Boolean).sort((a, b) => ({ buy: 0, maybe: 1, skip: 2 })[a.kind] - ({ buy: 0, maybe: 1, skip: 2 })[b.kind]
       || (a.perPoint == null ? 9 : a.perPoint) - (b.perPoint == null ? 9 : b.perPoint));
   }
   function fgWhy(item) {
     const pct = value => `${value > 0 ? "+" : ""}${(value * 100).toFixed(1)}%`;
     const lines = [];
+    if (item.marketFall) lines.push(L(`Zou KOPEN zijn, maar de hele markt zakt hard (${pct(item.marketFall.worst)} in 6u): wacht tot hij draait`,
+      `Would be BUY, but the whole market is falling hard (${pct(item.marketFall.worst)} in 6h): wait until it turns`));
     if (item.dip && (item.dip.kind === "fb" || item.dip.kind === "fbday")) {
       const ref = item.dip.ref;
       const what = ref.byCheapest ? L("goedkoopste kaart", "cheapest card") : L("gem. 10 goedkoopste", "avg of 10 cheapest");
@@ -9436,7 +9436,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!parsed.pc && !parsed.ps) throw new Error(L("geen index gevonden op de FUTBIN-pagina", "no index found on the FUTBIN page"));
       saveMarket({ ...current, ...parsed });
       marketError = "";
-      marketAlert(getFlip().platform);
+      marketAlert(getFlip().platform).catch(() => {});
       listeners.forEach(listener => listener());
       return true;
     } catch (error) {
@@ -9475,6 +9475,84 @@ function priceWatchMain(SCRIPT_VERSION) {
     return { now, at: set.at, ch6: change(at(6)), ch24: change(at(24)), ch72: change(live[0][1]), vsWeek: weekAvg ? now / weekAvg - 1 : null,
       s6: smooth(6), s24: smooth(24) };
   }
+  // "Market falling hard" (one rule for the push, Flip, Meta, fodder and the night dip): the smoothed 6 h
+  // change of the index is −3% or worse. It holds for 6 h after the last such reading, so it doesn't flip
+  // back and forth, and ends earlier when the index is up again over 6 h or the turn is confirmed.
+  // Shared via the gist ("ma"), so every pc and the phone say the same.
+  const MARKET_FALL_6H = -0.03;
+  const MARKET_FALL_HOLD_MS = 6 * 3600000;
+  const MARKET_FALL_KEY = "pt_market_fall_v1"; // { pc|ps: { at, s6 } } last reading at or under −3%
+  function marketFallStore() {
+    try { return JSON.parse(localStorage.getItem(MARKET_FALL_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  const marketFallCache = {};
+  function marketFalling(platform, now = Date.now()) {
+    const key = futbinPlatform(platform);
+    const stamp = `${(getMarket()[key] || {}).at || 0}|${(marketFallStore()[key] || {}).at || 0}|${Math.floor(now / 60000)}`;
+    const hit = marketFallCache[key];
+    if (hit && hit.stamp === stamp) return hit.value;
+    const value = marketFallingNow(key, platform, now);
+    marketFallCache[key] = { stamp: `${(getMarket()[key] || {}).at || 0}|${(marketFallStore()[key] || {}).at || 0}|${Math.floor(now / 60000)}`, value };
+    return value;
+  }
+  function marketFallingNow(key, platform, now) {
+    const mk = marketStats(platform);
+    const store = marketFallStore();
+    if (mk && mk.s6 != null && mk.s6 <= MARKET_FALL_6H) {
+      const last = store[key];
+      if (!last || now - last.at > 60000 || mk.s6 < last.s6) {
+        store[key] = { at: now, s6: Math.round(mk.s6 * 1000) / 1000 };
+        try { localStorage.setItem(MARKET_FALL_KEY, JSON.stringify(store)); } catch (_) { /* memory only */ }
+      }
+      return { s6: mk.s6, worst: mk.s6, since: now, live: true };
+    }
+    const last = store[key];
+    if (!last || now - last.at >= MARKET_FALL_HOLD_MS) return null;
+    if (mk && mk.s6 != null && mk.s6 >= 0) return null; // up again over 6 h
+    if (marketTurn(platform).level === "confirmed") return null;
+    return { s6: mk ? mk.s6 : null, worst: last.s6, since: last.at, live: false };
+  }
+  function mergeMarketShared(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    if (incoming.fall && typeof incoming.fall === "object") {
+      const store = marketFallStore();
+      let changed = false;
+      ["pc", "ps"].forEach(key => {
+        const theirs = incoming.fall[key];
+        if (theirs && theirs.at > ((store[key] || {}).at || 0)) { store[key] = theirs; changed = true; }
+      });
+      if (changed) { try { localStorage.setItem(MARKET_FALL_KEY, JSON.stringify(store)); } catch (_) { /* next pull */ } }
+    }
+    if (incoming.alert && typeof incoming.alert === "object") {
+      let mine = {};
+      try { mine = JSON.parse(localStorage.getItem(MARKET_ALERT_KEY) || "{}") || {}; } catch (_) { mine = {}; }
+      const theirs = incoming.alert;
+      const merged = { ...mine };
+      if ((theirs.fallAt || 0) > (mine.fallAt || 0)) merged.fallAt = theirs.fallAt;
+      if ((theirs.turnAt || 0) > (mine.turnAt || 0)) { merged.turnAt = theirs.turnAt; merged.lowT = theirs.lowT; }
+      if (merged.fallAt !== mine.fallAt || merged.turnAt !== mine.turnAt) {
+        try { localStorage.setItem(MARKET_ALERT_KEY, JSON.stringify(merged)); } catch (_) { /* next pull */ }
+      }
+    }
+  }
+  // The FUTBIN index itself: the newest fetch wins (one pc fetches, the others and the phone use it).
+  function mergeMarketIndex(incoming) {
+    if (!incoming || typeof incoming !== "object") return;
+    const local = getMarket();
+    const merged = { ...local };
+    let changed = false;
+    ["pc", "ps"].forEach(key => {
+      const theirs = incoming[key];
+      if (theirs && Array.isArray(theirs.live) && theirs.at > 0 && (!local[key] || !(local[key].at >= theirs.at))) { merged[key] = theirs; changed = true; }
+    });
+    if (changed) saveMarket(merged);
+  }
+  function marketForRelay() {
+    let alert = {};
+    try { alert = JSON.parse(localStorage.getItem(MARKET_ALERT_KEY) || "{}") || {}; } catch (_) { alert = {}; }
+    return { fall: marketFallStore(), alert };
+  }
+
   // A card's own dip vs the market: whole-market drops and a market still falling make it risky.
   const MARKET_CRASH = -0.05; // smoothed 24 h change of the FUTBIN index
   // FUT calendar in UK time: promos drop Friday 18:00, TOTW Wednesday 18:00, rewards Thursday.
@@ -9561,10 +9639,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       return true;
     }
     // Review (night trading): a normal night is lower than the evening before, so compare with the same hours
-    // yesterday (s24); only a sharp drop within 6 h (−4%) counts on its own.
-    if ((mk.s24 != null && mk.s24 <= -0.02) || (mk.s6 != null && mk.s6 <= -0.04)) {
-      const yday = mk.s24 != null && mk.s24 <= -0.02;
-      warnings.push(ft(yday ? "w_marketFallingYday" : "w_marketFalling", { pct: flipPct((yday ? mk.s24 : mk.s6) * 100, 1) }));
+    // yesterday (s24); a sharp drop within 6 h counts on its own: the same rule as the "falling hard" push.
+    const fall = marketFalling(platform);
+    if ((mk.s24 != null && mk.s24 <= -0.02) || fall) {
+      const yday = !fall && mk.s24 != null && mk.s24 <= -0.02;
+      warnings.push(ft(yday ? "w_marketFallingYday" : "w_marketFalling", { pct: flipPct((yday ? mk.s24 : fall.worst) * 100, 1) }));
       return true;
     }
     return false;
@@ -9667,14 +9746,19 @@ function priceWatchMain(SCRIPT_VERSION) {
     const stored = (() => { try { return JSON.parse(localStorage.getItem(MARKET_ALERT_KEY) || "{}") || {}; } catch (_) { return {}; } })();
     const drop = low[1] / peak - 1;
     const up = mk.now / low[1] - 1;
-    const fall = mk.s6 != null && mk.s6 <= -0.03 && now - (stored.fallAt || 0) > 12 * 3600000;
+    const fall = mk.s6 != null && mk.s6 <= MARKET_FALL_6H && now - (stored.fallAt || 0) > 12 * 3600000;
     const turnState = marketTurn(platform);
     const turnLow = turnState.index ? turnState.index.lowT : low[0];
     const turn = turnState.level === "confirmed" && turnLow !== stored.lowT && now - (stored.turnAt || 0) > 12 * 3600000;
     return { mk, drop, up, low: [turnLow, low[1]], fall, turn, stored, turnState };
   }
-  function marketAlert(platform) {
+  async function marketAlert(platform) {
     if (!pcDevice()) return;
+    marketFalling(platform); // remember a −3% reading for Flip, fodder and the gist
+    const first = marketAlertState(platform);
+    if (!first || (!first.fall && !first.turn)) return;
+    // Two pcs: read the gist first, so a push another pc already sent isn't sent again.
+    try { await pcPullShared(true); } catch (_) { /* send anyway */ }
     const state = marketAlertState(platform);
     if (!state || (!state.fall && !state.turn)) return;
     const { mk, drop, up, low, stored } = state;
@@ -9692,8 +9776,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       Object.assign(stored, { turnAt: Date.now(), lowT: low[0] });
     } else {
       title = L("📉 Markt zakt hard", "📉 Market falling hard");
-      text = L(`Index 100 (${name}) ${pct(mk.s6)} in 6 uur (gemiddeld over 2u, nu ${mk.now.toFixed(1)}). Niet bijkopen; verkopen kan nog.`,
-        `Index 100 (${name}) ${pct(mk.s6)} in 6 hours (2 h average, now ${mk.now.toFixed(1)}). Don't buy more; you can still sell.`);
+      text = L(`Index 100 (${name}) ${pct(mk.s6)} in 6 uur (gemiddeld over 2u, nu ${mk.now.toFixed(1)}). Niet bijkopen; verkopen kan nog. Flip en fodder geven tot de draai geen KOPEN.`,
+        `Index 100 (${name}) ${pct(mk.s6)} in 6 hours (2 h average, now ${mk.now.toFixed(1)}). Don't buy more; you can still sell. Flip and fodder show no BUY until the turn.`);
       stored.fallAt = Date.now();
     }
     try { localStorage.setItem(MARKET_ALERT_KEY, JSON.stringify(stored)); } catch (_) { /* may repeat once */ }
@@ -9709,7 +9793,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const br = turn.breadth;
     const tail = (br ? L(` · ${Math.round(br.up * 100)}% stijgt`, ` · ${Math.round(br.up * 100)}% rising`) : "")
       + (turn.level === "confirmed" ? L(" · 📈 draai bevestigd", " · 📈 turn confirmed") : turn.level === "possible" ? L(" · 🔄 mogelijke draai", " · 🔄 possible turn")
-        : marketCrash(platform) ? L(" · 📉 crash", " · 📉 crash") : "");
+        : marketCrash(platform) ? L(" · 📉 crash", " · 📉 crash") : marketFalling(platform) ? L(" · 📉 zakt hard", " · 📉 falling hard") : "");
     return L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(mk.ch24)} · 6u ${p(mk.ch6)}${tail}`,
       `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(mk.ch24)} · 6h ${p(mk.ch6)}${tail}`);
   }
@@ -9948,7 +10032,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (fb.trend != null && fb.trend < -0.03) return null;
     if (futbinYoung(fb) || (fb.h72 && fb.h72.state === "downLong")) return null;
     const mk = marketStats(platform);
-    if (!mk || mk.s24 == null || mk.s24 <= -0.02 || marketCrash(platform)) return null;
+    if (!mk || mk.s24 == null || mk.s24 <= -0.02 || marketCrash(platform) || marketFalling(platform, now)) return null;
     const bounce = indexBouncedYesterday(platform, now);
     if (bounce == null || bounce < 0.015) return null;
     const entry = dayPriceStore()[`${card.id}|${futbinPlatform(platform)}`];
@@ -11175,6 +11259,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         ? (set ? ft("mStatus", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), unk: count("unk"), time: formatTime(set.at) }) : "")
         : (data ? ft("statusData", { platform: state.platform === "pc" ? "PC" : "Console", n: shown.length, buy: count("buy"), near: count("near"), risk: count("risk"), time: formatTime(data.fetchedAt) }) : "");
       const crashNow = marketCrash(state.platform);
+      const fallNow = marketFalling(state.platform);
       const turnNow = marketTurn(state.platform).level;
       let verdict;
       let tone;
@@ -11184,6 +11269,10 @@ function priceWatchMain(SCRIPT_VERSION) {
           : errorNow ? ft("statusFailed", { error: errorNow }) : meta ? L("Nog geen meta-lijst", "No meta list yet") : momentum ? ft("mEmpty") : ft("statusEmpty");
         tone = loadingNow ? "info" : "bad";
       } else if (crashNow) { verdict = L("📉 Markt crasht — niets kopen, wacht op de draai", "📉 Market is crashing — buy nothing, wait for the turn"); tone = "bad"; }
+      else if (fallNow) {
+        verdict = L(`📉 Markt zakt hard (${flipPct(fallNow.worst * 100, 1)} in 6u) — niets bijkopen, verkopen kan nog`, `📉 Market falling hard (${flipPct(fallNow.worst * 100, 1)} in 6h) — don't buy more, you can still sell`);
+        tone = "bad";
+      }
       else if (count("buy")) {
         verdict = L(`🟢 ${count("buy")} om te kopen`, `🟢 ${count("buy")} to buy`) + (turnNow === "confirmed" ? L(" · 📈 de markt draait", " · 📈 the market is turning") : "");
         tone = "good";

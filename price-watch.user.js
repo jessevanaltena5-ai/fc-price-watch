@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.7
+// @version      2.92.8
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14463,9 +14463,16 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-session-pill.pt-session-reload { background: #b86b00; font-size: 14px; padding: 8px 14px; animation: pt-mb-pulse 1s ease-in-out infinite; }
 .pt-session-pill.pt-session-late { background: #b3261e; }
 .pt-mb-hot { box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-pulse 1s ease-in-out infinite; }
-.pt-mb-bin, li.pt-mb-bin.listFUTItem { background-color: rgba(46, 170, 90, .38) !important; box-shadow: inset 0 0 0 2px #6be38f; }
-.pt-mb-binhot, li.pt-mb-binhot.listFUTItem { background-color: rgba(46, 170, 90, .55) !important; box-shadow: inset 0 0 0 3px #6be38f; animation: pt-mb-binblink .8s ease-in-out infinite; }
-@keyframes pt-mb-binblink { 50% { background-color: rgba(46, 170, 90, .12); box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .3); } }
+/* Green is an inset shadow layer (drawn over any background), so it also shows on EA's selected row
+   (with one search result that row is always selected). */
+.pt-mb-bin, li.pt-mb-bin.listFUTItem, li.pt-mb-bin.listFUTItem.selected, .pt-mb-bin.selected {
+  background-color: rgba(46, 170, 90, .38) !important; box-shadow: inset 0 0 0 2px #6be38f, inset 0 0 0 2000px rgba(46, 170, 90, .38) !important; }
+.pt-mb-binhot, li.pt-mb-binhot.listFUTItem, li.pt-mb-binhot.listFUTItem.selected, .pt-mb-binhot.selected {
+  background-color: rgba(46, 170, 90, .2) !important; animation: pt-mb-binblink .8s ease-in-out infinite !important; }
+/* The blink runs on the shadow layer only (an animation beats EA's normal styles, not !important ones). */
+@keyframes pt-mb-binblink {
+  0%, 100% { box-shadow: inset 0 0 0 3px #6be38f, inset 0 0 0 2000px rgba(46, 170, 90, .5); }
+  50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .3), inset 0 0 0 2000px rgba(46, 170, 90, 0); } }
 .pt-mb-binline { color: #6be38f; font-weight: 800; }
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
 .pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }

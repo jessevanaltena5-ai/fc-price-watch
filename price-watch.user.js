@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.9
+// @version      3.0.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4324,7 +4324,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!root) return;
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
     root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow", "pt-mb-bin", "pt-mb-binhot");
-    const info = massBidInfo(item);
+    const info = massBidInfo(item) || runBinInfo(item);
     if (!info || !auctionOf(item)) return;
     const badge = el("div", "pt-mb-badge");
     badge.__ptItem = item;
@@ -4335,7 +4335,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     drawMassBidBadge(badge);
   }
 
+  // Plain Buy Now run (not a bid list): the card of the current step, with that step's max BIN. EA's filter
+  // already keeps every result under the max, so these rows only blink when the Buy Now is 10%+ under it.
+  function runBinInfo(item) {
+    if (!run || !item || !item.definitionId) return null;
+    const list = getStock().find(entry => entry.id === run.listId);
+    if (!list || list.massBid || list.mode === "bid") return null;
+    const rule = stockRules(list)[run.index];
+    if (!rule || !rule.player || !(rule.max > 0)) return null;
+    const ids = new Set([item.definitionId, item.resourceId].filter(Boolean));
+    if (!ids.has(rule.player.definitionId)) return null;
+    return { binOnly: true, max: rule.max, list, player: rule.player };
+  }
+
   function drawMassBidBadge(badge) {
+    if (badge.__ptInfo.binOnly) return drawRunBinBadge(badge);
     const advice = massBidAdvice(badge.__ptItem, badge.__ptInfo);
     const row = badge.__ptRow;
     row.classList.toggle("pt-mb-hot", !!(advice && advice.hot));
@@ -4371,6 +4385,23 @@ function priceWatchMain(SCRIPT_VERSION) {
       const endAt = auctionEnds.get((auctionOf(badge.__ptItem) || {}).tradeId);
       badge.append(el("span", "pt-mb-left", ` · ${advice.left <= 0 ? L("loopt af", "ending") : formatLeft(advice.left)}${endAt && advice.left > 0 ? L(` (eindigt ${formatTime(endAt)})`, ` (ends ${formatTime(endAt)})`) : ""}`));
     }
+  }
+
+  function drawRunBinBadge(badge) {
+    const row = badge.__ptRow;
+    const info = runBinInfo(badge.__ptItem); // again every second: the run may have moved on or stopped
+    const bin = info ? massBinDeal(badge.__ptItem, info) : null;
+    const hot = !!bin && bin.strong;
+    // 👀 no-max runs show the whole market, so there "at/under the buy price" is worth a steady green too.
+    const green = !!bin && !hot && !!info.list.noMax;
+    row.classList.toggle("pt-mb-binhot", hot);
+    row.classList.toggle("pt-mb-bin", green);
+    badge.textContent = "";
+    badge.className = "pt-mb-badge";
+    badge.style.display = hot || green ? "" : "none";
+    if (green) badge.append(el("div", "pt-mb-binline", L(`✅ Buy Now ${priceFormat.format(bin.price)} ≤ koopprijs ${priceFormat.format(info.max)}`, `✅ Buy Now ${priceFormat.format(bin.price)} ≤ buy price ${priceFormat.format(info.max)}`)));
+    const target = info && info.list.noMax ? L("je koopprijs", "your buy price") : L("je max", "your max");
+    if (hot) badge.append(el("div", "pt-mb-binline", L(`⚡ Buy Now ${priceFormat.format(bin.price)} · ${bin.under}% onder ${target} ${priceFormat.format(info.max)}`, `⚡ Buy Now ${priceFormat.format(bin.price)} · ${bin.under}% under ${target} ${priceFormat.format(info.max)}`)));
   }
 
   window.setInterval(() => {
@@ -6111,8 +6142,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       criteria.club = rule.club.teamId;
       criteria.level = SearchLevel[rule.level.toUpperCase()];
     }
-    if (rule.max) {
-      // Fodder cycles in bid mode filter on max bid; BIN mode filters on max buy now.
+    if (rule.max && !list.noMax) {
+      // Fodder cycles in bid mode filter on max bid; BIN mode filters on max buy now. 👀 lists: no max at all.
       if (rule.player && list.mode === "bid") criteria.maxBid = rule.max;
       else criteria.maxBuy = rule.max;
     }
@@ -6416,7 +6447,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         profit: net != null ? formatSigned(net) : "—", pct: net != null ? `${net >= 0 ? "+" : ""}${(net / rule.max * 100).toFixed(1).replace(".", uiLang() === "nl" ? "," : ".")}%` : "—",
         list: list.name, i: run.index + 1, n: rules.length }));
       if (target.tip) sub.title = target.tip;
-      info.append(el("div", "pt-run-title pt-run-big", ft(bids ? "run_bidTitle" : "run_binTitle", { name: rule.player.name, max: rule.max ? priceFormat.format(rule.max) : "—" })), sub);
+      info.append(el("div", "pt-run-title pt-run-big", ft(bids ? "run_bidTitle" : list.noMax ? "run_lookTitle" : "run_binTitle", { name: rule.player.name, max: rule.max ? priceFormat.format(rule.max) : "—" })), sub);
       if (bids) info.appendChild(el("div", "pt-run-sub pt-mb-steps", ft("run_bidHint")));
     } else if (rule.player && list.massBid) {
       const sell = massBidSell(rule.player);
@@ -7785,6 +7816,8 @@ function priceWatchMain(SCRIPT_VERSION) {
   // (massBid.flip), so EA's search results, Transfer Targets and the bid panel show per card what you
   // may bid at most ("✅ bied X (max Y)", "❌ > max", "🟢 jij hoogste", "🏆 gewonnen").
   const FLIP_BID_ID = "flip-bids";
+  // 👀 No max: the ticked cards without max BIN/bid in the filter; rows show green at/under the buy price.
+  const FLIP_LOOK_ID = "flip-look";
 
   function getFlip() {
     let state = null;
@@ -7890,6 +7923,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     sel_none: ["Niets", "Nothing"],
     bidsTitle: ["Loop de aangevinkte kaarten één voor één af om te bieden: per kaart het marktfilter met max. bod = je koopprijs. De balk staat bovenin met de max. bod, en in de zoekresultaten en Transfer Targets staat bij elke kaart hoeveel je nog mag bieden. Bieden doe je zelf.", "Go through the ticked cards one by one to bid: a market filter per card with max bid = your buy price. The bar sits on top with the max bid, and search results and Transfer Targets show per card how much you may still bid. You place the bids yourself."],
     bidRunStarted: ["Bied-run met {n} kaart(en) gestart · max. bod = koopprijs", "Bid run with {n} card(s) started · max bid = buy price"],
+    look: ["👀 Zonder max ({n})", "👀 No max ({n})"],
+    lookTitle: ["Loop de aangevinkte kaarten af zonder max BIN of max bod: je ziet de hele markt van die kaart. Regels met Buy Now op of onder je koopprijs worden groen, 10% of meer eronder knippert. Kopen doe je zelf.", "Go through the ticked cards without max BIN or max bid: you see that card's whole market. Rows with Buy Now at or under your buy price turn green, 10% or more under blinks. You buy yourself."],
+    lookRunStarted: ["Run zonder max met {n} kaart(en) gestart · groen = op/onder koopprijs", "No-max run with {n} card(s) started · green = at/under buy price"],
+    run_lookTitle: ["👀 {name} · koopprijs {max} (geen filter)", "👀 {name} · buy price {max} (no filter)"],
     run_bidTitle: ["🔨 {name} · max bod {max}", "🔨 {name} · max bid {max}"],
     run_binTitle: ["{name} · max BIN {max}", "{name} · max BIN {max}"],
     run_sub: ["🎯 verkoop {sell} ({src}) → {profit} winst ({pct}) na belasting · {list} · {i}/{n}", "🎯 sell {sell} ({src}) → {profit} profit ({pct}) after tax · {list} · {i}/{n}"],
@@ -10787,6 +10824,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     });
     const runButton = button("", "pt-cycle-btn");
     const bidButton = button("", "pt-cycle-btn");
+    const lookButton = button("", "pt-cycle-btn");
     const watchButton = button("");
     const settingsButton = button("⚙");
     const helpButton = button("?");
@@ -10836,20 +10874,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     futbinButton.className = "pt-fx-cover";
     runButton.className = "pt-fx-btn pt-fx-primary";
     bidButton.className = "pt-fx-btn";
+    lookButton.className = "pt-fx-btn";
     [recheckButton, watchButton].forEach(item => { item.className = "pt-fx-btn pt-fx-btn-sm"; });
     [refresh, alertButton, settingsButton, helpButton].forEach(item => { item.className = "pt-fx-icon"; });
     langButton.className = "pt-fx-icon pt-fx-lang";
     dealsBox.className = "pt-fx-toggle";
     selectMenu.className = "pt-fx-select pt-flip-select";
     const row1 = el("div", "pt-fx-row");
-    row1.append(el("span", "pt-fx-title", "Flip"), sourceSeg.box, platformSeg.box, filterInput, futbinButton, runButton, bidButton);
+    row1.append(el("span", "pt-fx-title", "Flip"), sourceSeg.box, platformSeg.box, filterInput, futbinButton, runButton, bidButton, lookButton);
     const row2 = el("div", "pt-fx-row pt-fx-row2");
     status.className = "pt-watch-status pt-fx-status";
     row2.append(sortSeg.box, dealsBox, selectMenu, recheckButton, watchButton, el("span", "pt-fx-spacer"), refresh, alertButton, settingsButton, helpButton, langButton);
     // Phone: one compact first row (title, source, platform, search); the action buttons slide in row 2.
     // The FUTBIN chip gets its own full-width line there (at the end of the sliding row it fell off the screen).
     const rowFb = el("div", "pt-fx-row pt-fx-rowfb");
-    if (IS_PHONE) { row2.prepend(runButton, bidButton); rowFb.appendChild(futbinButton); }
+    if (IS_PHONE) { row2.prepend(runButton, bidButton, lookButton); rowFb.appendChild(futbinButton); }
     toolbar.append(row1, ...(IS_PHONE ? [rowFb] : []), row2, status);
     card.appendChild(toolbar);
 
@@ -10936,6 +10975,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       recheckButton.title = ft("recheckTitle");
       runButton.title = ft("runTitle");
       bidButton.title = ft("bidsTitle");
+      lookButton.title = ft("lookTitle");
       watchButton.title = ft("playersTitle");
       settingsButton.title = ft("settingsTitle");
       helpButton.title = ft("helpTitle");
@@ -11047,21 +11087,22 @@ function priceWatchMain(SCRIPT_VERSION) {
     // Only cards with a buy price (a momentum card without FUTBIN check has none) go into a run/list.
     const selectedRows = () => shown.filter(row => isTicked(row) && row.calc.buy > 0);
     // Run maken (max BIN = buy price) or 🔨 Check bids (max bid = buy price, bar on top, badges per card).
-    const startFlipRun = async (bids, trigger) => {
+    // look = 👀 no max: same cards and buy prices, but the market filter has no max BIN/bid (rows are coloured).
+    const startFlipRun = async (bids, trigger, look) => {
       const rows = selectedRows();
       if (!rows.length) return showToast(ft("tickFirst"), false);
       trigger.disabled = true;
       try {
         const players = await flipPlayers(rows);
         const state = getFlip();
-        const id = bids ? FLIP_BID_ID : FLIP_RUN_ID;
+        const id = bids ? FLIP_BID_ID : look ? FLIP_LOOK_ID : FLIP_RUN_ID;
         const stock = getStock();
         const index = stock.findIndex(item => item.id === id);
         if (index >= 0) stock.splice(index, 1);
         const list = {
           id,
           type: "players",
-          name: `${bids ? "🔨 Flip bids" : "Flip sheet"}${state.source === "futgg" ? " FUT.GG" : state.source === "meta" ? " Meta" : ""} ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
+          name: `${bids ? "🔨 Flip bids" : look ? "👀 Flip" : "Flip sheet"}${state.source === "futgg" ? " FUT.GG" : state.source === "meta" ? " Meta" : ""} ${state.platform === "pc" ? "PC" : "console"} ${formatTime(Date.now())}`,
           createdAt: Date.now(),
           profit: null,
           windows: [],
@@ -11074,17 +11115,19 @@ function priceWatchMain(SCRIPT_VERSION) {
           list.massBid = { pct: 0, flip: true };
           players.forEach(player => { player.sell = player.flipSell || 0; });
         }
+        if (look) list.noMax = true;
         stock.unshift(list);
         saveStock();
         await startRun(id);
         if (bids && runBar) runBar.classList.add("pt-run-top");
-        showToast(ft(bids ? "bidRunStarted" : "runStarted", { n: players.length }), true);
+        showToast(ft(bids ? "bidRunStarted" : look ? "lookRunStarted" : "runStarted", { n: players.length }), true);
       } finally {
         trigger.disabled = false;
       }
     };
     runButton.addEventListener("click", () => startFlipRun(false, runButton));
     bidButton.addEventListener("click", () => startFlipRun(true, bidButton));
+    lookButton.addEventListener("click", () => startFlipRun(false, lookButton, true));
     watchButton.addEventListener("click", async () => {
       const rows = selectedRows();
       if (!rows.length) return showToast(ft("tickFirst"), false);
@@ -11611,6 +11654,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       recheckButton.textContent = ft("recheck", { n: Math.min(tickedAll, FUTBIN_BATCH_MAX) });
 
       bidButton.textContent = ft("bids", { n: count });
+      lookButton.textContent = ft("look", { n: count });
       watchButton.textContent = ft("players", { n: count });
     }
 

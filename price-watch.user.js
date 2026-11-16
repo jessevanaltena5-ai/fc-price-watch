@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.5
+// @version      2.92.6
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4074,7 +4074,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const cut = marketHaircut(rule.max || sell, fb, platform);
     if (cut < 0) sell = Math.min(sell, roundDownToStep(pr.p75 * (1 + cut)));
     const minutes = Math.round((Date.now() - fb.fetchedAt) / 60000);
-    const src = sell < pr.p75 ? L("FUTBIN, voorzichtig", "FUTBIN, careful") : "FUTBIN P75";
+    const sales24 = Number(fb.sales24) || 0;
+    const src = (sell < pr.p75 ? L("FUTBIN, voorzichtig", "FUTBIN, careful") : "FUTBIN P75") +
+      L(` · ${sales24} verkocht in 24u`, ` · ${sales24} sold in 24h`);
     const tip = [
       L(`FUTBIN-verkopen, ${minutes} min geleden gecheckt:`, `FUTBIN sales, checked ${minutes} min ago:`),
       L(`P75 ${priceFormat.format(pr.p75)} · mediaan ${priceFormat.format(roundDownToStep(pr.median))}`, `P75 ${priceFormat.format(pr.p75)} · median ${priceFormat.format(roundDownToStep(pr.median))}`),

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.4
+// @version      2.91.5
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9400,8 +9400,34 @@ function priceWatchMain(SCRIPT_VERSION) {
   const MARKET_REFRESH_MS = 30 * 60 * 1000;
   let marketLoading = false;
   let marketError = "";
+  // FUTBIN's live index has short spikes (16 Nov: 71 → 92 for an hour at 02:29 UK, 101 for half an hour at
+  // 06:29, then back to 72–77) that made a false "falling hard −6.3%" and "+18.6% in 6h". A point more than
+  // 8% away from the median of the points within 2 h around it (at least 5 of them) doesn't count. Real moves
+  // are gradual: a lasting jump keeps its points once the 2 h around it have moved too.
+  const MARKET_SPIKE = 0.08;
+  function despikeIndex(live) {
+    if (!Array.isArray(live) || live.length < 6) return live;
+    const span = 2 * 3600000;
+    return live.filter(([t, v], i) => {
+      const around = [];
+      for (let j = i - 1; j >= 0 && t - live[j][0] <= span; j--) around.push(live[j][1]);
+      for (let j = i + 1; j < live.length && live[j][0] - t <= span; j++) around.push(live[j][1]);
+      if (around.length < 5) return true;
+      around.sort((a, b) => a - b);
+      const mid = around.length % 2 ? around[(around.length - 1) / 2] : (around[around.length / 2 - 1] + around[around.length / 2]) / 2;
+      return Math.abs(v / mid - 1) <= MARKET_SPIKE;
+    });
+  }
+  let marketReadCache = null; // { raw, value }: the despiked copy of the stored index
   function getMarket() {
-    try { return JSON.parse(localStorage.getItem(FB_INDEX_KEY) || "{}") || {}; } catch (_) { return {}; }
+    let raw = "{}";
+    try { raw = localStorage.getItem(FB_INDEX_KEY) || "{}"; } catch (_) { raw = "{}"; }
+    if (marketReadCache && marketReadCache.raw === raw) return JSON.parse(JSON.stringify(marketReadCache.value));
+    let value = {};
+    try { value = JSON.parse(raw) || {}; } catch (_) { value = {}; }
+    ["pc", "ps"].forEach(key => { if (value[key] && Array.isArray(value[key].live)) value[key] = { ...value[key], live: despikeIndex(value[key].live) }; });
+    marketReadCache = { raw, value };
+    return JSON.parse(JSON.stringify(value));
   }
   function saveMarket(value) {
     try { localStorage.setItem(FB_INDEX_KEY, JSON.stringify(value)); } catch (_) { /* next fetch */ }

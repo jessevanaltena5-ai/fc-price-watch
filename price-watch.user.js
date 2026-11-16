@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.3
+// @version      2.92.5
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -7862,6 +7862,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     sel_title: ["Vink in één keer een groep kaarten aan (van wat nu in de tabel staat). Daarna kun je losse vinkjes nog aanpassen.", "Tick a group of cards at once (of what is in the table now). You can still change single ticks afterwards."],
     sel_headTitle: ["Alles aan / alles uit", "All on / all off"],
     sel_default: ["Standaard (🟢/🟡)", "Default (🟢/🟡)"],
+    sel_snipe: ["Snipe-run: 🟢/🟡 + ⚪ zonder waarschuwing", "Snipe run: 🟢/🟡 + ⚪ without warning"],
     sel_deals: ["🟢/🟡/🟠", "🟢/🟡/🟠"],
     sel_profit: ["Alles met winst (geen ⛔)", "Everything with profit (no ⛔)"],
     sel_top10: ["Top 10 score", "Top 10 score"],
@@ -9254,10 +9255,26 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!match || FUTBIN_MONTHS[match[1]] == null) return 0;
     let hour = Number(match[3]) % 12;
     if (match[5].toUpperCase() === "PM") hour += 12;
-    const now = new Date();
-    const date = new Date(now.getFullYear(), FUTBIN_MONTHS[match[1]], Number(match[2]), hour, Number(match[4]));
-    if (date.getTime() > now.getTime() + 2 * 86400000) date.setFullYear(date.getFullYear() - 1);
-    return date.getTime();
+    // FUTBIN's sales table is in UK time (Europe/London), not the browser's: convert to a real timestamp.
+    const now = Date.now();
+    let year = new Date(now).getUTCFullYear();
+    let at = londonWallClock(year, FUTBIN_MONTHS[match[1]], Number(match[2]), hour, Number(match[4]));
+    if (at > now + 2 * 86400000) at = londonWallClock(--year, FUTBIN_MONTHS[match[1]], Number(match[2]), hour, Number(match[4]));
+    return at;
+  }
+  let londonOffsetFormat = null;
+  function londonOffsetMs(t) {
+    try {
+      if (!londonOffsetFormat) londonOffsetFormat = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric" });
+      const p = {};
+      londonOffsetFormat.formatToParts(new Date(t)).forEach(part => { p[part.type] = Number(part.value); });
+      return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute) - Math.floor(t / 60000) * 60000;
+    } catch (_) { return 0; }
+  }
+  function londonWallClock(year, month, day, hour, minute) {
+    const guess = Date.UTC(year, month, day, hour, minute);
+    const first = guess - londonOffsetMs(guess);
+    return guess - londonOffsetMs(first);
   }
 
   function futbinPct(sorted, p) {
@@ -10761,7 +10778,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     });
     const controls = el("div", "pt-stock-list-buttons");
     // Tick many cards at once (instead of one by one): presets for the shown rows.
-    const SELECTIONS = ["default", "deals", "profit", "top10", "top20", "all", "none"];
+    const SELECTIONS = ["default", "snipe", "deals", "profit", "top10", "top20", "all", "none"];
     const selectMenu = el("select", "pt-stock-select pt-mode-select pt-flip-select");
     selectMenu.append(new Option(ft("sel_placeholder"), ""), ...SELECTIONS.map(key => new Option(ft(`sel_${key}`), key)));
     selectMenu.addEventListener("change", () => {
@@ -10945,6 +10962,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           pick = row => best.includes(row);
         } else {
           pick = {
+            snipe: row => ["buy", "near"].includes(row.calc.status) || (row.calc.status === "wait" && !row.calc.risky && row.calc.buy > 0),
             deals: row => ["buy", "near", "risk"].includes(row.calc.status),
             profit: row => row.calc.status !== "skip" && row.calc.buy > 0,
             all: () => true,

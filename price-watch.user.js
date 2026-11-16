@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.0
+// @version      2.92.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -7216,6 +7216,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // a FUTBIN check comes in): the open one is remembered by its title. A tap anywhere else closes it.
   // On the phone the box is placed across the screen (it used to run off the right edge).
   const fgOpenInfos = new Set();
+  const fgOpenHelps = new Set(); // "?" explanations tapped open inside an ⓘ (kept across redraws)
   function fgPlaceTip(info) {
     const tip = info.querySelector(".pt-fgs-tip");
     if (!tip) return;
@@ -7229,7 +7230,24 @@ function priceWatchMain(SCRIPT_VERSION) {
     const info = el("span", "pt-fgs-i", "i");
     const tip = el("div", "pt-fgs-tip");
     tip.appendChild(el("b", "", title));
-    lines.forEach(line => tip.appendChild(el("div", "", `• ${line}`)));
+    lines.forEach(line => {
+      if (!line || typeof line !== "object") { tip.appendChild(el("div", "", `• ${line}`)); return; }
+      const row = el("div", "pt-fgs-help-row", `• ${line.text} `);
+      row.title = line.help;
+      const key = `${title}|${line.key || line.text.slice(0, 12)}`;
+      const q = el("button", "pt-fgs-q", "?");
+      q.type = "button";
+      q.title = line.help;
+      const help = el("div", "pt-fgs-help", line.help);
+      help.hidden = !fgOpenHelps.has(key);
+      q.addEventListener("click", event => {
+        event.stopPropagation();
+        help.hidden = !help.hidden;
+        if (help.hidden) fgOpenHelps.delete(key); else fgOpenHelps.add(key);
+      });
+      row.append(q, help);
+      tip.appendChild(row);
+    });
     info.appendChild(tip);
     if (fgOpenInfos.has(title)) {
       info.classList.add("pt-fgs-open");
@@ -8366,7 +8384,16 @@ function priceWatchMain(SCRIPT_VERSION) {
       const mean = done.reduce((sum, entry) => sum + (entry[field] / entry.p0 - 1), 0) / done.length;
       return ` · ${field.slice(1)}${L("u", "h")} ${flipPct(mean * 100, 1)} (${done.length})`;
     };
-    return L(`📒 ${log.length} signalen`, `📒 ${log.length} signals`) + avg("p6") + avg("p24") + avg("p72");
+    const text = L(`📒 ${log.length} signalen`, `📒 ${log.length} signals`) + avg("p6") + avg("p24") + avg("p72");
+    const fodder = log.filter(entry => entry.src === "fodderSbc").length;
+    const help = [
+      L("Elke keer dat het script 🟢 KOPEN zei, schrijft het de prijs op. 6, 24 en 72 uur later kijkt het opnieuw: is de kaart duurder geworden?", "Every time the script said 🟢 BUY, it writes down the price. 6, 24 and 72 hours later it looks again: did the card get more expensive?"),
+      L(`${log.length} = zoveel keer zei het KOPEN (laatste 5 dagen). Fodder (84–88): ${fodder} · flips: ${log.length - fodder}.`, `${log.length} = that many times it said BUY (last 5 days). Fodder (84–88): ${fodder} · flips: ${log.length - fodder}.`),
+      L("6u +10% = 6 uur later was de prijs gemiddeld 10% hoger. Plus = de tips waren goed, min = slecht.", "6h +10% = 6 hours later the price was 10% higher on average. Plus = the tips were good, minus = bad."),
+      L("Het getal tussen haakjes = hoe vaak al gemeten. Minder dan ±20 = nog toeval, niet op vertrouwen.", "The number in brackets = how often it was measured so far. Fewer than ~20 = still luck, don't trust it yet."),
+      L("Let op: de 5% belasting zit er nog niet af. Je echte winst is dus ongeveer 5% lager.", "Note: the 5% tax isn't taken off yet. Your real profit is about 5% lower.")
+    ].join("\n");
+    return { text, help, key: "signals" };
   }
 
   // Icon per signal; the texts are st_<status> (long) and sts_<status> (short) in FLIP_TEXT.
@@ -9917,8 +9944,21 @@ function priceWatchMain(SCRIPT_VERSION) {
     const tail = (br ? L(` · ${Math.round(br.up * 100)}% stijgt`, ` · ${Math.round(br.up * 100)}% rising`) : "")
       + (turn.level === "confirmed" ? L(" · 📈 draai bevestigd", " · 📈 turn confirmed") : turn.level === "possible" ? L(" · 🔄 mogelijke draai", " · 🔄 possible turn")
         : marketCrash(platform) ? L(" · 📉 crash", " · 📉 crash") : marketFalling(platform) ? L(" · 📉 zakt hard", " · 📉 falling hard") : "");
-    return L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(mk.ch24)} · 6u ${p(mk.ch6)}${tail}`,
-      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(mk.ch24)} · 6h ${p(mk.ch6)}${tail}`);
+    // The smoothed changes (2 h averages), the same numbers the "falling hard" bar uses; a single point when
+    // the history is too short for the average.
+    const c6 = mk.s6 != null ? mk.s6 : mk.ch6;
+    const c24 = mk.s24 != null ? mk.s24 : mk.ch24;
+    const text = L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(c24)} · 6u ${p(c6)}${tail}`,
+      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(c24)} · 6h ${p(c6)}${tail}`);
+    const help = [
+      L("Eén getal voor álle kaartprijzen samen (de FUTBIN-index). Een soort beurs van FC.", "One number for ALL card prices together (the FUTBIN index). A kind of stock market for FC."),
+      L("6u / 24u = hoeveel goedkoper (−) of duurder (+) alles is dan 6 of 24 uur geleden. Het neemt steeds het gemiddelde van 2 uur, zodat één rare uitschieter niet telt.", "6h / 24h = how much cheaper (−) or more expensive (+) everything is than 6 or 24 hours ago. It always takes a 2-hour average, so one odd spike doesn't count."),
+      br ? L(`${Math.round(br.up * 100)}% stijgt = van de kaarten in je lijst gaat ${Math.round(br.up * 100)}% omhoog. Meer dan de helft = goed teken.`, `${Math.round(br.up * 100)}% rising = ${Math.round(br.up * 100)}% of the cards in your list go up. More than half = good sign.`) : "",
+      L("📉 zakt hard = in 6 uur 3% of meer omlaag. Dan niet kopen: morgen is het waarschijnlijk goedkoper. Verkopen mag wel.", "📉 falling hard = down 3% or more in 6 hours. Then don't buy: it's probably cheaper tomorrow. Selling is fine."),
+      L("📈 draai bevestigd = de markt gaat weer omhoog: dan mag je weer kopen.", "📈 turn confirmed = the market is going up again: you can buy again."),
+      L("Je pc haalt dit elke 30 minuten op (alleen als de web app daar open staat).", "Your pc fetches this every 30 minutes (only while the web app is open there).")
+    ].filter(Boolean).join("\n");
+    return { text, help, key: "market" };
   }
 
   // --- 72 h of real FUTBIN sales, from the same sales page (no extra request) -------------------------
@@ -14181,6 +14221,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-fgs-tip { display: none; position: absolute; z-index: 20; top: 24px; right: -6px; width: 260px; background: #0b1220; border: 1px solid rgba(148, 178, 230, .35); border-radius: 10px; padding: 10px 12px; font-size: 12px; font-weight: 400; line-height: 1.5; color: #dfe7f2; text-align: left; box-shadow: 0 10px 30px rgba(0, 0, 0, .5); cursor: default; }
 .pt-fgs-tip b { display: block; color: #27d98b; margin-bottom: 2px; }
 .pt-fgs-i:hover .pt-fgs-tip, .pt-fgs-i.pt-fgs-open .pt-fgs-tip { display: block; }
+.pt-fgs-q { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; padding: 0; margin-left: 2px; border-radius: 50%; border: 1px solid rgba(99, 179, 255, .6); background: transparent; color: #63b3ff; font-size: 10.5px; font-weight: 700; line-height: 1; cursor: pointer; vertical-align: middle; }
+.pt-fgs-help-row { cursor: help; }
+.pt-fgs-help { margin: 4px 0 6px 10px; padding: 6px 8px; border-left: 2px solid #63b3ff; background: rgba(99, 179, 255, .08); border-radius: 4px; white-space: pre-line; color: #dfe7f2; }
 .pt-fgs-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 12px; }
 .pt-watch-view button.pt-fgs-go:not(:disabled) { background: #1fa463; border-color: #1fa463; color: #fff; }
 .pt-fgs-details { margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(148, 178, 230, .12); }

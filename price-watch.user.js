@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.5
+// @version      2.91.6
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1009,7 +1009,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
   function mergeBreadth(incoming) {
     if (!incoming || typeof incoming !== "object") return;
-    const all = getMarket();
+    const all = getMarketRaw();
     const br = { ...(all.br || {}) };
     let changed = false;
     ["pc", "ps"].forEach(key => {
@@ -1121,7 +1121,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const remote = await relayCall("pull", { gistId: relay.gistId, file: RELAY_FILE });
         if (remote) mergeShared(JSON.parse(remote));
       } catch (_) { /* first push, or GitHub busy: send what we have */ }
-      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarket(),
+      const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarketRaw(),
         sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), nf: futbinNotFound(), ma: marketForRelay(), v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
@@ -9418,7 +9418,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       return Math.abs(v / mid - 1) <= MARKET_SPIKE;
     });
   }
-  let marketReadCache = null; // { raw, value }: the despiked copy of the stored index
+  // The stored index as FUTBIN gave it: for read-modify-write and the gist (despiking stored data again and
+  // again would eat normal points next to a spike).
+  function getMarketRaw() {
+    try { return JSON.parse(localStorage.getItem(FB_INDEX_KEY) || "{}") || {}; } catch (_) { return {}; }
+  }
+  let marketReadCache = null; // { raw, value }: the despiked copy of the stored index (read only)
   function getMarket() {
     let raw = "{}";
     try { raw = localStorage.getItem(FB_INDEX_KEY) || "{}"; } catch (_) { raw = "{}"; }
@@ -9454,13 +9459,16 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
   async function loadMarket(force) {
     if (!pcDevice() || marketLoading || Date.now() < futbinAutoPause) return false;
-    const current = getMarket();
-    if (!force && current.pc && Date.now() - current.pc.at < MARKET_REFRESH_MS) return false;
+    const current = getMarketRaw();
+    // 2.91.5 wrote the despiked index back and ate normal points: fetch the full index once.
+    const heal = !localStorage.getItem("pt_fbindex_heal_v1");
+    if (!force && !heal && current.pc && Date.now() - current.pc.at < MARKET_REFRESH_MS) return false;
     marketLoading = true;
     try {
       const parsed = marketParse(await futbinHtml(MARKET_URL));
       if (!parsed.pc && !parsed.ps) throw new Error(L("geen index gevonden op de FUTBIN-pagina", "no index found on the FUTBIN page"));
       saveMarket({ ...current, ...parsed });
+      if (heal) { try { localStorage.setItem("pt_fbindex_heal_v1", "1"); } catch (_) { /* next time */ } }
       marketError = "";
       marketAlert(getFlip().platform).catch(() => {});
       listeners.forEach(listener => listener());
@@ -9534,7 +9542,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     const last = store[key];
     if (!last || now - last.at >= MARKET_FALL_HOLD_MS) return null;
-    if (mk && mk.s6 != null && mk.s6 >= 0) return null; // up again over 6 h
+    if (!mk || mk.s6 == null || mk.s6 >= 0) return null; // up again over 6 h, or not known now: no old alarm
     if (marketTurn(platform).level === "confirmed") return null;
     return { s6: mk ? mk.s6 : null, worst: last.s6, since: last.at, live: false };
   }
@@ -9564,7 +9572,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // The FUTBIN index itself: the newest fetch wins (one pc fetches, the others and the phone use it).
   function mergeMarketIndex(incoming) {
     if (!incoming || typeof incoming !== "object") return;
-    const local = getMarket();
+    const local = getMarketRaw();
     const merged = { ...local };
     let changed = false;
     ["pc", "ps"].forEach(key => {
@@ -9686,7 +9694,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const m6 = cards.map(card => card.m6).filter(value => value != null && Number.isFinite(value)).sort((a, b) => a - b);
     if (m6.length < 50) return;
     const key = futbinPlatform(platform);
-    const all = getMarket();
+    const all = getMarketRaw();
     const br = { ...(all.br || {}) };
     const now = Date.now();
     const list = (br[key] || []).filter(point => now - point[0] < 72 * 3600000);

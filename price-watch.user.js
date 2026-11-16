@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.92.2
+// @version      2.92.3
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9950,8 +9950,14 @@ function priceWatchMain(SCRIPT_VERSION) {
     // the history is too short for the average.
     const c6 = mk.s6 != null ? mk.s6 : mk.ch6;
     const c24 = mk.s24 != null ? mk.s24 : mk.ch24;
-    const text = L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(c24)} · 6u ${p(c6)}${tail}`,
-      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(c24)} · 6h ${p(c6)}${tail}`);
+    // When the index was fetched and when the pc fetches it next (every 30 min, only with the web app open).
+    const nextAt = mk.at + MARKET_REFRESH_MS;
+    const fetched = pcDevice() && getFlip().autoFutbin
+      ? L(` · opgehaald ${formatTime(mk.at)}, volgende ${nextAt <= Date.now() + 60000 ? "zo meteen" : "±" + formatTime(nextAt)}`,
+        ` · fetched ${formatTime(mk.at)}, next ${nextAt <= Date.now() + 60000 ? "any minute" : "±" + formatTime(nextAt)}`)
+      : L(` · opgehaald ${formatTime(mk.at)} (door je pc, elke 30 min)`, ` · fetched ${formatTime(mk.at)} (by your pc, every 30 min)`);
+    const text = L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(c24)} · 6u ${p(c6)}${tail}${fetched}`,
+      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(c24)} · 6h ${p(c6)}${tail}${fetched}`);
     const help = [
       L("Eén getal voor álle kaartprijzen samen (de FUTBIN-index). Een soort beurs van FC.", "One number for ALL card prices together (the FUTBIN index). A kind of stock market for FC."),
       L("6u / 24u = hoeveel goedkoper (−) of duurder (+) alles is dan 6 of 24 uur geleden. Het neemt steeds het gemiddelde van 2 uur, zodat één rare uitschieter niet telt.", "6h / 24h = how much cheaper (−) or more expensive (+) everything is than 6 or 24 hours ago. It always takes a 2-hour average, so one odd spike doesn't count."),

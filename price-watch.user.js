@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.8
+// @version      2.91.9
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9581,10 +9581,36 @@ function priceWatchMain(SCRIPT_VERSION) {
       return { s6: mk.s6, worst: mk.s6, since: now, live: true };
     }
     const last = store[key];
-    if (!last || now - last.at >= MARKET_FALL_HOLD_MS) return null;
+    if (!last || last.ended || now - last.at >= MARKET_FALL_HOLD_MS) return null;
     if (!mk || mk.s6 == null || mk.s6 >= 0) return null; // up again over 6 h, or not known now: no old alarm
+    // 16 Nov: a −6.5% reading of 10:28 came back at 15:30 when the 6 h change dipped to −1.8%, after it had
+    // been +4.7% in between. Once the index was up over 6 h after the last hard-fall reading, that alarm is
+    // over for good (marked "ended", also in the gist, so another device doesn't bring it back).
+    if (marketUpSince(key, last.at)) {
+      store[key] = { ...last, ended: now };
+      try { localStorage.setItem(MARKET_FALL_KEY, JSON.stringify(store)); } catch (_) { /* memory only */ }
+      return null;
+    }
     if (marketTurn(platform).level === "confirmed") return null;
     return { s6: mk ? mk.s6 : null, worst: last.s6, since: last.at, live: false };
+  }
+  // Was the smoothed 6 h change (as in marketStats) 0 or higher at any 15-min step after `since`?
+  function marketUpSince(key, since) {
+    const set = getMarket()[key];
+    const live = set && set.live;
+    if (!live || live.length < 6) return false;
+    const mean = (from, to) => {
+      const values = live.filter(([x]) => x > from && x <= to).map(p => p[1]);
+      return values.length >= 3 ? values.reduce((a, b) => a + b, 0) / values.length : null;
+    };
+    const end = live[live.length - 1][0];
+    for (let t = since + 900000; t <= end; t += 900000) {
+      if (live[0][0] > t - 8 * 3600000 + 900000) continue; // the 2 h six hours earlier not covered
+      const recent = mean(t - 2 * 3600000, t);
+      const before = mean(t - 8 * 3600000, t - 6 * 3600000);
+      if (recent && before && recent / before - 1 >= 0) return true;
+    }
+    return false;
   }
   function mergeMarketShared(incoming) {
     if (!incoming || typeof incoming !== "object") return;
@@ -9593,7 +9619,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       let changed = false;
       ["pc", "ps"].forEach(key => {
         const theirs = incoming.fall[key];
-        if (theirs && theirs.at > ((store[key] || {}).at || 0)) { store[key] = theirs; changed = true; }
+        const mine = store[key] || {};
+        if (theirs && theirs.at > (mine.at || 0)) { store[key] = theirs; changed = true; }
+        else if (theirs && theirs.at === mine.at && theirs.ended && !mine.ended) { store[key] = { ...mine, ended: theirs.ended }; changed = true; }
       });
       if (changed) { try { localStorage.setItem(MARKET_FALL_KEY, JSON.stringify(store)); } catch (_) { /* next pull */ } }
     }
@@ -11344,7 +11372,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         tone = loadingNow ? "info" : "bad";
       } else if (crashNow) { verdict = L("📉 Markt crasht — niets kopen, wacht op de draai", "📉 Market is crashing — buy nothing, wait for the turn"); tone = "bad"; }
       else if (fallNow) {
-        verdict = L(`📉 Markt zakt hard (${flipPct(fallNow.worst * 100, 1)} in 6u) — niets bijkopen, verkopen kan nog`, `📉 Market falling hard (${flipPct(fallNow.worst * 100, 1)} in 6h) — don't buy more, you can still sell`);
+        const nowPart = !fallNow.live && fallNow.s6 != null ? L(`, nu ${flipPct(fallNow.s6 * 100, 1)}`, `, now ${flipPct(fallNow.s6 * 100, 1)}`) : "";
+        verdict = L(`📉 Markt zakt hard (${flipPct(fallNow.worst * 100, 1)} in 6u${nowPart}) — niets bijkopen, verkopen kan nog`, `📉 Market falling hard (${flipPct(fallNow.worst * 100, 1)} in 6h${nowPart}) — don't buy more, you can still sell`);
         tone = "bad";
       }
       else if (count("buy")) {

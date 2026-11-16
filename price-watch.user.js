@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      2.91.9
+// @version      2.92.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9308,6 +9308,25 @@ function priceWatchMain(SCRIPT_VERSION) {
   // --- Sales check: real FUTBIN sales as buy / realistic sell / profit, per-period table, conclusion and
   // "Bought for". Used in Flip → Sales and next to a card in the web app (transfer market, list, club).
   const scBought = new Map(); // card id → purchase price typed in (this session)
+  // The newest auctions FUTBIN showed at the check (same as its sales page): time, price, Buy Now / bid.
+  function recentSalesTable(last) {
+    const table = el("table", "pt-sc-table pt-sc-recent");
+    const headRow = el("tr");
+    [L("Recente verkopen", "Recent sales"), L("Prijs", "Price"), ""].forEach(text => headRow.appendChild(el("th", "", text)));
+    table.appendChild(headRow);
+    const today = new Date().toDateString();
+    last.filter(([, price]) => price > 0).forEach(([minute, price, kind]) => {
+      const at = minute * 60000;
+      const day = new Date(at).toDateString() === today ? "" : `${new Date(at).toLocaleDateString(uiLang() === "nl" ? "nl-NL" : "en-GB", { weekday: "short" })} `;
+      const tr = el("tr");
+      tr.append(el("td", "", `${day}${formatTime(at)}`),
+        el("td", "", priceFormat.format(price)),
+        el("td", "", kind === 2 ? L("bod", "bid") : kind === 1 ? "BIN" : ""));
+      table.appendChild(tr);
+    });
+    return table;
+  }
+
   function salesCheckBlock(fb, opts = {}) {
     const box = el("div", "pt-sc");
     const pr = futbinPrices(fb);
@@ -9381,6 +9400,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     } else {
       box.appendChild(el("div", "pt-sc-muted", L("De volledige tabel komt bij de volgende gewone verversing.", "The full table comes with the next normal refresh.")));
     }
+
+    if (Array.isArray(fb.last) && fb.last.length) box.appendChild(recentSalesTable(fb.last));
 
     const verdict = el("div", "pt-sc-verdict");
     const say = (cls, text) => verdict.appendChild(el("div", cls, text));
@@ -10048,6 +10069,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       drift: recent.sales >= 4 && base.median ? recent.median / base.median - 1 : null,
       newest,
       h72: futbinHistory72(doc, platform, rows, now),
+      // Newest 15 sales (sold only) for "Recent sales": [minute, price, 1 BIN / 2 bid / 0].
+      last: rows.filter(row => row.sold > 0).sort((a, b) => b.at - a.at).slice(0, 15)
+        .map(row => [Math.round(row.at / 60000), row.sold, row.type === "bin" ? 1 : row.type === "bid" ? 2 : 0]),
       dayParts: futbinDayParts(rows)
     };
   }
@@ -14816,6 +14840,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-sc-table td { text-align: right; padding: 4px 5px; border-bottom: 1px solid rgba(148, 178, 230, .08); white-space: nowrap; }
 .pt-sc-table th:first-child, .pt-sc-table td:first-child { text-align: left; color: #8d9aae; }
 .pt-sc-table tr.pt-sc-hl td { background: rgba(243, 201, 105, .07); }
+.pt-sc-recent { margin-top: 8px; }
 .pt-sc-table td.pt-sc-bad { color: #f4a35d; font-weight: 700; }
 .pt-sc-verdict { display: grid; gap: 3px; margin-top: 8px; }
 .pt-sc-warn { color: #f4a35d; } .pt-sc-ok { color: #27d98b; } .pt-sc-info { color: #c9d3e0; } .pt-sc-muted { color: #8d9aae; font-size: 12px; }

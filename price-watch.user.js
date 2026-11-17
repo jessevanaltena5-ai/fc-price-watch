@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.0
+// @version      3.5.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8233,7 +8233,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_marketFalling: ["De markt zakt nu nog ({pct} in 6u): wacht tot hij draait", "The market is still falling ({pct} in 6h): wait until it turns"],
     w_marketFallingYday: ["De markt staat {pct} onder gisteren rond deze tijd: wacht tot hij draait", "The market is {pct} below yesterday at this time: wait until it turns"],
     w_nightDip: ["🌙 Nachtdip: {pct} onder zijn dagprijs van gisteren ({day}). Koop ≤ {buy}; zet hem vanaf 09:00 te koop voor {day}", "🌙 Night dip: {pct} under yesterday's day price ({day}). Buy ≤ {buy}; list from 09:00 (UK 08:00) at {day}"],
-    w_clockContent: ["Content om 19:00: nieuwe packs kunnen alles 10–20% laten zakken — koop na 19:30", "Content at 18:00 UK: new packs can drop everything 10–20% — buy after 18:30 UK"],
+    w_clockContent: ["Content om 19:00: gemiddeld zakt het ±1%, bij grote store packs soms 10–20% — koop na 19:30", "Content at 18:00 UK: on average prices dip ±1%, with big store packs sometimes 10–20% — buy after 18:30 UK"],
     w_clockRewards: ["Beloningen net binnen (do/zo ±09:00): de prijs zakt het eerste uur meestal nog — koop vanaf 10:00", "Rewards just dropped (Thu/Sun ±08:00 UK): prices usually keep falling the first hour — buy from 09:00 UK"],
     w_bigPromo: ["⚠️ {name} komt eraan: {effect}. Liever niet nu inkopen", "⚠️ {name} is coming: {effect}. Better not to buy now"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
@@ -10051,6 +10051,26 @@ function priceWatchMain(SCRIPT_VERSION) {
     const dayEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][u.day];
     if ([6, 0, 1, 2].includes(u.day)) { nl += ` · ${dayNl}: goedkope dag`; en += ` · ${dayEn}: cheap day`; }
     else if (u.day === 3 || u.day === 4) { nl += ` · ${dayNl}: dure dag`; en += ` · ${dayEn}: dear day`; }
+    else { nl += ` · ${dayNl}`; en += ` · ${dayEn}`; }
+    // Fodder 84-88 week plan from FUTBIN's own daily fodder prices (fbFodderWeekdays: each day vs the 7 days
+    // around it, 4+ weeks). Checked 17 Nov on 8 weeks: cheapest Sat/Sun, dearest Tue/Wed, weekend → Wednesday
+    // won after tax in 6-7 of 8 weeks (about +8%), one week −6 to −10%.
+    let fodderTitle = "";
+    try {
+      const fm = fbFodderMarket();
+      const wk = fm && fm.weekdays;
+      if (wk && wk.todayKind === "cheap") { nl += " · fodder inkopen"; en += " · buy fodder"; }
+      else if (wk && wk.todayKind === "dear") { nl += " · fodder verkopen"; en += " · sell fodder"; }
+      if (wk) {
+        const now = fm.value != null ? flipPct(fm.value * 100, 1) : "";
+        fodderTitle = L(`🧱 Fodder 84–88: meestal goedkoopst op ${wk.cheap.map(weekdayName).join(" en ")}, duurst op ${wk.dear.map(weekdayName).join(" en ")} (FUTBIN-dagprijzen).${now ? ` Nu ${now} t.o.v. zijn week.` : ""} In het weekend kopen en di/wo verkopen gaf in 6–7 van de 8 weken winst na tax (±8%), één week −6 tot −10%.`,
+          `🧱 Fodder 84–88: usually cheapest on ${wk.cheap.map(weekdayName).join(" and ")}, dearest on ${wk.dear.map(weekdayName).join(" and ")} (FUTBIN daily prices).${now ? ` Now ${now} vs its week.` : ""} Buying at the weekend and selling Tue/Wed won after tax in 6–7 of 8 weeks (±8%), one week −6 to −10%.`);
+      }
+    } catch (_) { /* no fodder data yet */ }
+    // Icons (FUTBIN market timing, icons/heroes 100K+, 30 days): dearest Friday +2.0% (Weekend League starts),
+    // cheapest Sunday −1.5% and Monday −1.2%. Small next to the 5% tax: for timing, not for flipping on its own.
+    if (u.day === 5) { nl += " · iconen verkopen"; en += " · sell icons"; }
+    else if (u.day === 0 || u.day === 1) { nl += " · iconen inkopen"; en += " · buy icons"; }
     const promo = bigPromoNear(t);
     if (promo && promo.drop) {
       const day = new Date(promo.at).toLocaleDateString(flipLang() === "en" ? "en-GB" : "nl-NL", { weekday: "short", day: "numeric", month: "short" });
@@ -10061,9 +10081,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       L("Wanneer kopen en te koop zetten (FUTBIN-data, jouw tijd):", "When to buy and list (FUTBIN data, your time):"),
       L(`🛒 ${at(18.5)}–${at(23)} goedkoopste uren: speciale kaarten ±2% onder het daggemiddelde, gewone kaarten ±4%`, `🛒 ${at(18.5)}–${at(23)} cheapest hours: special cards ±2% under the day's average, base cards ±4%`),
       L(`🟢 ${at(5)}–${at(9)} duurste uren: ±2% boven het gemiddelde (gewone kaarten ±5%) — goed om te koop te zetten`, `🟢 ${at(5)}–${at(9)} dearest hours: ±2% above the average (base cards ±5%) — good to list`),
-      L(`🔴 ${at(18)} nieuwe content: packs kunnen alles 10–20% laten zakken — koop pas na ${at(18.5)}`, `🔴 ${at(18)} new content: packs can drop everything 10–20% — buy after ${at(18.5)}`),
+      L(`🔴 ${at(18)} nieuwe content: gemiddeld zakt het ±1%, bij grote store packs soms 10–20% — koop pas na ${at(18.5)}`, `🔴 ${at(18)} new content: on average prices dip ±1%, with big store packs sometimes 10–20% — buy after ${at(18.5)}`),
       L(`🎁 do/zo ±${at(8)} beloningen: het eerste uur zakken de prijzen nog`, `🎁 Thu/Sun ±${at(8)} rewards: prices keep falling the first hour`),
       L("Speciale kaarten: goedkoopst za–di, duurst wo–do. Een enkele kaart volgt het gemiddelde lang niet altijd.", "Special cards: cheapest Sat–Tue, dearest Wed–Thu. A single card often doesn't follow the average."),
+      fodderTitle,
+      L("👑 Iconen: duurst op vrijdag (+2%, de Weekend League begint), goedkoopst op zondag (−1,5%) en maandag (−1,2%). Klein naast de 5% tax: om een aankoop te timen, niet om alleen hierop te flippen.", "👑 Icons: dearest on Friday (+2%, the Weekend League starts), cheapest on Sunday (−1.5%) and Monday (−1.2%). Small next to the 5% tax: for timing a purchase, not for flipping on this alone."),
       promo ? L(`${promo.drop ? "⚠️" : "📈"} ${promo.name} (${new Date(promo.at).toLocaleDateString("nl-NL")}): ${promo.nl}`, `${promo.drop ? "⚠️" : "📈"} ${promo.name} (${new Date(promo.at).toLocaleDateString("en-GB")}): ${promo.en}`) : ""
     ].filter(Boolean).join("\n");
     const value = { phase, hold, promo, text: L(nl, en), title };
@@ -10098,8 +10120,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (!cards) return;
       const atUk = hour => formatTime(Date.now() + (hour - u.hour) * 3600000);
       relayCall("notify", { title: L("🔴 Content om " + atUk(18), "🔴 Content at " + atUk(18)),
-        text: L(`${cards} kaarten op je transferlijst. Nieuwe packs kunnen prijzen 10–20% laten zakken: verkoop nu als je geen risico wilt, of laat ze staan tot de duurste uren morgenochtend (${atUk(5)}–${atUk(9)}).`,
-          `${cards} cards on your transfer list. New packs can drop prices 10–20%: sell now if you want no risk, or keep them listed for tomorrow's dearest hours (${atUk(5)}–${atUk(9)}).`) }).catch(() => {});
+        text: L(`${cards} kaarten op je transferlijst. Bij grote store packs kunnen prijzen 10–20% zakken (gemiddeld ±1%): verkoop nu als je geen risico wilt, of laat ze staan tot de duurste uren morgenochtend (${atUk(5)}–${atUk(9)}).`,
+          `${cards} cards on your transfer list. Big store packs can drop prices 10–20% (on average ±1%): sell now if you want no risk, or keep them listed for tomorrow's dearest hours (${atUk(5)}–${atUk(9)}).`) }).catch(() => {});
     } catch (_) { /* next minute */ }
   }, 60 * 1000);
   // Hysteresis: on at −5% (smoothed 24 h). Off right away on a confirmed turn (three signals already need

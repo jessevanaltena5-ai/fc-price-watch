@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.0.0
+// @version      3.0.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -11469,7 +11469,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       signalLogTouch(meta ? "meta" : momentum ? "futgg" : "fodder", shown.map(row => ({ k: `${row.card.id}|${state.platform}`, n: row.card.name, price: row.card.now,
         green: row.calc.status === "buy", buy: row.calc.buy, sell: row.calc.sell })));
       const listSize = shown.length;
-      const checkedCount = shown.filter(row => row.calc.futbin).length;
+      // "Done" = FUTBIN was asked: a usable check, a check with too few sales (calc.futbin stays empty, but it
+      // is fresh, so no round picks it again) or not found on FUTBIN. Only the rest is still to do.
+      const notFoundStore = futbinNotFound();
+      const fbThin = row => !row.calc.futbin && !!futbinSalesFor(row.card, state.platform);
+      const fbMissing = row => !row.calc.futbin && !fbThin(row) && (futbinMissingRecently(row.card) || Date.now() - (notFoundStore[row.card.id] || 0) < FUTBIN_FRESH_MS);
+      const fbOpen = shown.filter(row => !row.calc.futbin && !fbThin(row) && !fbMissing(row));
+      const thinCount = shown.filter(fbThin).length;
+      const missingCount = shown.filter(fbMissing).length;
+      const otherPcCount = fbOpen.filter(row => !myScanShare(row.card.id)).length;
+      const checkedCount = listSize - fbOpen.length;
+      const fbBreakdown = thinCount || missingCount || otherPcCount || fbOpen.length
+        ? " " + L(`(${thinCount} te weinig FUTBIN-sales, ${missingCount} niet op FUTBIN${otherPcCount ? `, ${otherPcCount} voor je andere pc` : ""}, ${fbOpen.length - otherPcCount} nog te doen)`,
+          `(${thinCount} too few FUTBIN sales, ${missingCount} not on FUTBIN${otherPcCount ? `, ${otherPcCount} for your other pc` : ""}, ${fbOpen.length - otherPcCount} still to do)`)
+        : "";
       if (filterText.trim()) shown = shown.filter(matchesFilter);
 
       // FUTBIN chip: progress of the list (checked / all) and a click = check the real sales now.
@@ -11489,9 +11502,9 @@ function priceWatchMain(SCRIPT_VERSION) {
       track.appendChild(fill);
       futbinButton.appendChild(track);
       futbinButton.title = futbinState.busy
-        ? L(`FUTBIN-check bezig: ronde ${futbinState.done}/${futbinState.total}, lijst ${checkedCount}/${listSize}${eta ? `, nog ~${eta} min` : ""}. Klik = stoppen.`,
-          `FUTBIN check running: round ${futbinState.done}/${futbinState.total}, list ${checkedCount}/${listSize}${eta ? `, ~${eta} min left` : ""}. Click = stop.`)
-        : ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
+        ? L(`FUTBIN-check bezig: ronde ${futbinState.done}/${futbinState.total}, lijst ${checkedCount}/${listSize}${fbBreakdown}${eta ? `, nog ~${eta} min` : ""}. Klik = stoppen.`,
+          `FUTBIN check running: round ${futbinState.done}/${futbinState.total}, list ${checkedCount}/${listSize}${fbBreakdown}${eta ? `, ~${eta} min left` : ""}. Click = stop.`)
+        : L(`Lijst ${checkedCount}/${listSize} op FUTBIN bekeken${fbBreakdown}. `, `List ${checkedCount}/${listSize} looked up on FUTBIN${fbBreakdown}. `) + ft("futbinTitle") + (paused ? ` ${ft("fbPausedTitle", { time: formatTime(futbinAutoPause) })}` : "");
 
       const count = key => shown.filter(row => row.calc.status === key).length;
       setTabBadge("flip", count("buy"), true);

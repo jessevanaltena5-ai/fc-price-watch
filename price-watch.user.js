@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.0.1
+// @version      3.1.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4322,6 +4322,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function addMassBidBadge(cell, item) {
     const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
     if (!root) return;
+    markGridList(root, item);
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
     root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow", "pt-mb-bin", "pt-mb-binhot");
     const info = massBidInfo(item) || runBinInfo(item);
@@ -4334,6 +4335,40 @@ function priceWatchMain(SCRIPT_VERSION) {
     massBidCells.add(badge);
     drawMassBidBadge(badge);
   }
+
+  // Grid view (like Paletools had): auction lists (search results, Transfer Targets) as a grid of cards
+  // instead of long rows. Only lists with auction rows get the class; the green / blinking deal rows then
+  // show as green / blinking tiles (the badge becomes the compact tile strip, < 340 px wide).
+  const GRID_KEY = "pt_grid_v1";
+  let gridOn = (() => { try { return localStorage.getItem(GRID_KEY) === "1"; } catch (_) { return false; } })();
+  let gridButton = null;
+  function markGridList(root, item) {
+    const list = root.parentElement;
+    if (!list || list.tagName !== "UL") return;
+    const auction = auctionOf(item);
+    if (root.classList.contains("has-auction-data") || (auction && Number(auction.tradeId) > 0)) list.classList.add("pt-grid-list");
+  }
+  function drawGridButton() {
+    if (!document.body) return;
+    document.body.classList.toggle("pt-grid-on", gridOn);
+    const lists = [...document.querySelectorAll("ul.pt-grid-list")].filter(list => list.offsetParent && list.querySelector("li"));
+    if (!gridButton) {
+      gridButton = el("button", "pt-grid-toggle", "");
+      gridButton.type = "button";
+      gridButton.addEventListener("click", () => {
+        gridOn = !gridOn;
+        try { localStorage.setItem(GRID_KEY, gridOn ? "1" : "0"); } catch (_) { /* this session only */ }
+        drawGridButton();
+        massBidCells.forEach(badge => { if (badge.isConnected) drawMassBidBadge(badge); });
+      });
+      document.body.appendChild(gridButton);
+    }
+    gridButton.style.display = lists.length ? "" : "none";
+    const text = gridOn ? L("☰ Lijst", "☰ List") : L("▦ Raster", "▦ Grid");
+    if (gridButton.textContent !== text) gridButton.textContent = text;
+    gridButton.title = gridOn ? L("Terug naar EA's gewone lijst", "Back to EA's normal list") : L("Zoekresultaten en Transfer Targets als raster van kaarten (groen / knipperend groen blijft)", "Search results and Transfer Targets as a grid of cards (green / blinking green stays)");
+  }
+  window.setInterval(drawGridButton, 1000);
 
   // Plain Buy Now run (not a bid list): the card of the current step, with that step's max BIN. EA's filter
   // already keeps every result under the max, so these rows only blink when the Buy Now is 10%+ under it.
@@ -14533,6 +14568,19 @@ function priceWatchMain(SCRIPT_VERSION) {
   0%, 100% { box-shadow: inset 0 0 0 3px #6be38f, inset 0 0 0 2000px rgba(46, 170, 90, .5); }
   50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .3), inset 0 0 0 2000px rgba(46, 170, 90, 0); } }
 .pt-mb-binline { color: #6be38f; font-weight: 800; }
+/* Grid view (▦ Raster): auction lists as a grid of cards; the green / blinking layer stays on the tile. */
+.pt-grid-toggle { position: fixed; left: 8px; bottom: 40px; z-index: 99999; border: 0; border-radius: 14px; padding: 5px 11px; font: 600 12px/1.3 sans-serif; cursor: pointer; color: #fff; background: #2a4a7a; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+body.pt-grid-on ul.pt-grid-list { display: grid !important; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; padding: 8px !important; align-items: stretch; }
+body.pt-grid-on ul.pt-grid-list > li { width: auto !important; height: auto !important; min-height: 0 !important; margin: 0 !important; position: relative; border-radius: 8px; border: 1px solid rgba(255,255,255,.08) !important; overflow: hidden; }
+body.pt-grid-on ul.pt-grid-list > li.pt-mb-tilerow { padding-bottom: 56px !important; }
+body.pt-grid-on ul.pt-grid-list > li > .rowContent { display: flex !important; flex-direction: column !important; align-items: stretch !important; height: auto !important; padding: 6px !important; }
+body.pt-grid-on ul.pt-grid-list .entityContainer { display: flex !important; flex-direction: column !important; align-items: center !important; width: 100% !important; height: auto !important; padding: 0 !important; }
+body.pt-grid-on ul.pt-grid-list .entityContainer > .name { margin: 4px 0 0 !important; max-width: 100%; font-size: 12px !important; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.pt-grid-on ul.pt-grid-list .player-stats-data-component, body.pt-grid-on ul.pt-grid-list .slot-position { display: none !important; }
+body.pt-grid-on ul.pt-grid-list .auction { display: flex !important; flex-direction: column !important; width: 100% !important; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px !important; gap: 1px; }
+body.pt-grid-on ul.pt-grid-list .auction > * { display: flex !important; justify-content: space-between; align-items: baseline; width: 100% !important; margin: 0 !important; padding: 0 !important; text-align: left !important; }
+body.pt-grid-on ul.pt-grid-list .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; }
+body.pt-grid-on ul.pt-grid-list .pt-mb-badge:not(.pt-mb-tile) { font-size: 11px; text-align: center; width: 100%; }
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
 .pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }
 .pt-mb-panel.pt-mb-ok { border-left: 4px solid #6be38f; }

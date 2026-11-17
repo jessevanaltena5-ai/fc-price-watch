@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.2.0
+// @version      3.2.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14609,7 +14609,12 @@ body.pt-grid-mode li.listFUTItem .player-stats-data-component { width: 100% !imp
 body.pt-grid-mode li.listFUTItem .player-stats-data-component ul { display: grid !important; grid-template-columns: repeat(6, 1fr); gap: 0; margin: 0 !important; padding: 0 !important; }
 body.pt-grid-mode li.listFUTItem .player-stats-data-component li { display: flex !important; flex-direction: column; align-items: center; width: auto !important; margin: 0 !important; padding: 0 !important; }
 body.pt-grid-mode li.listFUTItem .auction {
-  display: flex !important; flex-direction: column !important; width: 100% !important; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px !important; gap: 1px; float: none !important; }
+  display: flex !important; flex-direction: column !important; width: 100% !important; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px !important; gap: 1px; float: none !important;
+  position: static !important; top: auto !important; left: auto !important; right: auto !important; bottom: auto !important; transform: none !important; }
+/* EA floats the card left and parks .auction absolutely at the right of the row (left: 98px): in a tile both
+   go back into the column, card centred. EA's decorative row chevron (pseudo element) is not needed in a tile. */
+body.pt-grid-mode li.listFUTItem .entityContainer > .small.item { float: none !important; margin: 0 auto !important; }
+body.pt-grid-mode li.listFUTItem > .rowContent::after, body.pt-grid-mode li.listFUTItem > .rowContent::before { display: none !important; }
 body.pt-grid-mode li.listFUTItem .auction > * {
   display: flex !important; justify-content: space-between; align-items: baseline; width: 100% !important; margin: 0 !important; padding: 0 !important; text-align: left !important; float: none !important; }
 body.pt-grid-mode li.listFUTItem .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; }

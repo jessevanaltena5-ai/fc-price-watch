@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.1.0
+// @version      3.2.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4322,7 +4322,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function addMassBidBadge(cell, item) {
     const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
     if (!root) return;
-    markGridList(root, item);
+    markGridList(root);
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
     root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow", "pt-mb-bin", "pt-mb-binhot");
     const info = massBidInfo(item) || runBinInfo(item);
@@ -4336,37 +4336,54 @@ function priceWatchMain(SCRIPT_VERSION) {
     drawMassBidBadge(badge);
   }
 
-  // Grid view (like Paletools had): auction lists (search results, Transfer Targets) as a grid of cards
-  // instead of long rows. Only lists with auction rows get the class; the green / blinking deal rows then
-  // show as green / blinking tiles (the badge becomes the compact tile strip, < 340 px wide).
-  const GRID_KEY = "pt_grid_v1";
-  let gridOn = (() => { try { return localStorage.getItem(GRID_KEY) === "1"; } catch (_) { return false; } })();
+  // Grid view (Paletools-style): EA's own item lists (Unassigned, Club, Transfer List, Transfer Targets,
+  // market search results, the right-hand list) shown as compact tiles. Presentation only: the same EA
+  // <li> rows with their own click / select handlers, just laid out in a CSS grid (pt-grid- prefix).
+  // Lists are found two ways, so a DOM re-render keeps the grid: by EA's list classes (CSS, see below) and
+  // by marking the <ul> of every rendered item row (UTItemTableCellView hook -> ul.pt-grid-list).
+  // Green / blinking-green deal rows stay green / blinking as tiles (same row classes).
+  const GRID_MODE_KEY = "pt_grid_mode_v1";
+  const GRID_LIST_SELECTOR = ".paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list";
+  function isGridModeEnabled() {
+    try {
+      const value = localStorage.getItem(GRID_MODE_KEY);
+      if (value == null) return localStorage.getItem("pt_grid_v1") === "1"; // the 3.1.0 setting
+      return value === "1";
+    } catch (_) { return false; }
+  }
+  let gridOn = isGridModeEnabled();
   let gridButton = null;
-  function markGridList(root, item) {
+  function setGridMode(enabled) {
+    gridOn = !!enabled;
+    if (document.body) document.body.classList.toggle("pt-grid-mode", gridOn);
+    try { localStorage.setItem(GRID_MODE_KEY, gridOn ? "1" : "0"); } catch (_) { /* this session only */ }
+    drawGridButton();
+    // Badges switch between the row line and the compact tile strip right away (no reload).
+    massBidCells.forEach(badge => { if (badge.isConnected) drawMassBidBadge(badge); });
+  }
+  function markGridList(root) {
     const list = root.parentElement;
-    if (!list || list.tagName !== "UL") return;
-    const auction = auctionOf(item);
-    if (root.classList.contains("has-auction-data") || (auction && Number(auction.tradeId) > 0)) list.classList.add("pt-grid-list");
+    if (list && list.tagName === "UL" && root.classList.contains("listFUTItem")) list.classList.add("pt-grid-list");
   }
   function drawGridButton() {
     if (!document.body) return;
-    document.body.classList.toggle("pt-grid-on", gridOn);
-    const lists = [...document.querySelectorAll("ul.pt-grid-list")].filter(list => list.offsetParent && list.querySelector("li"));
-    if (!gridButton) {
+    document.body.classList.toggle("pt-grid-mode", gridOn);
+    const visible = [...document.querySelectorAll(GRID_LIST_SELECTOR)].some(list => list.offsetParent && list.querySelector(":scope > li.listFUTItem"));
+    if (!gridButton || !gridButton.isConnected) {
+      document.querySelectorAll(".pt-grid-toggle").forEach(node => node.remove()); // never two buttons
       gridButton = el("button", "pt-grid-toggle", "");
       gridButton.type = "button";
-      gridButton.addEventListener("click", () => {
-        gridOn = !gridOn;
-        try { localStorage.setItem(GRID_KEY, gridOn ? "1" : "0"); } catch (_) { /* this session only */ }
-        drawGridButton();
-        massBidCells.forEach(badge => { if (badge.isConnected) drawMassBidBadge(badge); });
-      });
+      gridButton.addEventListener("click", () => setGridMode(!gridOn));
       document.body.appendChild(gridButton);
     }
-    gridButton.style.display = lists.length ? "" : "none";
-    const text = gridOn ? L("☰ Lijst", "☰ List") : L("▦ Raster", "▦ Grid");
+    gridButton.style.display = visible ? "" : "none";
+    gridButton.classList.toggle("pt-grid-toggle-on", gridOn);
+    gridButton.setAttribute("aria-pressed", gridOn ? "true" : "false");
+    const text = gridOn ? L("▦ Raster aan", "▦ Grid on") : L("▦ Raster", "▦ Grid");
     if (gridButton.textContent !== text) gridButton.textContent = text;
-    gridButton.title = gridOn ? L("Terug naar EA's gewone lijst", "Back to EA's normal list") : L("Zoekresultaten en Transfer Targets als raster van kaarten (groen / knipperend groen blijft)", "Search results and Transfer Targets as a grid of cards (green / blinking green stays)");
+    gridButton.title = gridOn
+      ? L("Raster staat aan. Klik = terug naar EA's gewone lijst.", "Grid is on. Click = back to EA's normal list.")
+      : L("Spelerslijsten (Unassigned, Club, Transferlijst, Targets, zoekresultaten) als raster van kaarten. Groen / knipperend groen blijft.", "Player lists (Unassigned, Club, Transfer List, Targets, search results) as a grid of cards. Green / blinking green stays.");
   }
   window.setInterval(drawGridButton, 1000);
 
@@ -4399,7 +4416,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     // background at the bottom of the tile, so it never runs over the card picture or EA's text.
     const width = row.offsetWidth;
     const tile = width > 0 && width < 340;
-    if (tile && badge.parentNode !== row) row.appendChild(badge);
+    // Tile: the strip sits in EA's .rowContent (clicks on it reach EA's own tap handler); row: back under the name.
+    const home = tile ? (row.querySelector(".rowContent") || row) : (row.querySelector(".entityContainer") || row);
+    if (badge.parentNode !== home) home.appendChild(badge);
     row.classList.toggle("pt-mb-tilerow", tile);
     badge.textContent = "";
     if (!advice) return;
@@ -14539,10 +14558,10 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-mb-badge.pt-mb-lost { color: #9aa6b8; }
 .pt-mb-left { color: #ffd76a; }
 .listFUTItem.pt-mb-over:not(.pt-mb-tilerow), li.pt-mb-over:not(.pt-mb-tilerow) { opacity: .55; }
-.pt-mb-tilerow { position: relative; }
+.pt-mb-tilerow, .pt-mb-tilerow > .rowContent { position: relative; }
 .pt-mb-tilerow.pt-mb-over > :not(.pt-mb-badge) { opacity: .4; }
 .pt-mb-badge.pt-mb-tile { position: absolute; left: 4px; right: 4px; bottom: 4px; z-index: 5; margin: 0; padding: 4px 6px; border-radius: 6px;
-  background: rgba(8, 12, 20, .94); font-size: 11px; line-height: 1.35; white-space: nowrap; text-align: center; pointer-events: none; }
+  background: rgba(8, 12, 20, .94); font-size: 11px; line-height: 1.35; white-space: nowrap; text-align: center; }
 .pt-mb-tile .pt-mb-tile-main { overflow: hidden; text-overflow: ellipsis; }
 .pt-mb-tile.pt-mb-over { border: 1px solid #ff7b7b; }
 .pt-mb-tile.pt-mb-ok { border: 1px solid #6be38f; }
@@ -14568,19 +14587,43 @@ function priceWatchMain(SCRIPT_VERSION) {
   0%, 100% { box-shadow: inset 0 0 0 3px #6be38f, inset 0 0 0 2000px rgba(46, 170, 90, .5); }
   50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .3), inset 0 0 0 2000px rgba(46, 170, 90, 0); } }
 .pt-mb-binline { color: #6be38f; font-weight: 800; }
-/* Grid view (▦ Raster): auction lists as a grid of cards; the green / blinking layer stays on the tile. */
-.pt-grid-toggle { position: fixed; left: 8px; bottom: 40px; z-index: 99999; border: 0; border-radius: 14px; padding: 5px 11px; font: 600 12px/1.3 sans-serif; cursor: pointer; color: #fff; background: #2a4a7a; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
-body.pt-grid-on ul.pt-grid-list { display: grid !important; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; padding: 8px !important; align-items: stretch; }
-body.pt-grid-on ul.pt-grid-list > li { width: auto !important; height: auto !important; min-height: 0 !important; margin: 0 !important; position: relative; border-radius: 8px; border: 1px solid rgba(255,255,255,.08) !important; overflow: hidden; }
-body.pt-grid-on ul.pt-grid-list > li.pt-mb-tilerow { padding-bottom: 56px !important; }
-body.pt-grid-on ul.pt-grid-list > li > .rowContent { display: flex !important; flex-direction: column !important; align-items: stretch !important; height: auto !important; padding: 6px !important; }
-body.pt-grid-on ul.pt-grid-list .entityContainer { display: flex !important; flex-direction: column !important; align-items: center !important; width: 100% !important; height: auto !important; padding: 0 !important; }
-body.pt-grid-on ul.pt-grid-list .entityContainer > .name { margin: 4px 0 0 !important; max-width: 100%; font-size: 12px !important; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-body.pt-grid-on ul.pt-grid-list .player-stats-data-component, body.pt-grid-on ul.pt-grid-list .slot-position { display: none !important; }
-body.pt-grid-on ul.pt-grid-list .auction { display: flex !important; flex-direction: column !important; width: 100% !important; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px !important; gap: 1px; }
-body.pt-grid-on ul.pt-grid-list .auction > * { display: flex !important; justify-content: space-between; align-items: baseline; width: 100% !important; margin: 0 !important; padding: 0 !important; text-align: left !important; }
-body.pt-grid-on ul.pt-grid-list .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; }
-body.pt-grid-on ul.pt-grid-list .pt-mb-badge:not(.pt-mb-tile) { font-size: 11px; text-align: center; width: 100%; }
+/* Grid view (▦ Raster, Paletools-style): EA's own item lists as compact tiles. Presentation only: no
+   pointer-events changes, no hidden action buttons; only lists whose rows are EA item rows (li.listFUTItem). */
+.pt-grid-toggle { position: fixed; left: 8px; bottom: 40px; z-index: 99999; border: 1px solid rgba(255,255,255,.18); border-radius: 14px; padding: 5px 11px; font: 600 12px/1.3 sans-serif; cursor: pointer; color: #dfe8f5; background: #22324a; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
+.pt-grid-toggle.pt-grid-toggle-on { background: #2f7bd8; color: #fff; border-color: #8fc2ff; }
+body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) {
+  display: grid !important; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; height: auto !important; align-content: start; padding: 4px !important; }
+body.pt-grid-mode .ui-layout-right :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) {
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
+body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list) > li.listFUTItem {
+  width: auto !important; height: auto !important; min-height: 0 !important; min-width: 0; margin: 0 !important; float: none !important;
+  display: flex !important; flex-direction: column; position: relative; border-radius: 8px; overflow: hidden; border: 1px solid rgba(255,255,255,.08); }
+body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list) > li.listFUTItem > .rowContent {
+  display: flex !important; flex-direction: column !important; align-items: stretch !important; flex: 1; height: auto !important; min-width: 0; padding: 6px !important; }
+body.pt-grid-mode li.listFUTItem.pt-mb-tilerow > .rowContent { padding-bottom: 58px !important; }
+body.pt-grid-mode li.listFUTItem .entityContainer {
+  float: none !important; display: flex !important; flex-direction: column !important; align-items: center !important; width: 100% !important; height: auto !important; padding: 0 !important; min-width: 0; }
+body.pt-grid-mode li.listFUTItem .entityContainer > .name {
+  width: 100%; margin: 4px 0 0 !important; padding: 0 !important; font-size: 12px !important; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+body.pt-grid-mode li.listFUTItem .player-stats-data-component { width: 100% !important; margin: 2px 0 0 !important; font-size: 10px !important; }
+body.pt-grid-mode li.listFUTItem .player-stats-data-component ul { display: grid !important; grid-template-columns: repeat(6, 1fr); gap: 0; margin: 0 !important; padding: 0 !important; }
+body.pt-grid-mode li.listFUTItem .player-stats-data-component li { display: flex !important; flex-direction: column; align-items: center; width: auto !important; margin: 0 !important; padding: 0 !important; }
+body.pt-grid-mode li.listFUTItem .auction {
+  display: flex !important; flex-direction: column !important; width: 100% !important; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px !important; gap: 1px; float: none !important; }
+body.pt-grid-mode li.listFUTItem .auction > * {
+  display: flex !important; justify-content: space-between; align-items: baseline; width: 100% !important; margin: 0 !important; padding: 0 !important; text-align: left !important; float: none !important; }
+body.pt-grid-mode li.listFUTItem .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; }
+body.pt-grid-mode li.listFUTItem .pt-mb-badge:not(.pt-mb-tile), body.pt-grid-mode li.listFUTItem .pt-tl-row { font-size: 11px; text-align: center; width: 100%; white-space: normal; }
+body.pt-grid-mode li.listFUTItem > .pt-tl-badge { position: static !important; transform: none !important; margin: 2px 6px 6px; text-align: center; font-size: 11px; }
+/* Right-hand list (84 px tiles): only the card, name and price stay readable; stats go (they are in the detail panel). */
+body.pt-grid-mode .ui-layout-right li.listFUTItem .player-stats-data-component { display: none !important; }
+body.pt-grid-mode .ui-layout-right li.listFUTItem .entityContainer > .name { font-size: 10px !important; }
+body.pt-grid-mode .ui-layout-right li.listFUTItem .auction .label { display: none !important; }
+@media (max-width: 700px) {
+  body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  body.pt-grid-mode li.listFUTItem .player-stats-data-component { display: none !important; }
+  body.pt-grid-mode li.listFUTItem .auction .label { font-size: 9px !important; }
+}
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }
 .pt-mb-panel { margin: 8px 10px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, .35); font-size: 14px; font-weight: 700; color: #cfd8e6; }
 .pt-mb-panel.pt-mb-ok { border-left: 4px solid #6be38f; }

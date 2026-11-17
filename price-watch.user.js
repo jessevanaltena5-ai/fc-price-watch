@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.4.0
+// @version      3.4.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1065,6 +1065,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (data.mk && typeof data.mk === "object") mergeMarketIndex(data.mk); // newest FUTBIN index of any pc
     if (data.mk && data.mk.br) mergeBreadth(data.mk.br);
     if (data.ma) mergeMarketShared(data.ma); // "falling hard" state + which market pushes were sent
+    if (!pcDevice() && "me" in data) remoteMarketError = Array.isArray(data.me) ? data.me : null; // pc's last index error
     if (data.sl) mergeSignalLog(data.sl);
     if (data.fc) mergeCalibration(data.fc);
     if (data.dev) mergeDevices(data.dev);
@@ -1128,7 +1129,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (remote) mergeShared(JSON.parse(remote));
       } catch (_) { /* first push, or GitHub busy: send what we have */ }
       const data = { ...buildTransferData(), l: relay.phoneListAt || 0, s: transferStatusForRelay(), x: extraPrices(extraIds), cr: clubRiseForRelay(), bm: readJson(BOUGHT_KEY, {}), h: flipHistoryForRelay(), fb: futbinForRelay(), fs: flipSettingsForRelay(), mk: getMarketRaw(),
-        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), nf: futbinNotFound(), ma: marketForRelay(), v: SCRIPT_VERSION || "" };
+        sl: signalLog(), fc: calibrationForRelay(), dev: devicesForRelay(), dp: dayPricesForRelay(), nf: futbinNotFound(), ma: marketForRelay(), me: marketError ? [marketErrorAt, marketError.slice(0, 120)] : 0, v: SCRIPT_VERSION || "" };
       relayFbSent = data.fb ? Object.keys(data.fb).length : 0;
       await relayCall("push", { gistId: relay.gistId, file: RELAY_FILE, content: JSON.stringify(data) });
       saveRelay({ sentAt: Date.now(), error: "" });
@@ -9751,22 +9752,39 @@ function priceWatchMain(SCRIPT_VERSION) {
   const MARKET_REFRESH_MS = 30 * 60 * 1000;
   let marketLoading = false;
   let marketError = "";
+  let marketErrorAt = 0;
+  let remoteMarketError = null; // phone: [at, text] of the last failed index fetch on a pc (via the gist)
+  const MARKET_STALE_MS = 45 * 60 * 1000; // older than this = the pc hasn't fetched it lately
   // FUTBIN's live index has short spikes (16 Nov: 71 → 92 for an hour at 02:29 UK, 101 for half an hour at
   // 06:29, then back to 72–77) that made a false "falling hard −6.3%" and "+18.6% in 6h". A point more than
   // 8% away from the median of the points within 2 h around it (at least 5 of them) doesn't count. Real moves
   // are gradual: a lasting jump keeps its points once the 2 h around it have moved too.
+  // A spike comes back; a turn stays. With 2+ points after it, a point is only dropped when those points are
+  // back near the level before it. At the newest edge (17 Nov: 69 → 75 at 19:30 was cut as a "spike" and the
+  // turn stayed hidden behind "crashing") a jump counts once two points in a row (15 min) say the same.
   const MARKET_SPIKE = 0.08;
   function despikeIndex(live) {
     if (!Array.isArray(live) || live.length < 6) return live;
     const span = 2 * 3600000;
+    const median = list => {
+      const sorted = list.slice().sort((a, b) => a - b);
+      const n = sorted.length;
+      return n % 2 ? sorted[(n - 1) / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+    };
+    const off = (v, mid) => Math.abs(v / mid - 1) > MARKET_SPIKE;
     return live.filter(([t, v], i) => {
-      const around = [];
-      for (let j = i - 1; j >= 0 && t - live[j][0] <= span; j--) around.push(live[j][1]);
-      for (let j = i + 1; j < live.length && live[j][0] - t <= span; j++) around.push(live[j][1]);
-      if (around.length < 5) return true;
-      around.sort((a, b) => a - b);
-      const mid = around.length % 2 ? around[(around.length - 1) / 2] : (around[around.length / 2 - 1] + around[around.length / 2]) / 2;
-      return Math.abs(v / mid - 1) <= MARKET_SPIKE;
+      const before = [];
+      const after = [];
+      for (let j = i - 1; j >= 0 && t - live[j][0] <= span; j--) before.push(live[j][1]);
+      for (let j = i + 1; j < live.length && live[j][0] - t <= span; j++) after.push(live[j][1]);
+      const around = before.concat(after);
+      if (around.length < 5 || !off(v, median(around))) return true;
+      if (!before.length) return true;
+      const was = median(before);
+      if (after.length >= 2) return off(median(after.slice(-3)), was); // the last points back = spike; still there = a move
+      // Newest edge: keep it when a neighbour sits at the same new level (lasting 15+ min).
+      const near = x => x != null && Math.abs(x / v - 1) <= 0.04 && off(x, was);
+      return near(i > 0 ? live[i - 1][1] : null) || near(i + 1 < live.length ? live[i + 1][1] : null);
     });
   }
   // The stored index as FUTBIN gave it: for read-modify-write and the gist (despiking stored data again and
@@ -9821,11 +9839,14 @@ function priceWatchMain(SCRIPT_VERSION) {
       saveMarket({ ...current, ...parsed });
       if (heal) { try { localStorage.setItem("pt_fbindex_heal_v1", "1"); } catch (_) { /* next time */ } }
       marketError = "";
+      marketErrorAt = 0;
       marketAlert(getFlip().platform).catch(() => {});
       listeners.forEach(listener => listener());
+      pushRelay(true).catch(() => {}); // fresh index to the phone now, not at the next 5-min push
       return true;
     } catch (error) {
       marketError = error && error.message ? error.message : String(error);
+      marketErrorAt = Date.now();
       return false;
     } finally {
       marketLoading = false;
@@ -10213,12 +10234,18 @@ function priceWatchMain(SCRIPT_VERSION) {
     const c24 = mk.s24 != null ? mk.s24 : mk.ch24;
     // When the index was fetched and when the pc fetches it next (every 30 min, only with the web app open).
     const nextAt = mk.at + MARKET_REFRESH_MS;
+    const age = Date.now() - mk.at;
+    const errNow = pcDevice() ? (marketError ? [marketErrorAt, marketError] : null) : remoteMarketError;
+    const stale = age > MARKET_STALE_MS
+      ? L(` · ⚠️ verouderd (${Math.round(age / 60000)} min)${errNow && errNow[0] > mk.at ? `: ${errNow[1]}` : pcDevice() ? "" : ", staat je pc met de web app aan?"}`,
+        ` · ⚠️ stale (${Math.round(age / 60000)} min)${errNow && errNow[0] > mk.at ? `: ${errNow[1]}` : pcDevice() ? "" : ", is your pc on with the web app open?"}`)
+      : "";
     const fetched = pcDevice() && getFlip().autoFutbin
       ? L(` · opgehaald ${formatTime(mk.at)}, volgende ${nextAt <= Date.now() + 60000 ? "zo meteen" : "±" + formatTime(nextAt)}`,
         ` · fetched ${formatTime(mk.at)}, next ${nextAt <= Date.now() + 60000 ? "any minute" : "±" + formatTime(nextAt)}`)
       : L(` · opgehaald ${formatTime(mk.at)} (door je pc, elke 30 min)`, ` · fetched ${formatTime(mk.at)} (by your pc, every 30 min)`);
-    const text = L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(c24)} · 6u ${p(c6)}${tail}${fetched}`,
-      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(c24)} · 6h ${p(c6)}${tail}${fetched}`);
+    const text = L(`📈 Markt ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24u ${p(c24)} · 6u ${p(c6)}${tail}${fetched}${stale}`,
+      `📈 Market ${futbinPlatform(platform) === "pc" ? "PC" : "console"} ${mk.now.toFixed(1)} · 24h ${p(c24)} · 6h ${p(c6)}${tail}${fetched}${stale}`);
     const help = [
       L("Eén getal voor álle kaartprijzen samen (de FUTBIN-index). Een soort beurs van FC.", "One number for ALL card prices together (the FUTBIN index). A kind of stock market for FC."),
       L("6u / 24u = hoeveel goedkoper (−) of duurder (+) alles is dan 6 of 24 uur geleden. Het neemt steeds het gemiddelde van 2 uur, zodat één rare uitschieter niet telt.", "6h / 24h = how much cheaper (−) or more expensive (+) everything is than 6 or 24 hours ago. It always takes a 2-hour average, so one odd spike doesn't count."),
@@ -11723,7 +11750,11 @@ function priceWatchMain(SCRIPT_VERSION) {
         verdict = loadingNow ? (meta ? L("⏳ Meta-lijst ophalen bij FUTBIN…", "⏳ Fetching the meta list from FUTBIN…") : momentum ? ft("mLoading", { n: momentumPages }) : ft("statusLoading"))
           : errorNow ? ft("statusFailed", { error: errorNow }) : meta ? L("Nog geen meta-lijst", "No meta list yet") : momentum ? ft("mEmpty") : ft("statusEmpty");
         tone = loadingNow ? "info" : "bad";
-      } else if (crashNow) { verdict = L("📉 Markt crasht — niets kopen, wacht op de draai", "📉 Market is crashing — buy nothing, wait for the turn"); tone = "bad"; }
+      } else if (crashNow) {
+        const mkAt = (marketStats(state.platform) || {}).at || 0;
+        const old = mkAt && Date.now() - mkAt > MARKET_STALE_MS ? L(` (index van ${formatTime(mkAt)})`, ` (index of ${formatTime(mkAt)})`) : "";
+        verdict = L(`📉 Markt crasht — niets kopen, wacht op de draai${old}`, `📉 Market is crashing — buy nothing, wait for the turn${old}`); tone = "bad";
+      }
       else if (fallNow) {
         const nowPart = !fallNow.live && fallNow.s6 != null ? L(`, nu ${flipPct(fallNow.s6 * 100, 1)}`, `, now ${flipPct(fallNow.s6 * 100, 1)}`) : "";
         verdict = L(`📉 Markt zakt hard (${flipPct(fallNow.worst * 100, 1)} in 6u${nowPart}) — niets bijkopen, verkopen kan nog`, `📉 Market falling hard (${flipPct(fallNow.worst * 100, 1)} in 6h${nowPart}) — don't buy more, you can still sell`);

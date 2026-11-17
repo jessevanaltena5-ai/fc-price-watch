@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.3.0
+// @version      3.3.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4398,12 +4398,21 @@ function priceWatchMain(SCRIPT_VERSION) {
   let cheapestSetKey = "";
   let cheapestTimer = 0;
   let cheapestButton = null;
+  // EA draws a row before it hangs it in the result list, so the item is stored for every row; which rows
+  // are search results is read from the page when choosing (".SearchResults").
+  let cheapestTries = 0;
+  let cheapestDone = false;
+  let cheapestUserTouched = false;
   function noteSearchRow(root, item) {
-    if (!item || !root.closest(".SearchResults")) return;
+    if (!item) return;
     searchRowItems.set(root, item);
     window.clearTimeout(cheapestTimer);
-    cheapestTimer = window.setTimeout(selectCheapestBin, 250); // after EA has drawn the whole page
+    cheapestTimer = window.setTimeout(selectCheapestBin, 300); // after EA has drawn the whole page
   }
+  // Your own tap in the results ends the auto pick for this result set (your choice stays).
+  document.addEventListener("pointerdown", event => {
+    if (event.isTrusted && event.target && event.target.closest && event.target.closest(".SearchResults")) cheapestUserTouched = true;
+  }, true);
   function cheapestBinRow() {
     const rows = [...document.querySelectorAll(".SearchResults li.listFUTItem")].filter(li => li.offsetParent);
     const entries = rows.map((li, index) => {
@@ -4414,23 +4423,47 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!entries.length) return null;
     const key = entries.map(entry => entry.auction.tradeId).join(",");
     entries.sort((a, b) => a.price - b.price || a.index - b.index); // same price: the first (least time left)
-    return { key, li: entries[0].li };
+    return { key, li: entries[0].li, price: entries[0].price, rows: rows.length };
   }
+  function tapRow(li) {
+    const target = li.querySelector(".rowContent") || li;
+    const rect = target.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0, buttons: 1, pointerType: "mouse", isPrimary: true };
+    const fire = (Type, type) => { try { target.dispatchEvent(new Type(type, at)); } catch (_) { /* older browser */ } };
+    fire(PointerEvent, "pointerdown");
+    fire(MouseEvent, "mousedown");
+    if ("ontouchstart" in window) { fire(TouchEvent, "touchstart"); fire(TouchEvent, "touchend"); }
+    fire(PointerEvent, "pointerup");
+    fire(MouseEvent, "mouseup");
+    // EA wants a click on some builds: only when the tap did not select it yet.
+    window.setTimeout(() => { if (li.isConnected && !li.classList.contains("selected")) fire(MouseEvent, "click"); }, 120);
+  }
+  // Runs after each page of results and every second: a new result set starts over; EA's own first-row
+  // selection that comes in later is corrected (at most 4 taps), until you tap a card yourself.
   function selectCheapestBin() {
     if (!cheapestOn) return;
     const best = cheapestBinRow();
-    if (!best || best.key === cheapestSetKey) return;
-    cheapestSetKey = best.key;
-    if (best.li.classList.contains("selected")) return;
-    const target = best.li.querySelector(".rowContent") || best.li;
-    const rect = target.getBoundingClientRect();
-    const at = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
-    try { target.dispatchEvent(new PointerEvent("pointerdown", at)); } catch (_) { /* older browser */ }
-    target.dispatchEvent(new MouseEvent("mousedown", at));
-    try { target.dispatchEvent(new PointerEvent("pointerup", at)); } catch (_) { /* older browser */ }
-    target.dispatchEvent(new MouseEvent("mouseup", at));
-    // EA wants a click on some builds: only when the tap did not select it yet.
-    window.setTimeout(() => { if (best.li.isConnected && !best.li.classList.contains("selected")) target.dispatchEvent(new MouseEvent("click", at)); }, 120);
+    if (!best) return;
+    if (best.key !== cheapestSetKey) {
+      cheapestSetKey = best.key;
+      cheapestTries = 0;
+      cheapestDone = false;
+      cheapestUserTouched = false;
+    }
+    if (cheapestDone || cheapestUserTouched) return;
+    if (best.li.classList.contains("selected")) {
+      if (cheapestTries) cheapestDone = true; // ours and it held
+      else if (++cheapestTries >= 2) cheapestDone = true; // EA already had it selected
+      return;
+    }
+    if (cheapestTries >= 4) {
+      cheapestDone = true;
+      console.info("[Price Watch] Goedkoopste: selecteren lukte niet na 4 pogingen.", best);
+      return;
+    }
+    cheapestTries++;
+    console.info(`[Price Watch] Goedkoopste: Buy Now ${best.price} selecteren (poging ${cheapestTries}, ${best.rows} resultaten).`);
+    tapRow(best.li);
     if (gridOn) best.li.scrollIntoView({ block: "nearest" });
   }
   function drawCheapestButton() {
@@ -4457,7 +4490,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       ? L("Bij nieuwe zoekresultaten wordt de kaart met de laagste Buy Now geselecteerd; jij drukt zelf op Buy Now. Klik = uit.", "On new search results the card with the lowest Buy Now is selected; you press Buy Now yourself. Click = off.")
       : L("Uit. Klik = bij nieuwe zoekresultaten de laagste Buy Now selecteren (jij drukt zelf op Buy Now).", "Off. Click = select the lowest Buy Now on new search results (you press Buy Now yourself).");
   }
-  window.setInterval(drawCheapestButton, 1000);
+  window.setInterval(() => { drawCheapestButton(); selectCheapestBin(); }, 1000);
 
   // Plain Buy Now run (not a bid list): the card of the current step, with that step's max BIN. EA's filter
   // already keeps every result under the max, so these rows only blink when the Buy Now is 10%+ under it.
@@ -14665,41 +14698,45 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-grid-toggle.pt-grid-toggle-on { background: #2f7bd8; color: #fff; border-color: #8fc2ff; }
 .pt-cheapest-toggle { bottom: 72px; }
 body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) {
-  display: grid !important; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; height: auto !important; align-content: start; padding: 4px !important; }
+  display: grid !important; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 4px; height: auto !important; align-content: start; padding: 4px !important; }
 body.pt-grid-mode .ui-layout-right :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) {
   grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
 body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list) > li.listFUTItem {
   width: auto !important; height: auto !important; min-height: 0 !important; min-width: 0; margin: 0 !important; float: none !important;
   display: flex !important; flex-direction: column; position: relative; border-radius: 8px; overflow: hidden; border: 1px solid rgba(255,255,255,.08); }
 body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list) > li.listFUTItem > .rowContent {
-  display: flex !important; flex-direction: column !important; align-items: stretch !important; flex: 1; height: auto !important; min-width: 0; padding: 6px !important; }
+  display: flex !important; flex-direction: column !important; align-items: stretch !important; flex: 1; height: auto !important; min-width: 0; padding: 4px !important; }
 body.pt-grid-mode li.listFUTItem.pt-mb-tilerow > .rowContent { padding-bottom: 58px !important; }
 body.pt-grid-mode li.listFUTItem .entityContainer {
   float: none !important; display: flex !important; flex-direction: column !important; align-items: center !important; width: 100% !important; height: auto !important; padding: 0 !important; min-width: 0; }
 body.pt-grid-mode li.listFUTItem .entityContainer > .name {
-  width: 100%; margin: 4px 0 0 !important; padding: 0 !important; font-size: 12px !important; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-body.pt-grid-mode li.listFUTItem .player-stats-data-component { width: 100% !important; margin: 2px 0 0 !important; font-size: 10px !important; }
-body.pt-grid-mode li.listFUTItem .player-stats-data-component ul { display: grid !important; grid-template-columns: repeat(6, 1fr); gap: 0; margin: 0 !important; padding: 0 !important; }
-body.pt-grid-mode li.listFUTItem .player-stats-data-component li { display: flex !important; flex-direction: column; align-items: center; width: auto !important; margin: 0 !important; padding: 0 !important; }
-body.pt-grid-mode li.listFUTItem .auction {
-  display: flex !important; flex-direction: column !important; width: 100% !important; margin: 4px 0 0 !important; padding: 0 !important; font-size: 11px !important; gap: 1px; float: none !important;
+  width: 100%; margin: 1px 0 0 !important; padding: 0 !important; font-size: 11px !important; line-height: 1.2 !important; height: auto !important; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Compact (user: all results in one view): the stats are on the card and in the detail panel. */
+body.pt-grid-mode li.listFUTItem .player-stats-data-component { display: none !important; }
+body.pt-grid-mode li.listFUTItem .entityContainer > .small.item { zoom: .72; }
+/* EA lays the price lines out side by side (a flex row that beats a plain column rule): a one-column grid
+   puts Start Price / Bid / Buy Now / Time under each other whatever EA's flex settings are. */
+body.pt-grid-mode ul > li.listFUTItem > .rowContent > .auction, body.pt-grid-mode li.listFUTItem .auction {
+  display: grid !important; grid-template-columns: minmax(0, 1fr) !important; grid-auto-flow: row !important; flex-direction: column !important; flex-wrap: nowrap !important;
+  width: 100% !important; max-width: 100% !important; height: auto !important; max-height: none !important; min-width: 0 !important; overflow: visible !important;
+  margin: 2px 0 0 !important; padding: 0 !important; font-size: 11px !important; line-height: 1.25 !important; gap: 0; float: none !important;
   position: static !important; top: auto !important; left: auto !important; right: auto !important; bottom: auto !important; transform: none !important; }
 /* EA floats the card left and parks .auction absolutely at the right of the row (left: 98px): in a tile both
    go back into the column, card centred. EA's decorative row chevron (pseudo element) is not needed in a tile. */
 body.pt-grid-mode li.listFUTItem .entityContainer > .small.item { float: none !important; margin: 0 auto !important; }
 body.pt-grid-mode li.listFUTItem > .rowContent::after, body.pt-grid-mode li.listFUTItem > .rowContent::before { display: none !important; }
-body.pt-grid-mode li.listFUTItem .auction > * {
-  display: flex !important; justify-content: space-between; align-items: baseline; width: 100% !important; margin: 0 !important; padding: 0 !important; text-align: left !important; float: none !important; }
-body.pt-grid-mode li.listFUTItem .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; }
+body.pt-grid-mode ul > li.listFUTItem > .rowContent > .auction > *, body.pt-grid-mode li.listFUTItem .auction > * {
+  display: flex !important; flex-direction: row !important; justify-content: space-between !important; align-items: baseline; width: auto !important; min-width: 0 !important; max-width: 100% !important;
+  height: auto !important; flex: none !important; margin: 0 !important; padding: 0 !important; text-align: left !important; float: none !important; position: static !important; }
+body.pt-grid-mode li.listFUTItem .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto !important; width: auto !important; }
+body.pt-grid-mode li.listFUTItem .auction .value, body.pt-grid-mode li.listFUTItem .auction .time { font-size: 11px !important; white-space: nowrap; flex: none !important; width: auto !important; line-height: 1.25 !important; height: auto !important; }
 body.pt-grid-mode li.listFUTItem .pt-mb-badge:not(.pt-mb-tile), body.pt-grid-mode li.listFUTItem .pt-tl-row { font-size: 11px; text-align: center; width: 100%; white-space: normal; }
 body.pt-grid-mode li.listFUTItem > .pt-tl-badge { position: static !important; transform: none !important; margin: 2px 6px 6px; text-align: center; font-size: 11px; }
 /* Right-hand list (84 px tiles): only the card, name and price stay readable; stats go (they are in the detail panel). */
-body.pt-grid-mode .ui-layout-right li.listFUTItem .player-stats-data-component { display: none !important; }
 body.pt-grid-mode .ui-layout-right li.listFUTItem .entityContainer > .name { font-size: 10px !important; }
 body.pt-grid-mode .ui-layout-right li.listFUTItem .auction .label { display: none !important; }
 @media (max-width: 700px) {
   body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  body.pt-grid-mode li.listFUTItem .player-stats-data-component { display: none !important; }
   body.pt-grid-mode li.listFUTItem .auction .label { font-size: 9px !important; }
 }
 @keyframes pt-mb-pulse { 50% { box-shadow: inset 0 0 0 3px rgba(107, 227, 143, .25); } }

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.4.2
+// @version      3.5.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8233,6 +8233,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     w_marketFalling: ["De markt zakt nu nog ({pct} in 6u): wacht tot hij draait", "The market is still falling ({pct} in 6h): wait until it turns"],
     w_marketFallingYday: ["De markt staat {pct} onder gisteren rond deze tijd: wacht tot hij draait", "The market is {pct} below yesterday at this time: wait until it turns"],
     w_nightDip: ["🌙 Nachtdip: {pct} onder zijn dagprijs van gisteren ({day}). Koop ≤ {buy}; zet hem vanaf 09:00 te koop voor {day}", "🌙 Night dip: {pct} under yesterday's day price ({day}). Buy ≤ {buy}; list from 09:00 (UK 08:00) at {day}"],
+    w_clockContent: ["Content om 19:00: nieuwe packs kunnen alles 10–20% laten zakken — koop na 19:30", "Content at 18:00 UK: new packs can drop everything 10–20% — buy after 18:30 UK"],
+    w_clockRewards: ["Beloningen net binnen (do/zo ±09:00): de prijs zakt het eerste uur meestal nog — koop vanaf 10:00", "Rewards just dropped (Thu/Sun ±08:00 UK): prices usually keep falling the first hour — buy from 09:00 UK"],
+    w_bigPromo: ["⚠️ {name} komt eraan: {effect}. Liever niet nu inkopen", "⚠️ {name} is coming: {effect}. Better not to buy now"],
     cap_fbDownLong: ["echte verkoopprijzen dalen al langer", "real sale prices keep falling"],
     miss_fbHistory: ["verloop van de echte verkopen (te weinig verkopen of data)", "course of the real sales (too few sales or data)"],
     pos_cheapStable: ["Goedkoop, terwijl de echte verkoopprijzen stabiel blijven", "Cheap, while real sale prices hold"],
@@ -8543,7 +8546,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const marketRisky = platform ? marketCheck(Number.isFinite(card.change) ? card.change / 100 : null, platform, warnings) : false;
     const promo = promoWindow();
     if (promo) warnings.unshift(ft("w_promoWindow"));
-    const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky || marketRisky || promo;
+    const clockRisky = platform ? clockCheck(pct, warnings) : false;
+    const risky = sparse || (highOdd && !useFutbin) || falling || crashed || atBottom || restless || fbRisky || marketRisky || promo || clockRisky;
     // 🌙 Night dip (00-07 UK): bought under yesterday's day price, sold from 09:00; all conditions in nightDip().
     const night = platform && useFutbin ? nightDip(card, futbin, platform) : null;
     if (night) {
@@ -9431,7 +9435,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const FUTBIN_STATS_VERSION = 3; // 3: recent 8 h, BIN-only P25, drift
   // Days a card has been on the market by FUTBIN (daily averages, or the first sale when FUTBIN has every
   // sale). 0 = not new (3+ days, or unknown). New cards (TOTW, new content) still find their price.
-  const FUTBIN_YOUNG_DAYS = 5; // review: promo cards settle over 5-7 days, not 2
+  const FUTBIN_YOUNG_DAYS = 7; // FUTBIN price trends FC27: promo waves were still 36-67% down and mostly falling at day 7
   function futbinYoung(stats) {
     const fh = stats && stats.h72;
     if (!fh) return 0;
@@ -10004,6 +10008,100 @@ function priceWatchMain(SCRIPT_VERSION) {
   function promoWindow(t = Date.now()) { const u = ukTime(t); return (u.day === 4 && u.hour >= 17) || (u.day === 5 && u.hour < 21); }
   // No "turn confirmed" from Friday 18:00 to Saturday 18:00 UK: the first bounce after a promo drop rarely holds.
   function turnBlackout(t = Date.now()) { const u = ukTime(t); return (u.day === 5 && u.hour >= 18) || (u.day === 6 && u.hour < 18); }
+  // --- Trade clock: when to buy and list, in UK time (shown in your own time) -----------------------
+  // From FUTBIN's market timing (lowest Buy Now per card-hour, 3-16 Nov 2026, specials 10K+): cheapest
+  // 19:00-23:00 UK (−2%), dearest 05:00-09:00 UK (+1.5 to +2.7%); base cards swing more (−4% / +5%).
+  // Weekdays (specials, 30 days): cheapest Sat-Tue, dearest Wed-Thu. New content at 18:00 UK can drop
+  // prices 10-20% (store packs), so nothing is bought 17:30-18:30 UK. Rewards Thu/Sun ~08:00 UK: prices
+  // fall the first hour (trading group), so don't list then and buy from 09:00.
+  // Big promos (FUTBIN promo calendar, last year's dates a year on): older promo cards and icons fell.
+  const BIG_PROMOS = [
+    { name: "Thunderstruck", at: Date.UTC(2026, 10, 27, 18), drop: true,
+      nl: "vorig jaar zakten oudere promokaarten −16% op dag 1 (−24% na 4 weken), iconen −19% (−42% na 4 weken)",
+      en: "last year older promo cards fell −16% on day 1 (−24% after 4 weeks), icons −19% (−42% after 4 weeks)" },
+    { name: "Winter Wildcards", at: Date.UTC(2026, 11, 18, 18), drop: true,
+      nl: "vorig jaar zakten oudere promokaarten −19% op dag 1 en −15% na een week, iconen −19% / −22%",
+      en: "last year older promo cards fell −19% on day 1 and −15% after a week, icons −19% / −22%" },
+    { name: "TOTY", at: Date.UTC(2027, 0, 15, 18), drop: false,
+      nl: "vorig jaar stegen oudere promokaarten juist: +19% na een week, +57% na 4 weken",
+      en: "last year older promo cards rose instead: +19% after a week, +57% after 4 weeks" }
+  ];
+  function bigPromoNear(t = Date.now()) {
+    return BIG_PROMOS.find(promo => t >= promo.at - 7 * 86400000 && t < promo.at + 86400000) || null;
+  }
+  let clockCache = null;
+  function tradeClock(t = Date.now()) {
+    const minute = Math.floor(t / 60000);
+    if (clockCache && clockCache.minute === minute && clockCache.lang === flipLang()) return clockCache.value;
+    const u = ukTime(t);
+    const h = u.hour;
+    const at = hour => formatTime(t + (hour - h) * 3600000); // a UK hour of today, in your own time
+    const rewardsDay = u.day === 4 || u.day === 0;
+    let phase = "calm";
+    let hold = "";
+    let nl;
+    let en;
+    if (h >= 17.5 && h < 18.5) { phase = "content"; hold = "content"; nl = `🔴 content om ${at(18)} — wacht met kopen tot ${at(18.5)}`; en = `🔴 content at ${at(18)} — wait with buying until ${at(18.5)}`; }
+    else if (h >= 18.5 && h < 23) { phase = "buy"; nl = `🛒 goedkoopste uren tot ${at(23)}`; en = `🛒 cheapest hours until ${at(23)}`; }
+    else if (rewardsDay && h >= 8 && h < 9) { phase = "rewards"; hold = "rewards"; nl = `🎁 beloningen: prijzen zakken nog — inkopen vanaf ${at(9)}`; en = `🎁 rewards: prices still falling — buy from ${at(9)}`; }
+    else if (h >= 5 && h < 9) { phase = "sell"; nl = `🟢 duurste uren: te koop zetten tot ${at(9)}`; en = `🟢 dearest hours: list until ${at(9)}`; }
+    else if (h >= 23 || h < 5) { nl = `rustig · duurste uren vanaf ${at(h >= 23 ? 29 : 5)}`; en = `quiet · dearest hours from ${at(h >= 23 ? 29 : 5)}`; }
+    else { nl = `rustig · goedkoopste uren vanaf ${at(18.5)}`; en = `quiet · cheapest hours from ${at(18.5)}`; }
+    const dayNl = ["zo", "ma", "di", "wo", "do", "vr", "za"][u.day];
+    const dayEn = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][u.day];
+    if ([6, 0, 1, 2].includes(u.day)) { nl += ` · ${dayNl}: goedkope dag`; en += ` · ${dayEn}: cheap day`; }
+    else if (u.day === 3 || u.day === 4) { nl += ` · ${dayNl}: dure dag`; en += ` · ${dayEn}: dear day`; }
+    const promo = bigPromoNear(t);
+    if (promo && promo.drop) {
+      const day = new Date(promo.at).toLocaleDateString(flipLang() === "en" ? "en-GB" : "nl-NL", { weekday: "short", day: "numeric", month: "short" });
+      nl += ` · ⚠️ ${promo.name} ${day}`;
+      en += ` · ⚠️ ${promo.name} ${day}`;
+    }
+    const title = [
+      L("Wanneer kopen en te koop zetten (FUTBIN-data, jouw tijd):", "When to buy and list (FUTBIN data, your time):"),
+      L(`🛒 ${at(18.5)}–${at(23)} goedkoopste uren: speciale kaarten ±2% onder het daggemiddelde, gewone kaarten ±4%`, `🛒 ${at(18.5)}–${at(23)} cheapest hours: special cards ±2% under the day's average, base cards ±4%`),
+      L(`🟢 ${at(5)}–${at(9)} duurste uren: ±2% boven het gemiddelde (gewone kaarten ±5%) — goed om te koop te zetten`, `🟢 ${at(5)}–${at(9)} dearest hours: ±2% above the average (base cards ±5%) — good to list`),
+      L(`🔴 ${at(18)} nieuwe content: packs kunnen alles 10–20% laten zakken — koop pas na ${at(18.5)}`, `🔴 ${at(18)} new content: packs can drop everything 10–20% — buy after ${at(18.5)}`),
+      L(`🎁 do/zo ±${at(8)} beloningen: het eerste uur zakken de prijzen nog`, `🎁 Thu/Sun ±${at(8)} rewards: prices keep falling the first hour`),
+      L("Speciale kaarten: goedkoopst za–di, duurst wo–do. Een enkele kaart volgt het gemiddelde lang niet altijd.", "Special cards: cheapest Sat–Tue, dearest Wed–Thu. A single card often doesn't follow the average."),
+      promo ? L(`${promo.drop ? "⚠️" : "📈"} ${promo.name} (${new Date(promo.at).toLocaleDateString("nl-NL")}): ${promo.nl}`, `${promo.drop ? "⚠️" : "📈"} ${promo.name} (${new Date(promo.at).toLocaleDateString("en-GB")}): ${promo.en}`) : ""
+    ].filter(Boolean).join("\n");
+    const value = { phase, hold, promo, text: L(nl, en), title };
+    clockCache = { minute, lang: flipLang(), value };
+    return value;
+  }
+  // The clock in a flip verdict: the content hour and the first reward hour make a card risky, and so do
+  // the 3 days before a big promo that pulled older cards down last year (until a day after it).
+  function clockCheck(pct, warnings) {
+    const clock = tradeClock();
+    let risky = false;
+    if (clock.hold === "content") { warnings.unshift(ft("w_clockContent")); risky = true; }
+    else if (clock.hold === "rewards") { warnings.unshift(ft("w_clockRewards")); risky = true; }
+    const promo = clock.promo;
+    if (promo && promo.drop && Date.now() >= promo.at - 3 * 86400000) {
+      warnings.unshift(ft("w_bigPromo", { name: promo.name, effect: L(promo.nl, promo.en) }));
+      risky = true;
+    }
+    return risky;
+  }
+  // Pc: one push at 17:45 (16:45 UK) when cards are on your transfer list: content at 19:00.
+  const CLOCK_PING_KEY = "pt_clock_ping_v1";
+  window.setInterval(() => {
+    try {
+      if (!pcDevice()) return;
+      const u = ukTime();
+      if (u.hour < 16.75 || u.hour >= 17.25) return;
+      const day = new Date().toDateString();
+      if (localStorage.getItem(CLOCK_PING_KEY) === day) return;
+      localStorage.setItem(CLOCK_PING_KEY, day);
+      const cards = Object.keys(readJson(BOUGHT_KEY, {})).length;
+      if (!cards) return;
+      const atUk = hour => formatTime(Date.now() + (hour - u.hour) * 3600000);
+      relayCall("notify", { title: L("🔴 Content om " + atUk(18), "🔴 Content at " + atUk(18)),
+        text: L(`${cards} kaarten op je transferlijst. Nieuwe packs kunnen prijzen 10–20% laten zakken: verkoop nu als je geen risico wilt, of laat ze staan tot de duurste uren morgenochtend (${atUk(5)}–${atUk(9)}).`,
+          `${cards} cards on your transfer list. New packs can drop prices 10–20%: sell now if you want no risk, or keep them listed for tomorrow's dearest hours (${atUk(5)}–${atUk(9)}).`) }).catch(() => {});
+    } catch (_) { /* next minute */ }
+  }, 60 * 1000);
   // Hysteresis: on at −5% (smoothed 24 h). Off right away on a confirmed turn (three signals already need
   // hours), or once the 24 h change is back above −2% and the last −5% reading is 2+ h old (the 2 h averages
   // then no longer overlap, so a short bounce of a noisy index doesn't end it). Before 3.4.2 it stayed on for
@@ -10834,7 +10932,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     const marketRisky = marketCheck(card.m24 != null ? card.m24 / 100 : null, platform, warnings);
     const promo = promoWindow();
     if (promo) warnings.unshift(ft("w_promoWindow"));
-    const risky = falling || fbRisky || marketRisky || promo;
+    const clockRisky = clockCheck(pct, warnings);
+    const risky = falling || fbRisky || marketRisky || promo || clockRisky;
     // 🌙 Night dip (00-07 UK): bought under yesterday's day price, sold from 09:00; all conditions in nightDip().
     const night = futbin ? nightDip(card, futbin, platform) : null;
     if (night) {
@@ -11781,7 +11880,12 @@ function priceWatchMain(SCRIPT_VERSION) {
           : momentum ? ft("mStatusTitle") : data ? ft("statusTitle", { at: formatTime(data.at), fetched: formatTime(data.fetchedAt), history: historyText }) : ""].filter(Boolean);
       status.textContent = "";
       status.title = "";
-      status.appendChild(el("div", `pt-fx-verdict pt-fx-verdict-${tone}`, verdict));
+      const verdictBox = el("div", `pt-fx-verdict pt-fx-verdict-${tone}`, verdict);
+      const clock = tradeClock();
+      const clockChip = el("span", `pt-fx-clock pt-fx-clock-${clock.phase}`, clock.text);
+      clockChip.title = clock.title;
+      verdictBox.appendChild(clockChip);
+      status.appendChild(verdictBox);
       if (summary || detailLines.length) {
         const line = el("div", "pt-fx-summary", summary);
         if (detailLines.length) line.appendChild(fgInfo(L("Details", "Details"), detailLines));
@@ -14002,10 +14106,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   // In EA's "List on Transfer Market" panel. With FUT Genie (pc) only what it lacks: BIN = what you paid
-  // + 10% / 15% / 20% / your own %. Without it (Safari on the phone) also what FUT Genie has: the price
+  // + 15% / 20% / 25% / your own %. Without it (Safari on the phone) also what FUT Genie has: the price
   // (FUT Genie via your pc, or the lowest BIN when you tap), −10% / +5% / +10% on the BIN in the field,
   // break even, and the profit after tax at that BIN. Start price is always one step below. You press List.
-  const QUICK_LIST_PCTS = [10, 15, 20];
+  const QUICK_LIST_PCTS = [15, 20, 25]; // the trading group lists at buy × 1.15–1.25 and relists hourly
 
   // Mass bid: "sell instantly" - BIN = the sell price of the list (your BIN or FUT.GG), start one step
   // below. You check the market and press List yourself, one card at a time.
@@ -15090,6 +15194,11 @@ body.pt-grid-mode .ui-layout-right li.listFUTItem .auction .label { display: non
 .pt-flip-card .pt-fx-verdict-bad { color: #ff8a80; }
 .pt-flip-card .pt-fx-verdict-good { color: #27d98b; }
 .pt-flip-card .pt-fx-verdict-maybe { color: #f5c46b; }
+.pt-flip-card .pt-fx-clock { display: inline-block; margin-left: 12px; font-size: 12px; font-weight: 600; color: #8d9bb3; vertical-align: 1px; cursor: help; }
+.pt-flip-card .pt-fx-clock-sell, .pt-flip-card .pt-fx-clock-buy { color: #27d98b; }
+.pt-flip-card .pt-fx-clock-rewards { color: #f5c46b; }
+.pt-flip-card .pt-fx-clock-content { color: #ff8a80; }
+@media (max-width: 700px) { .pt-flip-card .pt-fx-clock { display: block; margin: 2px 0 0; } }
 .pt-flip-card .pt-fx-summary { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pt-meta-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
 .pt-meta-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }

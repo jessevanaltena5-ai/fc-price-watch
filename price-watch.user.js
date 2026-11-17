@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.4.1
+// @version      3.4.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10005,9 +10005,10 @@ function priceWatchMain(SCRIPT_VERSION) {
   // No "turn confirmed" from Friday 18:00 to Saturday 18:00 UK: the first bounce after a promo drop rarely holds.
   function turnBlackout(t = Date.now()) { const u = ukTime(t); return (u.day === 5 && u.hour >= 18) || (u.day === 6 && u.hour < 18); }
   // Hysteresis: on at −5% (smoothed 24 h). Off right away on a confirmed turn (three signals already need
-  // hours), or once the 24 h change is back above −2% after at least 6 h on (a +1.5% bounce of a noisy index
-  // no longer ends it). Kept per platform.
-  const MARKET_CRASH_KEY = "pt_market_crash_v1"; // { pc: { on, since } }
+  // hours), or once the 24 h change is back above −2% and the last −5% reading is 2+ h old (the 2 h averages
+  // then no longer overlap, so a short bounce of a noisy index doesn't end it). Before 3.4.2 it stayed on for
+  // 6 h after it started, even with the index back at yesterday's level (17 Nov 20:20: 24h +0.6%, "crashing").
+  const MARKET_CRASH_KEY = "pt_market_crash_v1"; // { pc: { on, since, last } }
   const marketCrashCache = {};
   function marketCrash(platform) {
     const key = futbinPlatform(platform);
@@ -10019,8 +10020,9 @@ function priceWatchMain(SCRIPT_VERSION) {
     const before = all[key] || { on: false, since: 0 };
     let state = before;
     if (mk && mk.s24 != null) {
-      if (!before.on && mk.s24 <= MARKET_CRASH) state = { on: true, since: Date.now() };
-      else if (before.on && (marketTurn(platform).level === "confirmed" || (mk.s24 > -0.02 && Date.now() - before.since >= 6 * 3600000))) state = { on: false, since: Date.now() };
+      if (!before.on && mk.s24 <= MARKET_CRASH) state = { on: true, since: Date.now(), last: Date.now() };
+      else if (before.on && mk.s24 <= MARKET_CRASH) { if (Date.now() - (before.last || 0) >= 10 * 60000) state = { ...before, last: Date.now() }; }
+      else if (before.on && (marketTurn(platform).level === "confirmed" || (mk.s24 > -0.02 && Date.now() - (before.last || before.since) >= 2 * 3600000))) state = { on: false, since: Date.now() };
     }
     if (state !== before) {
       all[key] = state;
@@ -10091,7 +10093,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   //   with 40% or fewer up).
   // One = "possible turn" (status line), both = "turn confirmed" (ntfy, and crash mode ends).
   function breadthAdd(platform, cards) {
-    const m6 = cards.map(card => card.m6).filter(value => value != null && Number.isFinite(value)).sort((a, b) => a - b);
+    // Only cards that moved: ~1 in 4 has exactly 0% over 6 h (17 Nov: 161 of 587), and counting those as
+    // "not rising" made 55% need ~75% of the moving cards up (never seen). Since 3.4.2: share of the movers.
+    const m6 = cards.map(card => card.m6).filter(value => value != null && Number.isFinite(value) && value !== 0).sort((a, b) => a - b);
     if (m6.length < 50) return;
     const key = futbinPlatform(platform);
     const all = getMarketRaw();

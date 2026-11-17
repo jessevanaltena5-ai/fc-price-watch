@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.3.2
+// @version      3.4.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -11,6 +11,12 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_info
+// @grant        GM.xmlHttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.deleteValue
+// @grant        GM.info
 // @connect      api.github.com
 // @connect      gist.githubusercontent.com
 // @connect      ntfy.sh
@@ -15875,6 +15881,56 @@ function L(nl, en) {
   }
 }
 
+// Userscript-manager layer: Tampermonkey (pc, iPhone) has GM_getValue / GM_setValue / GM_xmlhttpRequest;
+// the Userscripts app (iPhone / Safari) only has the promise API GM.getValue / GM.setValue / GM.xmlHttpRequest.
+// Same behaviour on both: the few stored keys are read once at start (Userscripts) and kept in memory.
+const PW_GM = (() => {
+  const gm = typeof GM !== "undefined" && GM ? GM : null;
+  const tmStore = typeof GM_getValue === "function" && typeof GM_setValue === "function";
+  const KEYS = ["github_gist_token", "github_gist_raw_url", "ntfy_topic"];
+  const cache = {};
+  let ready = Promise.resolve();
+  if (!tmStore && gm && typeof gm.getValue === "function") {
+    ready = Promise.all(KEYS.map(key => Promise.resolve().then(() => gm.getValue(key, null))
+      .then(value => { cache[key] = value == null ? null : value; }, () => { cache[key] = null; })));
+  }
+  let xhr = null;
+  if (typeof GM_xmlhttpRequest === "function") xhr = GM_xmlhttpRequest;
+  else if (gm && typeof gm.xmlHttpRequest === "function") xhr = details => gm.xmlHttpRequest(details);
+  else if (gm && typeof gm.xmlhttpRequest === "function") xhr = details => gm.xmlhttpRequest(details);
+  return {
+    ready,
+    xhr,
+    manager: tmStore ? "Tampermonkey" : gm ? "Userscripts" : "",
+    get(key) {
+      if (tmStore) return GM_getValue(key, null);
+      return Object.prototype.hasOwnProperty.call(cache, key) ? cache[key] : null;
+    },
+    set(key, value) {
+      if (tmStore) {
+        if (value == null && typeof GM_deleteValue === "function") GM_deleteValue(key);
+        else GM_setValue(key, value);
+        return;
+      }
+      if (!gm || typeof gm.setValue !== "function") throw new Error(L("Opslag van de userscript-manager niet beschikbaar", "Userscript manager storage not available"));
+      cache[key] = value == null ? null : value;
+      const done = value == null && typeof gm.deleteValue === "function" ? gm.deleteValue(key) : gm.setValue(key, value);
+      Promise.resolve(done).catch(error => console.warn("Price Watch: opslaan mislukt", error));
+    },
+    remove(key) {
+      if (typeof GM_deleteValue === "function") return GM_deleteValue(key);
+      if (gm && typeof gm.deleteValue === "function") return Promise.resolve(gm.deleteValue(key)).catch(() => {});
+    },
+    version() {
+      try {
+        if (typeof GM_info !== "undefined" && GM_info && GM_info.script) return GM_info.script.version || "";
+        if (gm && gm.info && gm.info.script) return gm.info.script.version || "";
+      } catch (_) { /* unknown */ }
+      return "";
+    }
+  };
+})();
+
 // Live via your pc: reads and writes your secret GitHub gist. Runs in Tampermonkey's part, so the EA page
 // never sees the GitHub token (only on the pc that sends); GM_xmlhttpRequest makes the requests.
 (() => {
@@ -15883,32 +15939,30 @@ function L(nl, en) {
 
   // The FUT Genie login of v2.0.x is gone: remove its stored session.
   try {
-    if (typeof GM_deleteValue === "function") GM_deleteValue("futgenie_auth");
+    PW_GM.remove("futgenie_auth");
   } catch (_) {
     // Nothing stored.
   }
 
   function getValue(key) {
     try {
-      return typeof GM_getValue === "function" ? GM_getValue(key, null) : null;
+      return PW_GM.get(key);
     } catch {
       return null;
     }
   }
 
   function setValue(key, value) {
-    if (typeof GM_setValue !== "function") throw new Error(L("Tampermonkey-opslag niet beschikbaar", "Tampermonkey storage not available"));
-    if (value == null && typeof GM_deleteValue === "function") GM_deleteValue(key);
-    else GM_setValue(key, value);
+    PW_GM.set(key, value);
   }
 
   function request(method, url, body, headers) {
     return new Promise((resolve, reject) => {
-      if (typeof GM_xmlhttpRequest !== "function") {
-        reject(new Error(L("Tampermonkey staat geen verzoeken toe (GM_xmlhttpRequest ontbreekt)", "Tampermonkey doesn't allow requests (GM_xmlhttpRequest missing)")));
+      if (!PW_GM.xhr) {
+        reject(new Error(L("De userscript-manager staat geen verzoeken toe (GM_xmlhttpRequest / GM.xmlHttpRequest ontbreekt)", "The userscript manager doesn't allow requests (GM_xmlhttpRequest / GM.xmlHttpRequest missing)")));
         return;
       }
-      GM_xmlhttpRequest({
+      PW_GM.xhr({
         method,
         url,
         headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", ...(headers || {}) },
@@ -15938,7 +15992,7 @@ function L(nl, en) {
     const topic = getValue(NTFY_KEY);
     if (!topic) return Promise.resolve(false);
     return new Promise((resolve, reject) => {
-      GM_xmlhttpRequest({
+      PW_GM.xhr({
         method: "POST",
         url: `https://ntfy.sh/${encodeURIComponent(topic)}`,
         // Header values must be plain ASCII; the emoji goes in as a tag ("dart" = 🎯).
@@ -16040,7 +16094,7 @@ function L(nl, en) {
   // Phone: opened from that QR code. Take the token out of the address right away, check it, then store it.
   const TOKEN_PARAM = /[#&?]pwt=((?:ghp_|github_pat_)\w+)(?:&pwg=([0-9a-f]{20,40}))?/i;
   const tokenLink = String(location.href).match(TOKEN_PARAM);
-  if (tokenLink) {
+  if (tokenLink) PW_GM.ready.then(() => { // Userscripts: stored values are read asynchronously
     try {
       history.replaceState(null, "", location.pathname + location.search.replace(/[?&]pwt=[^&#]*(&pwg=[^&#]*)?/i, "").replace(/^&/, "?"));
     } catch (_) {
@@ -16052,9 +16106,10 @@ function L(nl, en) {
     if (current && current !== tokenLink[1] && !window.confirm(L("Price Watch: deze link vervangt je opgeslagen GitHub-token. Alleen doen als de QR-code van je eigen pc komt. Doorgaan?", "Price Watch: this link replaces your saved GitHub token. Only continue if the QR code came from your own PC. Continue?"))) {
       tell({ ok: false, error: L("token niet vervangen", "token not replaced") });
     } else (gistId ? setToken(tokenLink[1], gistId) : Promise.reject(new Error(L("geen gist in de link", "no gist in the link")))).then(() => tell({ ok: true, gistId }), error => tell({ ok: false, error: error.message }));
-  }
+  });
 
   async function handle(message) {
+    await PW_GM.ready;
     switch (message.type) {
       case "status":
         return { hasToken: !!getValue(TOKEN_KEY) };
@@ -16136,12 +16191,12 @@ try {
       reply({ ok: false, error: L("Geblokkeerde URL: alleen https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch en FUTBIN zoeken/sales/market/fodder-prices toegestaan", "Blocked URL: only https://r2.fut.gg, FUT.GG cheapest-by-rating/momentum, fodder.gg price-watch, FUTBIN search/sales/market/fodder-prices are allowed") });
       return;
     }
-    if (typeof GM_xmlhttpRequest !== "function") {
+    if (!PW_GM.xhr) {
       reply({ ok: false, error: L("GM_xmlhttpRequest ontbreekt in Tampermonkey-sandbox; controleer userscript-manager en @grant", "GM_xmlhttpRequest missing in the Tampermonkey sandbox; check the userscript manager and @grant") });
       return;
     }
     try {
-      GM_xmlhttpRequest({
+      PW_GM.xhr({
         method: "GET",
         url: parsed.href,
         headers: { "Accept": htmlPage ? "text/html" : "application/json", "Cache-Control": "no-cache" },
@@ -16167,7 +16222,7 @@ try {
 // Run inside the page itself (not Tampermonkey's sandbox), so the EA app's objects are reachable on
 // every browser, including Safari on iOS.
 (() => {
-  const version = typeof GM_info !== "undefined" && GM_info.script ? GM_info.script.version : "";
+  const version = PW_GM.version();
   const script = document.createElement("script");
   script.textContent = `(${priceWatchMain.toString()})(${JSON.stringify(version)});`;
   (document.head || document.documentElement).appendChild(script);

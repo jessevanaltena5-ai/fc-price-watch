@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.3.1
+// @version      3.3.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4546,21 +4546,44 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
   }
 
+  // Lowest Buy Now among the visible market search results (cached a moment: every badge asks each second).
+  let cheapestPriceCache = { at: 0, price: 0 };
+  function cheapestResultPrice() {
+    if (Date.now() - cheapestPriceCache.at < 300) return cheapestPriceCache.price;
+    let price = 0;
+    document.querySelectorAll(".SearchResults li.listFUTItem").forEach(li => {
+      const item = li.offsetParent ? searchRowItems.get(li) : null;
+      const auction = item ? auctionOf(item) : null;
+      const bin = auction && auction.tradeState === "active" ? Number(auction.buyNowPrice) || 0 : 0;
+      if (bin > 0 && (!price || bin < price)) price = bin;
+    });
+    cheapestPriceCache = { at: Date.now(), price };
+    return price;
+  }
   function drawRunBinBadge(badge) {
     const row = badge.__ptRow;
     const info = runBinInfo(badge.__ptItem); // again every second: the run may have moved on or stopped
     const bin = info ? massBinDeal(badge.__ptItem, info) : null;
     const hot = !!bin && bin.strong;
-    // 👀 no-max runs show the whole market, so there "at/under the buy price" is worth a steady green too.
-    const green = !!bin && !hot && !!info.list.noMax;
+    // 👀 no-max runs show the whole market: every card at/under the buy price is green. Plain BIN runs: EA's
+    // filter already keeps everything under the max, so only the cheapest result(s) go green (user, v3.3.2).
+    const cheapest = !!bin && !info.list.noMax && bin.price === cheapestResultPrice();
+    const green = !!bin && !hot && (!!info.list.noMax || cheapest);
     row.classList.toggle("pt-mb-binhot", hot);
     row.classList.toggle("pt-mb-bin", green);
     badge.textContent = "";
-    badge.className = "pt-mb-badge";
+    badge.className = "pt-mb-badge pt-mb-runbin";
     badge.style.display = hot || green ? "" : "none";
-    if (green) badge.append(el("div", "pt-mb-binline", L(`✅ Buy Now ${priceFormat.format(bin.price)} ≤ koopprijs ${priceFormat.format(info.max)}`, `✅ Buy Now ${priceFormat.format(bin.price)} ≤ buy price ${priceFormat.format(info.max)}`)));
     const target = info && info.list.noMax ? L("je koopprijs", "your buy price") : L("je max", "your max");
-    if (hot) badge.append(el("div", "pt-mb-binline", L(`⚡ Buy Now ${priceFormat.format(bin.price)} · ${bin.under}% onder ${target} ${priceFormat.format(info.max)}`, `⚡ Buy Now ${priceFormat.format(bin.price)} · ${bin.under}% under ${target} ${priceFormat.format(info.max)}`)));
+    let text = "";
+    if (green) text = info.list.noMax
+      ? L(`✅ Buy Now ${priceFormat.format(bin.price)} ≤ koopprijs ${priceFormat.format(info.max)}`, `✅ Buy Now ${priceFormat.format(bin.price)} ≤ buy price ${priceFormat.format(info.max)}`)
+      : L(`✅ Goedkoopste: Buy Now ${priceFormat.format(bin.price)} ≤ max ${priceFormat.format(info.max)}`, `✅ Cheapest: Buy Now ${priceFormat.format(bin.price)} ≤ max ${priceFormat.format(info.max)}`);
+    if (hot) text = L(`⚡ Buy Now ${priceFormat.format(bin.price)} · ${bin.under}% onder ${target} ${priceFormat.format(info.max)}`, `⚡ Buy Now ${priceFormat.format(bin.price)} · ${bin.under}% under ${target} ${priceFormat.format(info.max)}`);
+    if (text) badge.append(el("div", "pt-mb-binline", text));
+    // In the grid the colour says it (the line would make the tiles taller): the text is in the hover.
+    if (text) row.setAttribute("title", text);
+    else if (row.hasAttribute("title")) row.removeAttribute("title");
   }
 
   window.setInterval(() => {
@@ -14731,6 +14754,7 @@ body.pt-grid-mode ul > li.listFUTItem > .rowContent > .auction > *, body.pt-grid
 body.pt-grid-mode li.listFUTItem .auction .label { font-size: 10px !important; opacity: .75; margin-right: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto !important; width: auto !important; }
 body.pt-grid-mode li.listFUTItem .auction .value, body.pt-grid-mode li.listFUTItem .auction .time { font-size: 11px !important; white-space: nowrap; flex: none !important; width: auto !important; line-height: 1.25 !important; height: auto !important; }
 body.pt-grid-mode li.listFUTItem .pt-mb-badge:not(.pt-mb-tile), body.pt-grid-mode li.listFUTItem .pt-tl-row { font-size: 11px; text-align: center; width: 100%; white-space: normal; }
+body.pt-grid-mode li.listFUTItem .pt-mb-badge.pt-mb-runbin { display: none !important; }
 body.pt-grid-mode li.listFUTItem > .pt-tl-badge { position: static !important; transform: none !important; margin: 2px 6px 6px; text-align: center; font-size: 11px; }
 /* Right-hand list (84 px tiles): only the card, name and price stay readable; stats go (they are in the detail panel). */
 body.pt-grid-mode .ui-layout-right li.listFUTItem .entityContainer > .name { font-size: 10px !important; }

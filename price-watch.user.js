@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.2.1
+// @version      3.3.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4323,6 +4323,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const root = typeof cell.getRootElement === "function" ? cell.getRootElement() : null;
     if (!root) return;
     markGridList(root);
+    noteSearchRow(root, item);
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
     root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow", "pt-mb-bin", "pt-mb-binhot");
     const info = massBidInfo(item) || runBinInfo(item);
@@ -4386,6 +4387,77 @@ function priceWatchMain(SCRIPT_VERSION) {
       : L("Spelerslijsten (Unassigned, Club, Transferlijst, Targets, zoekresultaten) als raster van kaarten. Groen / knipperend groen blijft.", "Player lists (Unassigned, Club, Transfer List, Targets, search results) as a grid of cards. Green / blinking green stays.");
   }
   window.setInterval(drawGridButton, 1000);
+
+  // Cheapest Buy Now (user, v3.3.0): when market search results come in, the result with the lowest Buy
+  // Now is selected (same as tapping it), so EA's detail panel on the right shows it and you press
+  // "Buy Now" yourself. Never buys. Once per result set: tap another card and it stays; a new page or a
+  // changed list (e.g. the cheapest is gone after you bought it) selects the cheapest again.
+  const CHEAPEST_KEY = "pt_cheapest_pick_v1";
+  let cheapestOn = (() => { try { return localStorage.getItem(CHEAPEST_KEY) !== "0"; } catch (_) { return true; } })();
+  const searchRowItems = new WeakMap();
+  let cheapestSetKey = "";
+  let cheapestTimer = 0;
+  let cheapestButton = null;
+  function noteSearchRow(root, item) {
+    if (!item || !root.closest(".SearchResults")) return;
+    searchRowItems.set(root, item);
+    window.clearTimeout(cheapestTimer);
+    cheapestTimer = window.setTimeout(selectCheapestBin, 250); // after EA has drawn the whole page
+  }
+  function cheapestBinRow() {
+    const rows = [...document.querySelectorAll(".SearchResults li.listFUTItem")].filter(li => li.offsetParent);
+    const entries = rows.map((li, index) => {
+      const item = searchRowItems.get(li);
+      const auction = item ? auctionOf(item) : null;
+      return { li, index, auction, price: auction ? Number(auction.buyNowPrice) || 0 : 0 };
+    }).filter(entry => entry.auction && entry.auction.tradeState === "active" && entry.price > 0);
+    if (!entries.length) return null;
+    const key = entries.map(entry => entry.auction.tradeId).join(",");
+    entries.sort((a, b) => a.price - b.price || a.index - b.index); // same price: the first (least time left)
+    return { key, li: entries[0].li };
+  }
+  function selectCheapestBin() {
+    if (!cheapestOn) return;
+    const best = cheapestBinRow();
+    if (!best || best.key === cheapestSetKey) return;
+    cheapestSetKey = best.key;
+    if (best.li.classList.contains("selected")) return;
+    const target = best.li.querySelector(".rowContent") || best.li;
+    const rect = target.getBoundingClientRect();
+    const at = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    try { target.dispatchEvent(new PointerEvent("pointerdown", at)); } catch (_) { /* older browser */ }
+    target.dispatchEvent(new MouseEvent("mousedown", at));
+    try { target.dispatchEvent(new PointerEvent("pointerup", at)); } catch (_) { /* older browser */ }
+    target.dispatchEvent(new MouseEvent("mouseup", at));
+    // EA wants a click on some builds: only when the tap did not select it yet.
+    window.setTimeout(() => { if (best.li.isConnected && !best.li.classList.contains("selected")) target.dispatchEvent(new MouseEvent("click", at)); }, 120);
+    if (gridOn) best.li.scrollIntoView({ block: "nearest" });
+  }
+  function drawCheapestButton() {
+    if (!document.body) return;
+    if (!cheapestButton || !cheapestButton.isConnected) {
+      document.querySelectorAll(".pt-cheapest-toggle").forEach(node => node.remove());
+      cheapestButton = el("button", "pt-grid-toggle pt-cheapest-toggle", "");
+      cheapestButton.type = "button";
+      cheapestButton.addEventListener("click", () => {
+        cheapestOn = !cheapestOn;
+        try { localStorage.setItem(CHEAPEST_KEY, cheapestOn ? "1" : "0"); } catch (_) { /* this session only */ }
+        cheapestSetKey = "";
+        if (cheapestOn) selectCheapestBin();
+        drawCheapestButton();
+      });
+      document.body.appendChild(cheapestButton);
+    }
+    const visible = [...document.querySelectorAll(".SearchResults li.listFUTItem")].some(li => li.offsetParent);
+    cheapestButton.style.display = visible ? "" : "none";
+    cheapestButton.classList.toggle("pt-grid-toggle-on", cheapestOn);
+    const text = cheapestOn ? L("💰 Goedkoopste aan", "💰 Cheapest on") : L("💰 Goedkoopste", "💰 Cheapest");
+    if (cheapestButton.textContent !== text) cheapestButton.textContent = text;
+    cheapestButton.title = cheapestOn
+      ? L("Bij nieuwe zoekresultaten wordt de kaart met de laagste Buy Now geselecteerd; jij drukt zelf op Buy Now. Klik = uit.", "On new search results the card with the lowest Buy Now is selected; you press Buy Now yourself. Click = off.")
+      : L("Uit. Klik = bij nieuwe zoekresultaten de laagste Buy Now selecteren (jij drukt zelf op Buy Now).", "Off. Click = select the lowest Buy Now on new search results (you press Buy Now yourself).");
+  }
+  window.setInterval(drawCheapestButton, 1000);
 
   // Plain Buy Now run (not a bid list): the card of the current step, with that step's max BIN. EA's filter
   // already keeps every result under the max, so these rows only blink when the Buy Now is 10%+ under it.
@@ -14591,6 +14663,7 @@ function priceWatchMain(SCRIPT_VERSION) {
    pointer-events changes, no hidden action buttons; only lists whose rows are EA item rows (li.listFUTItem). */
 .pt-grid-toggle { position: fixed; left: 8px; bottom: 40px; z-index: 99999; border: 1px solid rgba(255,255,255,.18); border-radius: 14px; padding: 5px 11px; font: 600 12px/1.3 sans-serif; cursor: pointer; color: #dfe8f5; background: #22324a; box-shadow: 0 2px 8px rgba(0,0,0,.4); }
 .pt-grid-toggle.pt-grid-toggle-on { background: #2f7bd8; color: #fff; border-color: #8fc2ff; }
+.pt-cheapest-toggle { bottom: 72px; }
 body.pt-grid-mode :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) {
   display: grid !important; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 4px; height: auto !important; align-content: start; padding: 4px !important; }
 body.pt-grid-mode .ui-layout-right :is(.paginated-item-list > ul, ul.searchResults, ul.itemList, ul.pt-grid-list):has(> li.listFUTItem) {

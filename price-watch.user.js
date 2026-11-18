@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.1
+// @version      3.5.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9882,9 +9882,19 @@ function priceWatchMain(SCRIPT_VERSION) {
       const before = live[0][0] <= lastT - (hours + 2) * 3600000 + 900000 ? mean(lastT - (hours + 2) * 3600000, lastT - hours * 3600000) : null;
       return recent && before ? recent / before - 1 : null;
     };
+    // The last 2 h vs the median of the last 24 h: a multi-hour spike (18 Nov: 74 → 102 → 88 for 3 h → back
+    // to 74) is only a few hours of the day, so the median stays at the normal level and the drop back
+    // doesn't count as a fall. A real fall ends below the day's median.
+    const day = live.filter(([x]) => x > lastT - 24 * 3600000).map(p => p[1]).sort((a, b) => a - b);
+    const dayMedian = day.length >= 12 ? day[Math.floor(day.length / 2)] : null;
+    const recent2h = mean(lastT - 2 * 3600000, lastT);
     return { now, at: set.at, ch6: change(at(6)), ch24: change(at(24)), ch72: change(live[0][1]), vsWeek: weekAvg ? now / weekAvg - 1 : null,
-      s6: smooth(6), s24: smooth(24) };
+      s6: smooth(6), s24: smooth(24), vsDay: dayMedian && recent2h ? recent2h / dayMedian - 1 : null };
   }
+  // Below the day: the index (2 h mean) is 2%+ under its 24 h median (or that is not known). "Falling hard"
+  // and "crashing" need this too, so the fall back after a spike up is no alarm.
+  const MARKET_BELOW_DAY = -0.02;
+  const marketBelowDay = mk => !mk || mk.vsDay == null || mk.vsDay <= MARKET_BELOW_DAY;
   // "Market falling hard" (one rule for the push, Flip, Meta, fodder and the night dip): the smoothed 6 h
   // change of the index is −3% or worse. It holds for 6 h after the last such reading, so it doesn't flip
   // back and forth, and ends earlier when the index is up again over 6 h or the turn is confirmed.
@@ -9908,7 +9918,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   function marketFallingNow(key, platform, now) {
     const mk = marketStats(platform);
     const store = marketFallStore();
-    if (mk && mk.s6 != null && mk.s6 <= MARKET_FALL_6H) {
+    if (mk && mk.s6 != null && mk.s6 <= MARKET_FALL_6H && marketBelowDay(mk)) {
       const last = store[key];
       if (!last || now - last.at > 60000 || mk.s6 < last.s6) {
         store[key] = { at: now, s6: Math.round(mk.s6 * 1000) / 1000 };
@@ -9919,6 +9929,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const last = store[key];
     if (!last || last.ended || now - last.at >= MARKET_FALL_HOLD_MS) return null;
     if (!mk || mk.s6 == null || mk.s6 >= 0) return null; // up again over 6 h, or not known now: no old alarm
+    if (!marketBelowDay(mk)) return null; // back at or above the day's normal level: no old alarm
     // 16 Nov: a −6.5% reading of 10:28 came back at 15:30 when the 6 h change dipped to −1.8%, after it had
     // been +4.7% in between. Once the index was up over 6 h after the last hard-fall reading, that alarm is
     // over for good (marked "ended", also in the gist, so another device doesn't bring it back).
@@ -10140,9 +10151,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     const before = all[key] || { on: false, since: 0 };
     let state = before;
     if (mk && mk.s24 != null) {
-      if (!before.on && mk.s24 <= MARKET_CRASH) state = { on: true, since: Date.now(), last: Date.now() };
-      else if (before.on && mk.s24 <= MARKET_CRASH) { if (Date.now() - (before.last || 0) >= 10 * 60000) state = { ...before, last: Date.now() }; }
-      else if (before.on && (marketTurn(platform).level === "confirmed" || (mk.s24 > -0.02 && Date.now() - (before.last || before.since) >= 2 * 3600000))) state = { on: false, since: Date.now() };
+      const crashing = mk.s24 <= MARKET_CRASH && marketBelowDay(mk);
+      if (!before.on && crashing) state = { on: true, since: Date.now(), last: Date.now() };
+      else if (before.on && crashing) { if (Date.now() - (before.last || 0) >= 10 * 60000) state = { ...before, last: Date.now() }; }
+      else if (before.on && (marketTurn(platform).level === "confirmed" || ((mk.s24 > -0.02 || !marketBelowDay(mk)) && Date.now() - (before.last || before.since) >= 2 * 3600000))) state = { on: false, since: Date.now() };
     }
     if (state !== before) {
       all[key] = state;
@@ -10304,7 +10316,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const stored = (() => { try { return JSON.parse(localStorage.getItem(MARKET_ALERT_KEY) || "{}") || {}; } catch (_) { return {}; } })();
     const drop = low[1] / peak - 1;
     const up = mk.now / low[1] - 1;
-    const fall = mk.s6 != null && mk.s6 <= MARKET_FALL_6H && now - (stored.fallAt || 0) > 12 * 3600000;
+    const fall = mk.s6 != null && mk.s6 <= MARKET_FALL_6H && marketBelowDay(mk) && now - (stored.fallAt || 0) > 12 * 3600000;
     const turnState = marketTurn(platform);
     const turnLow = turnState.index ? turnState.index.lowT : low[0];
     const turn = turnState.level === "confirmed" && turnLow !== stored.lowT && now - (stored.turnAt || 0) > 12 * 3600000;

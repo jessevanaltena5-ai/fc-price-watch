@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.3
+// @version      3.5.4
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -2887,7 +2887,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     try { const auction = typeof item.getAuctionData === "function" ? item.getAuctionData() : null; bin = auction && auction.buyNowPrice > 0 ? auction.buyNowPrice : 0; } catch (_) { /* no auction */ }
     let bought = 0;
     try { bought = boughtPrice(item) || 0; } catch (_) { /* unknown */ }
-    const key = [id, platform, fb ? fb.fetchedAt : "-", futbinManual ? 1 : 0, scExpanded ? 1 : 0, bin, bought, uiLang()].join("|");
+    const key = [id, platform, fb ? fb.fetchedAt : "-", futbinManual ? 1 : 0, scExpanded ? 1 : 0, bin, bought, uiLang(), Math.floor(Date.now() / 60000)].join("|");
     if (box && box.dataset.key === key) return;
     if (!box) box = el("div", `${SC_CLASS} pt-sc-mini`);
     box.dataset.key = key;
@@ -2906,8 +2906,11 @@ function priceWatchMain(SCRIPT_VERSION) {
       box.appendChild(check);
     } else {
       const pr = futbinPrices(fb);
-      const chip = el("span", `pt-sc-chip ${pr.profit <= 0 ? "pt-sc-chip-bad" : pr.slow || pr.reasons.length ? "pt-sc-chip-amber" : "pt-sc-chip-ok"}`,
-        pr.profit <= 0 ? L("geen winst", "no profit") : pr.slow || pr.reasons.length ? L("twijfel", "doubtful") : "ok");
+      // The same warnings as in the Flip list (new card, few sales, market, promo, clock), so a just-released
+      // card shows "new card" here too (20 Nov: a 1-day-old Haaland bought with only "twijfel" on screen).
+      const cardWarn = salesCheckWarnings(fb, pr, bin || fb.median, platform);
+      const chip = el("span", `pt-sc-chip ${pr.profit <= 0 ? "pt-sc-chip-bad" : cardWarn.risky || pr.slow || pr.reasons.length ? "pt-sc-chip-amber" : "pt-sc-chip-ok"}`,
+        pr.profit <= 0 ? L("geen winst", "no profit") : cardWarn.risky ? L("risico", "risky") : pr.slow || pr.reasons.length ? L("twijfel", "doubtful") : "ok");
       top.appendChild(chip);
       const three = el("div", "pt-sc-mini-three");
       const cell = (cls, value, label) => { const c = el("div", cls); c.append(el("b", "", value), el("span", "", label)); return c; };
@@ -2915,6 +2918,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         cell(pr.profit > 0 ? "pt-sc-plus" : "pt-sc-minus", `${pr.profit > 0 ? "+" : ""}${scK(pr.profit)}`, L("na 5%", "after tax")));
       box.appendChild(three);
       box.appendChild(el("div", "pt-sc-muted", L(`24u: ${fb.sales24} verkocht · ${Math.round(fb.sellThrough * 100)}% · mediaan ${scK(fb.median)}`, `24h: ${fb.sales24} sold · ${Math.round(fb.sellThrough * 100)}% · median ${scK(fb.median)}`)));
+      cardWarn.warnings.forEach(text => box.appendChild(el("div", "pt-sc-warn pt-sc-cardwarn", `⚠ ${text}`)));
       if (bin && !bought) {
         box.appendChild(el("div", bin <= pr.buy ? "pt-sc-ok" : "pt-sc-warn", bin <= pr.buy
           ? L(`✓ Buy Now ${scK(bin)} ≤ je koopprijs`, `✓ Buy Now ${scK(bin)} ≤ your buy price`)
@@ -8559,6 +8563,39 @@ function priceWatchMain(SCRIPT_VERSION) {
     const cheap = gap <= 0.06;
     const status = profit <= 0 ? "skip" : cheap && risky ? "risk" : gap <= 0.02 ? "buy" : cheap ? "near" : "wait";
     return { buy, bid: useFutbin ? Math.min(futbinPrices(futbin).bid, buy) : 0, sell, profit, pct, gap, warnings, status, risky, futbin: useFutbin ? futbin : null };
+  }
+
+  // Warnings for one card from its FUTBIN sales alone (the EA card screen): the FUTBIN rules of flipCalc plus
+  // market, promo window and trade clock. The fodder.gg ones (odd low/high, restless) need its hourly data.
+  function salesCheckWarnings(futbin, fbPrices, price, platform) {
+    const warnings = [];
+    let risky = false;
+    try {
+      if (futbin.salesInBase >= 3) {
+        if (fbPrices.adjusted) { warnings.push(sellLoweredWarning(fbPrices, futbin)); if (fbPrices.slow) risky = true; }
+        if (futbin.sales24 < 5) { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); risky = true; }
+        const minSales = price > 300000 ? 10 : 20;
+        if (futbin.salesPerDay < minSales || (futbin.listings24 >= 10 && futbin.sellThrough < 0.25)) {
+          warnings.push(ft("w_illiquid", { n: Math.round(futbin.salesPerDay), min: minSales, pct: Math.round(futbin.sellThrough * 100) }));
+          risky = true;
+        }
+        if (!fbPrices.medianOk) { warnings.push(ft("w_medianThin", { median: flipShort(fbPrices.refMedian) })); risky = true; }
+        const fh = futbin.h72;
+        if (fh && fh.state === "downLong") { warnings.push(ft("w_fbDownLong")); risky = true; }
+        if (futbin.trend != null && futbin.trend <= -0.05) { warnings.push(ft("w_saleFalling", { pct: flipPct(futbin.trend * 100) })); risky = true; }
+        if (fh && fh.demand === "falling") warnings.push(ft("w_fbDemand", { pct: flipPct(fh.volume * 100) }));
+        if (futbin.listings24 >= 10 && futbin.sellThrough < 0.1) warnings.push(ft("w_lowSellThrough", { pct: `${Math.round(futbin.sellThrough * 100)}%` }));
+        if (futbin.outliers && futbin.outliers.length) warnings.push(ft("w_outlierSale", { list: futbin.outliers.map(flipShort).join(", ") }));
+      } else { warnings.push(ft("w_fewSales", { n: futbin.sales24 })); risky = true; }
+      // New card: also with few sales (that is exactly when a card is new), always on top.
+      const youngDays = futbinYoung(futbin);
+      if (youngDays) { warnings.unshift(ft("w_young", { days: youngDays })); risky = true; }
+      if (marketCheck(null, platform, warnings)) risky = true;
+      if (promoWindow()) { warnings.unshift(ft("w_promoWindow")); risky = true; }
+      const pct = fbPrices.buy > 0 ? (Math.floor(fbPrices.sell * (1 - EA_TAX)) - fbPrices.buy) / fbPrices.buy * 100 : 0;
+      if (clockCheck(pct, warnings)) risky = true;
+    } catch (error) { console.warn("Price Watch: card warnings failed.", error); }
+    return { warnings: [...new Set(warnings)], risky };
   }
 
   // Position size and exit (review): per card at most 10% of your coins and 10% of its daily sales; not sold
@@ -15418,7 +15455,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
 .pt-sc-recent { margin-top: 8px; }
 .pt-sc-table td.pt-sc-bad { color: #f4a35d; font-weight: 700; }
 .pt-sc-verdict { display: grid; gap: 3px; margin-top: 8px; }
-.pt-sc-warn { color: #f4a35d; } .pt-sc-ok { color: #27d98b; } .pt-sc-info { color: #c9d3e0; } .pt-sc-muted { color: #8d9aae; font-size: 12px; }
+.pt-sc-warn { color: #f4a35d; } .pt-sc-cardwarn { font-size: 12px; line-height: 1.35; margin-top: 4px; } .pt-sc-ok { color: #27d98b; } .pt-sc-info { color: #c9d3e0; } .pt-sc-muted { color: #8d9aae; font-size: 12px; }
 .pt-sc-own { display: flex; gap: 8px; align-items: center; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(148, 178, 230, .12); }
 .pt-sc-input { width: 120px; padding: 5px 8px; border-radius: 8px; border: 1px solid rgba(148, 178, 230, .25); background: rgba(0, 0, 0, .25); color: #fff; font: inherit; }
 .pt-sc-mini { margin: 12px 0 4px; background: rgba(7, 12, 22, .85); border: 1px solid rgba(148, 178, 230, .22); border-radius: 12px; padding: 10px 12px; color: #dfe7f2; font-size: 13px; line-height: 1.45; text-align: left; }

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.2
+// @version      3.5.3
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8624,26 +8624,29 @@ function priceWatchMain(SCRIPT_VERSION) {
     const kept = log.filter(entry => now - entry.t < 5 * 86400000).slice(-400);
     try { localStorage.setItem(SIGNAL_LOG_KEY, JSON.stringify(kept)); } catch (_) { /* next time */ }
   }
-  // "📒 70 signals (19 fodder · 51 flip) · 6h ✅30 ❌21": per horizon how many cards went up / down since the signal.
+  // "📒 70 signals (19 fodder · 51 flip) · 6h ✅30 ❌40 (avg −1.2%)": per horizon how many signals would have
+  // won after the 5% tax: bought at the advised buy price (Koop ≤, else the price then), sold at the price
+  // 6 / 24 / 72 h later minus 5%. Before 3.5.3 it counted "went up at all", which a +1 step already met.
   function signalLogSummary() {
     const log = signalLog();
     if (!log.length) return "";
     const count = field => {
-      const done = log.filter(entry => entry[field] > 0 && entry.p0 > 0);
+      const done = log.filter(entry => entry[field] > 0 && (entry.buy > 0 || entry.p0 > 0));
       if (!done.length) return "";
-      const up = done.filter(entry => entry[field] > entry.p0).length;
-      const down = done.filter(entry => entry[field] < entry.p0).length;
-      return ` · ${field.slice(1)}${L("u", "h")} ✅${up} ❌${down}`;
+      const result = entry => entry[field] * 0.95 / (entry.buy > 0 ? entry.buy : entry.p0) - 1;
+      const won = done.filter(entry => result(entry) > 0).length;
+      const avg = done.reduce((sum, entry) => sum + result(entry), 0) / done.length;
+      return ` · ${field.slice(1)}${L("u", "h")} ✅${won} ❌${done.length - won} (${L("gem.", "avg")} ${flipPct(avg * 100, 1)})`;
     };
     const fodder = log.filter(entry => entry.src === "fodderSbc").length;
     const flips = log.length - fodder;
     const text = L(`📒 ${log.length} signalen (${fodder} fodder · ${flips} flip)`, `📒 ${log.length} signals (${fodder} fodder · ${flips} flip)`) + count("p6") + count("p24") + count("p72");
     const help = [
-      L("Elke keer dat het script 🟢 KOPEN zei, schrijft het de prijs op. 6, 24 en 72 uur later kijkt het opnieuw: is de kaart duurder geworden?", "Every time the script said 🟢 BUY, it writes down the price. 6, 24 and 72 hours later it looks again: did the card get more expensive?"),
+      L("Elke keer dat het script 🟢 KOPEN zei, schrijft het de prijs op. 6, 24 en 72 uur later kijkt het opnieuw: had je winst gehad als je voor de Koop ≤-prijs kocht en toen verkocht (min 5% tax)?", "Every time the script said 🟢 BUY, it writes down the price. 6, 24 and 72 hours later it looks again: would you have won if you bought at the Buy ≤ price and sold then (minus 5% tax)?"),
       L(`${log.length} = zoveel keer zei het KOPEN (laatste 5 dagen): ${fodder} fodder (84–88) en ${flips} flips.`, `${log.length} = that many times it said BUY (last 5 days): ${fodder} fodder (84–88) and ${flips} flips.`),
-      L("6u ✅30 ❌21 = 6 uur later waren 30 kaarten duurder (goede tip) en 21 goedkoper (slechte tip). Gelijk gebleven telt niet mee.", "6h ✅30 ❌21 = 6 hours later 30 cards were more expensive (good tip) and 21 cheaper (bad tip). Unchanged isn't counted."),
+      L("6u ✅30 ❌40 (gem. −1,2%) = na 6 uur had je met 30 tips winst na tax en met 40 niet. Gem. = wat je gemiddeld per tip overhield of verloor.", "6h ✅30 ❌40 (avg −1.2%) = after 6 hours 30 tips won after tax and 40 didn't. Avg = what you kept or lost per tip on average."),
       L("Nog niet gemeten kaarten (te kort geleden) tellen ook niet mee. Minder dan ±20 gemeten = nog toeval.", "Cards not measured yet (too recent) aren't counted either. Fewer than ~20 measured = still luck."),
-      L("Let op: 5% belasting. Een kaart die maar een klein beetje duurder werd telt als ✅, maar levert na belasting nog verlies op.", "Note: 5% tax. A card that only went up a little counts as ✅ but is still a loss after tax.")
+      L("De prijs later is de lijstprijs (FUT.GG), niet wat je echt kreeg. In een stijgende markt lijkt elke tip goed: kijk vooral naar dagen dat de markt zakte.", "The later price is the list price (FUT.GG), not what you really got. In a rising market every tip looks good: look mostly at days the market fell.")
     ].join("\n");
     return { text, help, key: "signals" };
   }

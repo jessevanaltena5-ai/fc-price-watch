@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.4
+// @version      3.5.5
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -11943,7 +11943,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       } else if (turnNow === "confirmed") { verdict = L("📈 Markt draait — kijk weer naar kopen", "📈 Market is turning — look at buying again"); tone = "good"; }
       else if (turnNow === "possible") { verdict = L("🔄 Markt draait misschien — nog even afwachten", "🔄 Market may be turning — wait a little longer"); tone = "maybe"; }
       else if (count("near")) { verdict = L(`🟡 ${count("near")} bijna op koopprijs — nog niet kopen`, `🟡 ${count("near")} almost at buy price — don't buy yet`); tone = "maybe"; }
-      else { verdict = L("⚪ Nu niets om te kopen", "⚪ Nothing to buy right now"); tone = "calm"; }
+      else {
+        verdict = L("⚪ Nu niets om te kopen", "⚪ Nothing to buy right now"); tone = "calm";
+        // Why nothing is green: the promo window (Thu 17:00 – Fri 21:00 UK) makes every cheap card 🟠.
+        if (promoWindow()) {
+          const u = ukTime();
+          const end = formatTime(Date.now() + ((u.day === 4 ? 24 : 0) + 21 - u.hour) * 3600000);
+          verdict += u.day === 4 ? L(` · promo-venster tot vr ${end}`, ` · promo window until Fri ${end}`) : L(` · promo-venster tot ${end}`, ` · promo window until ${end}`);
+        }
+      }
       const time = momentum ? (set ? formatTime(set.at) : "") : (data ? formatTime(data.fetchedAt) : "");
       const summary = haveData
         ? `${shown.length} ${L("kaarten", "cards")} · 🟢 ${count("buy")} · 🟡 ${count("near")} · 🟠 ${count("risk")}${time ? ` · ${time}` : ""}${loadingNow ? " · ⏳" : ""}${errorNow ? " · ⚠" : ""}`

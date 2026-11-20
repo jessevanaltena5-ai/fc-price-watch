@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.5
+// @version      3.5.6
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10470,6 +10470,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     const H = 60 * 60 * 1000;
     const complete = live.length > 0 && live.length < FUTBIN_LIVE_CAP; // fewer than 500: every sale FUTBIN has
     const oldest = live.length ? live[0][0] : now;
+    // Launch day of a new card (FUTBIN has every sale and the first one is < 7 days old): the first 24 h
+    // after release sell far above the settled price (20 Nov: TOTW Haaland 600-800K on launch evening, 290K
+    // two days later). Those sales would make a "falling 730K → 305K" out of a normal new-card settle, so the
+    // windows leave them out; they still count as sales, not for the median.
+    const launchCut = complete && now - oldest < 7 * 24 * H ? oldest + 24 * H : 0;
+    const settled = launchCut ? live.filter(([x]) => x >= launchCut) : live;
     const middle = values => {
       const sorted = [...values].sort((a, b) => a - b);
       const mid = futbinPct(sorted, 0.5);
@@ -10486,14 +10492,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       // Partly covered (busy card, 500 sales reach back into this window): its sale prices are real and
       // count for the median (≥ 5 sales), but the number of sales is incomplete, so that stays unknown.
       const partial = !covered && live.length > 0 && oldest < to;
-      const prices = covered || partial ? live.filter(([x]) => x >= from && x < to).map(point => point[1]) : [];
+      const prices = covered || partial ? settled.filter(([x]) => x >= from && x < to).map(point => point[1]) : [];
+      const count = covered ? live.filter(([x]) => x >= from && x < to).length : null; // launch sales are real sales
       const tableFrom = tableEnd - (k + 1) * 24 * H;
       const inTable = rows.filter(row => row.at >= tableFrom && row.at < tableEnd - k * 24 * H);
       const tableCovered = rows.length > 0 && tableOldest <= tableFrom;
       return {
         covered,
         partial,
-        sales: covered ? prices.length : null,
+        sales: count,
         median: covered || (partial && prices.length >= 5) ? middle(prices) : null,
         listings: tableCovered ? inTable.length : null,
         sellThrough: tableCovered && inTable.length ? inTable.filter(row => row.sold > 0).length / inTable.length : null
@@ -10502,7 +10509,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const [w0, w1, w2] = windows;
     const ratio = (a, b) => (a != null && b != null && b > 0 ? a / b - 1 : null);
     const vs24 = ratio(w0.median, w1.median); // last 24 h vs the 24 h before
-    const older = w1.median != null ? middle(live.filter(([x]) => x >= now - 72 * H && x < now - 24 * H).map(point => point[1])) : null;
+    const older = w1.median != null ? middle(settled.filter(([x]) => x >= now - 72 * H && x < now - 24 * H).map(point => point[1])) : null;
     const vs48 = ratio(w0.median, older); // last 24 h vs the 48 h before
     const step = ratio(w1.median, w2.median); // 24–48 h vs 48–72 h
     const before = w1.covered && w2.covered ? (w1.sales + w2.sales) / 2 : w1.covered ? w1.sales : null;

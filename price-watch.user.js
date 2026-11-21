@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.6
+// @version      3.5.7
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -10065,17 +10065,20 @@ function priceWatchMain(SCRIPT_VERSION) {
   // Weekdays (specials, 30 days): cheapest Sat-Tue, dearest Wed-Thu. New content at 18:00 UK can drop
   // prices 10-20% (store packs), so nothing is bought 17:30-18:30 UK. Rewards Thu/Sun ~08:00 UK: prices
   // fall the first hour (trading group), so don't list then and buy from 09:00.
-  // Big promos (FUTBIN promo calendar, last year's dates a year on): older promo cards and icons fell.
+  // Big promos: older promo cards and icons fell (effects: FUTBIN promo calendar, last year). Dates checked
+  // 22 Nov 2026 with EA's own news: Thunderstruck came a week early (Team 1 Fri 20 Nov, Team 2 27 Nov,
+  // returning TOTW 25 Nov - 4 Dec). Season 3 starts Thu 3 Dec with Winter Wildcards, exact day not announced:
+  // the Friday after Thunderstruck ends (4 Dec) is the earliest, so warn from then. TOTY: no date yet.
   const BIG_PROMOS = [
-    { name: "Thunderstruck", at: Date.UTC(2026, 10, 27, 18), drop: true,
-      nl: "vorig jaar zakten oudere promokaarten −16% op dag 1 (−24% na 4 weken), iconen −19% (−42% na 4 weken)",
-      en: "last year older promo cards fell −16% on day 1 (−24% after 4 weeks), icons −19% (−42% after 4 weeks)" },
-    { name: "Winter Wildcards", at: Date.UTC(2026, 11, 18, 18), drop: true,
-      nl: "vorig jaar zakten oudere promokaarten −19% op dag 1 en −15% na een week, iconen −19% / −22%",
-      en: "last year older promo cards fell −19% on day 1 and −15% after a week, icons −19% / −22%" },
+    { name: "Thunderstruck Team 2", at: Date.UTC(2026, 10, 27, 18), drop: true,
+      nl: "Team 1 (20 nov) liet oudere promokaarten al zakken; vorig jaar −16% op dag 1 en −24% na 4 weken, iconen −19% (−42% na 4 weken)",
+      en: "Team 1 (20 Nov) already pulled older promo cards down; last year −16% on day 1 and −24% after 4 weeks, icons −19% (−42% after 4 weeks)" },
+    { name: "Winter Wildcards", at: Date.UTC(2026, 11, 4, 18), drop: true,
+      nl: "verwacht vanaf vr 4 dec (EA noemt nog geen dag); vorig jaar zakten oudere promokaarten −19% op dag 1 en −15% na een week, iconen −19% / −22%",
+      en: "expected from Fri 4 Dec (EA hasn't named the day yet); last year older promo cards fell −19% on day 1 and −15% after a week, icons −19% / −22%" },
     { name: "TOTY", at: Date.UTC(2027, 0, 15, 18), drop: false,
-      nl: "vorig jaar stegen oudere promokaarten juist: +19% na een week, +57% na 4 weken",
-      en: "last year older promo cards rose instead: +19% after a week, +57% after 4 weeks" }
+      nl: "datum nog niet bekend; vorig jaar stegen oudere promokaarten juist: +19% na een week, +57% na 4 weken",
+      en: "date not known yet; last year older promo cards rose instead: +19% after a week, +57% after 4 weeks" }
   ];
   function bigPromoNear(t = Date.now()) {
     return BIG_PROMOS.find(promo => t >= promo.at - 7 * 86400000 && t < promo.at + 86400000) || null;

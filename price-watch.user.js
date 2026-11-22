@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.9
+// @version      3.5.10
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9624,11 +9624,17 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (reasons.length && median > 0 && fb.p75 > median) sell = roundDownToStep(median + 0.6 * (fb.p75 - median));
     const recent = fb.recent && fb.recent.s >= 4 && fb.recent.p60 > 0 ? fb.recent : null;
     if (recent && roundDownToStep(recent.p60) < sell) { sell = roundDownToStep(recent.p60); reasons.push("recent"); }
-    // New card (≤ 7 days): its price is still finding its level, so even 8 h is too long (22 Nov: Balotelli
-    // 134K → 110K in 40 min, "sell 121K" while the last 10 sales were 110-113K). Sell at most the median of
-    // its newest 10 Buy Now sales.
-    const newest = futbinYoung(fb) && Array.isArray(fb.last) ? fb.last.filter(row => row[2] === 1 && row[1] > 0).slice(0, 10).map(row => row[1]).sort((a, b) => a - b) : [];
-    if (newest.length >= 5 && roundDownToStep(newest[Math.floor(newest.length / 2)]) < sell) { sell = roundDownToStep(newest[Math.floor(newest.length / 2)]); reasons.push("newest"); }
+    // The price now: even 8 h is too long for a card whose price is moving (22 Nov: Balotelli, ~380 sales a
+    // day, "sell 120K" while its last 10 sales in 30 min were 109-115K). Sell at most the median of the
+    // newest 10 Buy Now sales when those span 3 h or less (a busy card: they are the price now) and sit 5%+
+    // under the sell price (a clear fall; a steady card's normal spread must not cut every buy price, the
+    // short flips were +5-8% on average), and always for a new card (≤ 7 days, still finding its level).
+    const binLast = Array.isArray(fb.last) ? fb.last.filter(row => row[2] === 1 && row[1] > 0).slice(0, 10) : [];
+    const busy = binLast.length >= 10 && binLast[0][0] - binLast[binLast.length - 1][0] <= 180;
+    const young = futbinYoung(fb) && binLast.length >= 5;
+    const newest = busy || young ? binLast.map(row => row[1]).sort((a, b) => a - b) : [];
+    const newestMd = newest.length >= 5 ? roundDownToStep(newest[Math.floor(newest.length / 2)]) : 0;
+    if (newestMd && newestMd < sell && (young || newestMd <= sell * 0.95)) { sell = newestMd; reasons.push("newest"); }
     const adjusted = sell < p75;
     buy = Math.min(buy, roundDownToStep(sell * (1 - EA_TAX) / (1 + FB_MIN_PROFIT)));
     const refMedian = recent ? recent.md : median;
@@ -9641,7 +9647,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const why = prices.reasons.map(r => (r === "unsold" ? L(`onverkocht vraagt ${scK(fb.unsold24)}`, `unsold ask ${scK(fb.unsold24)}`)
       : r === "slow" ? L(`${Math.round(fb.sellThrough * 100)}% verkocht`, `${Math.round(fb.sellThrough * 100)}% sold`)
         : r === "recent" ? L(`laatste 8u P60 ${scK(fb.recent.p60)}`, `last 8h P60 ${scK(fb.recent.p60)}`)
-        : r === "newest" ? L(`nieuwe kaart: laatste 10 verkopen ${scK(prices.sell)}`, `new card: last 10 sales ${scK(prices.sell)}`)
+        : r === "newest" ? L(`laatste 10 verkopen ${scK(prices.sell)}`, `last 10 sales ${scK(prices.sell)}`)
         : L("vraag daalt", "demand falling"))).join(", ");
     return ft("w_sellLowered", { sell: scK(prices.sell), p75: scK(prices.p75), why });
   }

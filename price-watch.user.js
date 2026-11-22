@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.14
+// @version      3.5.15
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14470,7 +14470,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!lastTransferItems.length) { if (bar) bar.remove(); return; }
     if (bar) return;
     bar = el("div", "pt-tl-export");
-    const button = el("button", "pt-tl-export-btn", L("📋 Export voor Claude", "📋 Export for Claude"));
+    const button = el("button", "pt-tl-export-btn", "📋 Export");
     button.type = "button";
     button.title = L("Zet je hele transferlijst met prijzen, aankoopprijs en FUTBIN-sales check op je klembord, om in de chat met Claude te plakken. Ontbrekende checks haalt hij eerst bij FUTBIN (één voor één). Geen EA-zoekacties.",
       "Puts your whole transfer list with prices, purchase price and FUTBIN sales check on your clipboard, to paste in the chat with Claude. Missing checks are fetched from FUTBIN first (one by one). No EA searches.");
@@ -14485,7 +14485,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const platform = userPlatform();
       const items = lastTransferItems.slice();
       const ticker = window.setInterval(() => {
-        button.textContent = futbinState.busy && futbinState.total ? L(`📋 FUTBIN ${futbinState.done}/${futbinState.total}…`, `📋 FUTBIN ${futbinState.done}/${futbinState.total}…`) : L("📋 Bezig…", "📋 Working…");
+        button.textContent = futbinState.busy && futbinState.total ? L(`FUTBIN ${futbinState.done}/${futbinState.total}…`, `FUTBIN ${futbinState.done}/${futbinState.total}…`) : L("Bezig…", "Working…");
       }, 500);
       try {
         const cards = [];
@@ -14509,7 +14509,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         const area = el("textarea", "pt-tl-export-text");
         area.readOnly = true;
         area.value = text;
-        const copy = el("button", "pt-tl-export-btn", L("📋 Kopieer", "📋 Copy"));
+        const copy = el("button", "pt-tl-export-btn", L("Kopieer", "Copy"));
         copy.type = "button";
         const note = el("div", "pt-tl-export-note");
         copy.addEventListener("click", async e => {
@@ -14526,7 +14526,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         out.textContent = L(`Export mislukt: ${error && error.message ? error.message : error}`, `Export failed: ${error && error.message ? error.message : error}`);
       } finally {
         window.clearInterval(ticker);
-        button.textContent = L("📋 Export voor Claude", "📋 Export for Claude");
+        button.textContent = "📋 Export";
         button.disabled = false;
         tlExportBusy = false;
       }
@@ -15281,8 +15281,9 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-pos { color: #5fd38d; }
 .pt-neg { color: #ff7b7b; }
 .pt-profit-info { font-size: 13px; padding: 6px 4px; text-align: center; }
-.pt-tl-export { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; }
-.pt-tl-export-btn { align-self: flex-start; background: #1e3a5f; color: #fff; border: 1px solid #3b82f6; border-radius: 8px; padding: 6px 12px; font-weight: 700; cursor: pointer; }
+.pt-tl-export { display: flex; flex-direction: column; gap: 4px; padding: 2px 10px; }
+.pt-tl-export-btn { align-self: flex-end; background: transparent; color: #94a3b8; border: 1px solid #334155; border-radius: 6px; padding: 2px 8px; font-size: 11px; font-weight: 600; cursor: pointer; }
+.pt-tl-export-btn:hover { color: #e2e8f0; border-color: #64748b; }
 .pt-tl-export-btn:disabled { opacity: .6; cursor: default; }
 .pt-tl-export-out { display: flex; flex-direction: column; gap: 6px; }
 .pt-tl-export-text { width: 100%; height: 140px; font: 11px/1.35 monospace; background: #0b1220; color: #cbd5e1; border: 1px solid #334155; border-radius: 6px; padding: 6px; box-sizing: border-box; }

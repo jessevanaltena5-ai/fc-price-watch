@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.11
+// @version      3.5.14
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -1723,6 +1723,7 @@ function priceWatchMain(SCRIPT_VERSION) {
 
   function openPreparedSearch(entry, maxBuy) {
     const baseId = entry.definitionId & 0xFFFFFF;
+    setSearchTarget(entry.definitionId);
     const criteria = baseCriteria();
     criteria.maskedDefId = baseId;
     if (entry.rarity != null) criteria.rarities = [entry.rarity];
@@ -4335,6 +4336,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (!root) return;
     markGridList(root);
     noteSearchRow(root, item);
+    markSearchVersion(root, item);
     root.querySelectorAll(".pt-mb-badge").forEach(node => node.remove());
     root.classList.remove("pt-mb-hot", "pt-mb-over", "pt-mb-ok", "pt-mb-highest", "pt-mb-tilerow", "pt-mb-bin", "pt-mb-binhot");
     const info = massBidInfo(item) || runBinInfo(item);
@@ -4406,6 +4408,33 @@ function priceWatchMain(SCRIPT_VERSION) {
   const CHEAPEST_KEY = "pt_cheapest_pick_v1";
   let cheapestOn = (() => { try { return localStorage.getItem(CHEAPEST_KEY) !== "0"; } catch (_) { return true; } })();
   const searchRowItems = new WeakMap();
+  // Which version a 🔍 search was for (v3.5.12). EA's filter (player + rarity) can't tell two versions of
+  // one player apart (22 Nov: two Thunderstruck Pulisic 87, one at ±32K and one at ±50K), so the cheap
+  // one showed under "max 44K" as if it were the card. Results of the player get ✅ right version /
+  // ⚠ other version (greyed), and 💰 Cheapest never picks another version. 30 min after the search.
+  let searchTarget = null; // { id, base, at }
+  const SEARCH_TARGET_MS = 30 * 60 * 1000;
+  function setSearchTarget(id) {
+    const full = Number(id) || 0;
+    searchTarget = full > 0 ? { id: full, base: full & 0xFFFFFF, at: Date.now() } : null;
+  }
+  function searchVersion(item) {
+    if (!searchTarget || Date.now() - searchTarget.at > SEARCH_TARGET_MS || !item || !item.definitionId) return "";
+    const ids = [item.definitionId, item.resourceId].map(Number).filter(id => id > 0);
+    if (!ids.some(id => (id & 0xFFFFFF) === searchTarget.base)) return "";
+    return ids.includes(searchTarget.id) ? "right" : "other";
+  }
+  function markSearchVersion(root, item) {
+    root.querySelectorAll(".pt-version-tag").forEach(node => node.remove());
+    const version = searchVersion(item);
+    root.classList.toggle("pt-version-other", version === "other");
+    if (!version) return;
+    const tag = el("div", `pt-version-tag pt-version-${version}`, version === "right" ? L("✅ juiste versie", "✅ right version") : L("⚠ andere versie", "⚠ other version"));
+    tag.title = version === "right"
+      ? L("Dit is de kaart waar de prijzen van het script bij horen.", "This is the card the script's prices belong to.")
+      : L("Zelfde speler, maar een andere kaart met een andere prijs. De koop- en verkoopprijs van het script gelden hier niet.", "Same player, but another card with another price. The script's buy and sell price don't apply here.");
+    (root.querySelector(".entityContainer") || root).appendChild(tag);
+  }
   let cheapestSetKey = "";
   let cheapestTimer = 0;
   let cheapestButton = null;
@@ -4430,7 +4459,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const item = searchRowItems.get(li);
       const auction = item ? auctionOf(item) : null;
       return { li, index, auction, price: auction ? Number(auction.buyNowPrice) || 0 : 0 };
-    }).filter(entry => entry.auction && entry.auction.tradeState === "active" && entry.price > 0);
+    }).filter(entry => entry.auction && entry.auction.tradeState === "active" && entry.price > 0 && searchVersion(searchRowItems.get(entry.li)) !== "other");
     if (!entries.length) return null;
     const key = entries.map(entry => entry.auction.tradeId).join(",");
     entries.sort((a, b) => a.price - b.price || a.index - b.index); // same price: the first (least time left)
@@ -8788,6 +8817,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   async function openFlipSearch(card, calc, withoutMax) {
     const [player] = await flipPlayers([{ card, calc }]);
     const baseId = card.id & 0xFFFFFF;
+    setSearchTarget(card.id);
     const criteria = baseCriteria();
     criteria.maskedDefId = baseId;
     if (player.special) {
@@ -10098,6 +10128,101 @@ function priceWatchMain(SCRIPT_VERSION) {
   function bigPromoNear(t = Date.now()) {
     return BIG_PROMOS.find(promo => t >= promo.at - 7 * 86400000 && t < promo.at + 86400000) || null;
   }
+
+  // --- 📰 Leaks (v3.5.13) ---------------------------------------------------------------------------
+  // A leak (text or photo from Discord / X) is translated by Claude in the chat into a leak code that you
+  // paste in Flip → 📰. Nothing is hard-coded: the code says what comes when, which cards it touches and
+  // whether they go up or down. Only shown as a 📰 pill on the card (warning or chance); the status, the
+  // score and the signal log don't change (one week no rule changes, 22 Nov 2026).
+  // Code: {"leaks":[{ id, title, at: ISO (release, UTC), end: ISO (effect over; default at + 24 h down,
+  //   at + 6 h up), effect: "down" | "up", note: short advice, match: { rarity: [..], names: [..], ids: [..],
+  //   minR, maxR, pos: [..] (main or alt position), notPos: [..], nation: [..], league: [..], club: [..],
+  //   maxPace, maxWf, maxSm, maxPsPlus, icon: true/false, hero: true/false, special: true/false, all: true } }]}
+  // Position, nation, league, club, pace, WF/SM and PS+ come from FUT.GG (the FUT.GG list); a card without
+  // that field doesn't match a rule that asks for it.
+  const LEAKS_KEY = "pt_leaks_v1";
+  function getLeaks() {
+    try { const list = JSON.parse(localStorage.getItem(LEAKS_KEY) || "[]"); return Array.isArray(list) ? list : []; } catch (_) { return []; }
+  }
+  function saveLeaks(list) {
+    try { localStorage.setItem(LEAKS_KEY, JSON.stringify(list)); } catch (_) { /* this session only */ }
+  }
+  const activeLeaks = (t = Date.now()) => getLeaks().filter(leak => t < leak.end);
+  function parseLeakCode(text) {
+    const raw = String(text || "");
+    const from = raw.indexOf("{");
+    const to = raw.lastIndexOf("}");
+    if (from < 0 || to < from) throw new Error(L("geen leak-code gevonden (die begint met {)", "no leak code found (it starts with {)"));
+    const data = JSON.parse(raw.slice(from, to + 1));
+    const items = Array.isArray(data.leaks) ? data.leaks : [data];
+    return items.map(item => {
+      const at = Date.parse(item.at);
+      if (!Number.isFinite(at)) throw new Error(L(`geen geldige tijd bij "${item.title || "?"}"`, `no valid time for "${item.title || "?"}"`));
+      const dir = item.effect === "up" ? "up" : "down";
+      const end = Date.parse(item.end);
+      return {
+        id: String(item.id || `${item.title}|${item.at}`).slice(0, 80), title: String(item.title || "Leak").slice(0, 80), at, dir,
+        end: Number.isFinite(end) && end > at ? end : at + (dir === "up" ? 6 : 24) * 3600000,
+        note: String(item.note || "").slice(0, 240), match: item.match && typeof item.match === "object" ? item.match : {}
+      };
+    });
+  }
+  function addLeaks(text) {
+    const fresh = parseLeakCode(text);
+    const byId = new Map(activeLeaks().map(leak => [leak.id, leak]));
+    fresh.forEach(leak => byId.set(leak.id, leak));
+    saveLeaks([...byId.values()].sort((a, b) => a.at - b.at));
+    return fresh;
+  }
+  function removeLeak(id) { saveLeaks(getLeaks().filter(leak => leak.id !== id)); }
+  function leakMatches(leak, card) {
+    const m = leak.match || {};
+    const norm = value => String(value == null ? "" : value).toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").trim();
+    const list = value => (Array.isArray(value) ? value : value != null && value !== "" ? [value] : []).map(norm).filter(Boolean);
+    const any = (wanted, value) => { const v = norm(value); return !!v && wanted.some(w => v === w || v.includes(w)); };
+    let rules = 0;
+    const test = (wanted, check) => { if (!wanted.length) return true; rules++; return check(wanted); };
+    const num = (limit, value, below) => { if (limit == null || limit === "") return true; rules++; return value != null && (below ? value <= Number(limit) : value >= Number(limit)); };
+    const flag = (want, value) => { if (typeof want !== "boolean") return true; rules++; return !!value === want; };
+    const positions = [card.pos, ...(card.alt || [])].filter(Boolean).map(norm);
+    const isIcon = card.icon != null ? card.icon : /\bicon/i.test(card.rarity || "");
+    const notPos = list(m.notPos);
+    const ok = test(list(m.ids), w => w.includes(String(card.id)))
+      && test(list(m.names), w => w.some(name => norm(card.name).includes(name)))
+      && test(list(m.rarity), w => any(w, card.rarity))
+      && num(m.minR, card.rating, false) && num(m.maxR, card.rating, true)
+      && test(list(m.pos), w => positions.some(pos => w.includes(pos)))
+      && test(notPos, w => !!card.pos && !w.includes(norm(card.pos)))
+      && test(list(m.nation), w => any(w, card.nat)) && test(list(m.league), w => any(w, card.lg)) && test(list(m.club), w => any(w, card.club))
+      && num(m.maxPace, card.pace, true) && num(m.maxWf, card.wf, true) && num(m.maxSm, card.sm, true) && num(m.maxPsPlus, card.psp, true)
+      && flag(m.icon, isIcon) && flag(m.hero, card.hero) && flag(m.special, card.special != null ? card.special : card.src === "futgg");
+    return ok && (rules > 0 || m.all === true);
+  }
+  function leakWhen(t) {
+    const days = uiLang() === "en" ? ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] : ["zo", "ma", "di", "wo", "do", "vr", "za"];
+    const date = new Date(t);
+    const sameDay = date.toDateString() === new Date().toDateString();
+    return `${sameDay ? L("vandaag", "today") : days[date.getDay()]} ${formatTime(t)}`;
+  }
+  // The leaks touching one card, as { dir, lines } (null = none). Before release: down = sell before / don't
+  // buy, up = chance (unless it rose 10%+ in 24 h already); after release until the end: what to do now.
+  function leakAdvice(card, t = Date.now()) {
+    const hits = activeLeaks(t).filter(leak => leakMatches(leak, card));
+    if (!hits.length) return null;
+    const risen = card.m24 != null && card.m24 >= 10;
+    const lines = hits.map(leak => {
+      const before = t < leak.at;
+      const when = leakWhen(leak.at);
+      const advice = leak.dir === "down"
+        ? before ? L(`zakt vanaf ${when}: verkoop vóór, niet kopen`, `drops from ${when}: sell before, don't buy`) : L(`loopt nu (tot ${leakWhen(leak.end)}): kan nog zakken, niet kopen`, `live now (until ${leakWhen(leak.end)}): may drop further, don't buy`)
+        : before ? risen ? L(`al +${Math.round(card.m24)}% in 24u: te laat om te kopen`, `already +${Math.round(card.m24)}% in 24h: too late to buy`) : L(`kan stijgen vóór ${when}: koopkans`, `may rise before ${when}: chance to buy`)
+          : L(`nu live (tot ${leakWhen(leak.end)}): goed moment om te verkopen`, `live now (until ${leakWhen(leak.end)}): good time to sell`);
+      return `📰 ${leak.dir === "down" ? "⬇" : "⬆"} ${leak.title}: ${advice}${leak.note ? ` · ${leak.note}` : ""}`;
+    });
+    const down = hits.some(leak => leak.dir === "down");
+    const chance = hits.some(leak => leak.dir === "up" && t < leak.at && !risen);
+    return { dir: down ? "down" : chance ? "up" : "sell", lines };
+  }
   let clockCache = null;
   function tradeClock(t = Date.now()) {
     const minute = Math.floor(t / 60000);
@@ -10919,7 +11044,12 @@ function priceWatchMain(SCRIPT_VERSION) {
       m6: null,
       url: typeof item.url === "string" && item.url.startsWith("/players/") ? item.url : "",
       trend: [],
-      src: "futgg"
+      src: "futgg",
+      // for 📰 leak matching (evo / SBC requirements)
+      pos: item.position || "", alt: Array.isArray(item.alternativePositions) ? item.alternativePositions.slice(0, 4) : [],
+      nat: item.nation && item.nation.name || "", lg: item.league && item.league.name || "", club: item.club && item.club.name || "",
+      pace: item.faceStatsV2 && Number(item.faceStatsV2.facePace) || null, wf: Number(item.weakFoot) || null, sm: Number(item.skillMoves) || null,
+      psp: Array.isArray(item.playStylePlusEaIds) ? item.playStylePlusEaIds.length : null, icon: !!item.isIcon, hero: !!item.isHero
     };
   }
 
@@ -11247,6 +11377,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const bidButton = button("", "pt-cycle-btn");
     const lookButton = button("", "pt-cycle-btn");
     const watchButton = button("");
+    const leaksButton = button("📰");
     const settingsButton = button("⚙");
     const helpButton = button("?");
     const langButton = button("", "pt-flip-lang");
@@ -11296,7 +11427,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     runButton.className = "pt-fx-btn pt-fx-primary";
     bidButton.className = "pt-fx-btn";
     lookButton.className = "pt-fx-btn";
-    [recheckButton, watchButton].forEach(item => { item.className = "pt-fx-btn pt-fx-btn-sm"; });
+    [recheckButton, watchButton, leaksButton].forEach(item => { item.className = "pt-fx-btn pt-fx-btn-sm"; });
     [refresh, alertButton, settingsButton, helpButton].forEach(item => { item.className = "pt-fx-icon"; });
     langButton.className = "pt-fx-icon pt-fx-lang";
     dealsBox.className = "pt-fx-toggle";
@@ -11305,7 +11436,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     row1.append(el("span", "pt-fx-title", "Flip"), sourceSeg.box, platformSeg.box, filterInput, futbinButton, runButton, bidButton, lookButton);
     const row2 = el("div", "pt-fx-row pt-fx-row2");
     status.className = "pt-watch-status pt-fx-status";
-    row2.append(sortSeg.box, dealsBox, selectMenu, recheckButton, watchButton, el("span", "pt-fx-spacer"), refresh, alertButton, settingsButton, helpButton, langButton);
+    row2.append(sortSeg.box, dealsBox, selectMenu, recheckButton, watchButton, leaksButton, el("span", "pt-fx-spacer"), refresh, alertButton, settingsButton, helpButton, langButton);
     // Phone: one compact first row (title, source, platform, search); the action buttons slide in row 2.
     // The FUTBIN chip gets its own full-width line there (at the end of the sliding row it fell off the screen).
     const rowFb = el("div", "pt-fx-row pt-fx-rowfb");
@@ -11341,6 +11472,55 @@ function priceWatchMain(SCRIPT_VERSION) {
     settingsRow.append(linkLabel, link, maxPrice.box, minPct.box, autoBox, updateButton());
     settings.appendChild(settingsRow);
     card.appendChild(settings);
+
+    // 📰 Leaks: paste the leak code from Claude; the list shows what is active and how many cards it touches.
+    const leaksPanel = el("div", "pt-flip-panel pt-leaks-panel");
+    const leakInput = el("textarea", "pt-leaks-input");
+    leakInput.rows = 3;
+    leakInput.spellcheck = false;
+    leakInput.placeholder = L("Plak hier de leak-code van Claude ({\"leaks\": …})", "Paste the leak code from Claude here ({\"leaks\": …})");
+    const leakAdd = el("button", "pt-fx-btn pt-fx-primary", L("Toevoegen", "Add"));
+    leakAdd.type = "button";
+    const leakMsg = el("div", "pt-leaks-msg");
+    const leakList = el("div", "pt-leaks-list");
+    leakAdd.addEventListener("click", () => {
+      try {
+        const added = addLeaks(leakInput.value);
+        leakInput.value = "";
+        leakMsg.textContent = L(`✅ ${added.length} leak(s) toegevoegd: ${added.map(leak => leak.title).join(", ")}`, `✅ ${added.length} leak(s) added: ${added.map(leak => leak.title).join(", ")}`);
+      } catch (error) { leakMsg.textContent = `⚠ ${error.message}`; }
+      render();
+    });
+    const leakHelp = el("div", "pt-leaks-help", L("Stuur de leak (tekst of foto) naar Claude en vraag om een leak-code. Alleen een 📰-label op de kaart: kleur en score blijven hetzelfde. Filter: typ 'leak'.", "Send the leak (text or photo) to Claude and ask for a leak code. Only a 📰 label on the card: colour and score stay the same. Filter: type 'leak'."));
+    const leakRow = el("div", "pt-leaks-row");
+    leakRow.append(leakInput, leakAdd);
+    leaksPanel.append(leakHelp, leakRow, leakMsg, leakList);
+    card.appendChild(leaksPanel);
+    let leaksOpen = false;
+    leaksButton.addEventListener("click", () => { leaksOpen = !leaksOpen; render(); });
+    const drawLeaks = rows => {
+      const leaks = activeLeaks();
+      leaksButton.textContent = leaks.length ? `📰 ${leaks.length}` : "📰";
+      leaksButton.title = L("📰 Leaks: plak een leak-code van Claude. Kaarten die geraakt worden krijgen een 📰-label.", "📰 Leaks: paste a leak code from Claude. Cards it touches get a 📰 label.");
+      leaksButton.classList.toggle("pt-fx-live", leaksOpen);
+      leaksPanel.style.display = leaksOpen ? "" : "none";
+      if (!leaksOpen) return;
+      leakList.textContent = "";
+      if (!leaks.length) leakList.appendChild(el("div", "pt-muted", L("Nog geen leaks.", "No leaks yet.")));
+      leaks.forEach(leak => {
+        const n = rows.filter(row => leakMatches(leak, row.card)).length;
+        const line = el("div", "pt-leaks-item");
+        line.append(el("span", leak.dir === "down" ? "pt-flip-minus" : "pt-flip-plus", leak.dir === "down" ? "⬇" : "⬆"),
+          el("b", "", leak.title), el("span", "pt-muted", `· ${leakWhen(leak.at)} · ${L(`${n} kaart(en) in deze lijst`, `${n} card(s) in this list`)}`));
+        if (leak.note) line.title = leak.note;
+        const remove = el("button", "pt-fx-icon pt-leaks-x", "✕");
+        remove.type = "button";
+        remove.title = L("Weghalen", "Remove");
+        remove.addEventListener("click", () => { removeLeak(leak.id); render(); });
+        line.appendChild(remove);
+        leakList.appendChild(line);
+      });
+    };
 
     // ? Explanation.
     const help = el("div", "pt-flip-panel pt-flip-help");
@@ -11474,6 +11654,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (["gecheckt", "checked"].includes(word)) return !!row.calc.futbin;
         if (["groen", "green", "🟢"].includes(word)) return row.calc.status === "buy";
         if (["holo", "✨"].includes(word)) return !!row.card.holo;
+        if (["leak", "📰"].includes(word)) return !!leakAdvice(row.card);
         return name.includes(word);
       });
     }
@@ -12003,6 +12184,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         status.appendChild(line);
       }
 
+      drawLeaks(shown);
       tbody.textContent = "";
       shown.forEach(row => {
         const { card: item, calc, opp } = row;
@@ -12043,6 +12225,13 @@ function priceWatchMain(SCRIPT_VERSION) {
         const nameLine = el("div", "pt-fx-name");
         nameLine.append(el("b", "pt-cheapest-main", item.name), el("span", "pt-fx-meta", `${item.rating} · ${item.rarity}`));
         if (item.holo) nameLine.appendChild(el("span", "pt-fx-pill", "✨"));
+        const leak = leakAdvice(item);
+        if (leak) {
+          const pill = el("span", `pt-fx-pill ${leak.dir === "down" ? "pt-fx-pill-bad" : "pt-fx-pill-good"}`, leak.dir === "down" ? "📰⬇" : leak.dir === "up" ? "📰⬆" : "📰💰");
+          pill.title = leak.lines.join("\n");
+          pill.addEventListener("click", event => { event.stopPropagation(); showToast(leak.lines.join(" · "), true); });
+          nameLine.appendChild(pill);
+        }
         if (calc.move) {
           const move = el("span", `pt-fx-pill ${calc.move === "falling" ? "pt-fx-pill-bad" : "pt-fx-pill-good"}`, calc.move === "falling" ? "⏬" : "↩");
           move.title = ft(`m_${calc.move}`);
@@ -14101,6 +14290,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         try {
           transferListController = this;
           addTransferSummary(this);
+          addTransferExport(this);
         } catch (error) {
           console.warn(L("Price Watch: transferlijst-overzicht mislukt.", "Price Watch: transfer list overview failed."), error);
         }
@@ -14178,6 +14368,173 @@ function priceWatchMain(SCRIPT_VERSION) {
       tile(L("Verkocht (winst)", "Sold (profit)"), signedCoins(soldProfit), soldProfit, missing(soldKnown, sold)),
       tile(L("Quick sell totaal", "Quick sell total"), priceFormat.format(sum(rows, row => row.quickSell))),
       tile(L("Quick sell niet verkocht", "Quick sell not sold"), priceFormat.format(sum(open, row => row.quickSell))));
+  }
+
+  // --- 📋 Export of the transfer list (v3.5.14) -----------------------------------------------------
+  // One tap: every card on your transfer list with your price, time left, what you paid and the FUTBIN
+  // sales check, as text to paste in the chat with Claude (one advice for the whole list). Missing or old
+  // checks are fetched from FUTBIN first, one by one (the same request as "Check FUTBIN"); never the EA
+  // market. Display only: nothing changes in score, status or the signal log.
+  let tlExportBusy = false;
+  function transferExportText(items, platform) {
+    const now = Date.now();
+    const pct = value => (value == null || !Number.isFinite(value) ? "?" : flipPct(value * 100, 1));
+    const sg = value => `${value > 0 ? "+" : value < 0 ? "−" : ""}${scK(Math.abs(value))}`;
+    const when = at => {
+      const sameDay = new Date(at).toDateString() === new Date(now).toDateString();
+      return `${sameDay ? "" : `${new Date(at).toLocaleDateString("nl-NL", { weekday: "short" })} `}${formatTime(at)}`;
+    };
+    let version = "";
+    try { version = GM_info.script.version; } catch (_) { /* unknown */ }
+    const out = [];
+    out.push(`PW-EXPORT transferlijst · ${new Date(now).toLocaleString("nl-NL", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} · ${futbinPlatform(platform).toUpperCase()}${version ? ` · v${version}` : ""}${lastTransferLoad ? ` · lijst geladen ${formatTime(lastTransferLoad)}` : ""}`);
+    try {
+      const mk = marketStats(platform);
+      const turn = marketTurn(platform);
+      const parts = [];
+      if (mk) parts.push(`index 24u ${pct(mk.ch24)} · 6u ${pct(mk.ch6)} · vs dag ${pct(mk.vsDay)}`);
+      parts.push(`draai: ${turn.level}${turn.breadth ? ` (${Math.round(turn.breadth.up * 100)}% specials stijgt)` : ""}`);
+      if (promoWindow(now)) parts.push("promo-venster (do 17:00–vr 21:00 UK)");
+      const promo = bigPromoNear(now);
+      if (promo) parts.push(`grote promo: ${promo.name} ${when(promo.at)}`);
+      out.push(`Markt: ${parts.join(" · ")}`);
+      const leaks = activeLeaks(now);
+      if (leaks.length) out.push(`Leaks: ${leaks.map(leak => `${leak.dir === "down" ? "⬇" : "⬆"} ${leak.title} ${when(leak.at)}`).join(" · ")}`);
+    } catch (error) { console.warn("Price Watch: export market line failed.", error); }
+    const seen = new Map();
+    let n = 0;
+    items.forEach(item => {
+      const isPlayer = typeof item.isPlayer === "function" ? item.isPlayer() : item.type === "player";
+      if (!isPlayer) return;
+      n++;
+      const id = Number(item.definitionId) || 0;
+      const name = playerNameFor(id, (item._staticData && item._staticData.name) || "");
+      const rating = Number(item.rating) || 0;
+      let rarity = "";
+      try { rarity = rarityName(item.rareflag); } catch (_) { /* unknown */ }
+      const auction = auctionOf(item) || {};
+      const state = auction.tradeState;
+      const bin = auction.buyNowPrice > 0 ? auction.buyNowPrice : 0;
+      const bought = boughtPrice(item) || 0;
+      let status;
+      if (state === "closed") status = `VERKOCHT voor ${scK(auction.currentBid || bin)}`;
+      else if (state === "active") {
+        const left = Math.max(0, Number(auction.expires) - (lastTransferLoad ? (now - lastTransferLoad) / 1000 : 0));
+        status = `TE KOOP BIN ${scK(bin)} (start ${scK(auction.startingBid || 0)}) · nog ${Math.floor(left / 3600)}u${String(Math.floor(left % 3600 / 60)).padStart(2, "0")}${auction.currentBid > 0 ? ` · bod ${scK(auction.currentBid)}` : ""}`;
+      } else if (state === "expired") status = `VERLOPEN (BIN was ${scK(bin)})`;
+      else status = "NIET TE KOOP";
+      out.push("");
+      out.push(`${n}. ${name} ${rating} · ${rarity}${itemIsHolo(item) ? " · holo" : ""} · id ${id} · ${status}`);
+      if (bought) {
+        const own = state === "closed" ? ` · winst ${sg(Math.floor((auction.currentBid || bin) * (1 - EA_TAX)) - bought)}` : bin ? ` · bij jouw BIN ${scK(bin)} → ${sg(Math.floor(bin * (1 - EA_TAX)) - bought)}` : "";
+        out.push(`   gekocht ${scK(bought)} · break-even ${scK(roundUpToStep(bought / (1 - EA_TAX)))}${own}`);
+      } else out.push("   gekocht: onbekend");
+      if (state === "closed") return;
+      const card = { id, name, rating, rarity };
+      if (seen.has(id)) { out.push(`   FUTBIN: zelfde als #${seen.get(id)}`); return; }
+      seen.set(id, n);
+      const fb = futbinSalesFor(card, platform);
+      if (!fb) out.push("   FUTBIN: geen check (niet gevonden of FUTBIN gaf een fout)");
+      else {
+        try {
+          const pr = futbinPrices(fb);
+          out.push(`   FUTBIN ${formatTime(fb.fetchedAt)}: koop≤ ${scK(pr.buy)} · verkoop ${scK(pr.sell)}${pr.adjusted ? ` (verlaagd: ${pr.reasons.join(",")})` : ""} · mediaan ${scK(pr.median)} · P75 ${scK(pr.p75)} · flipwinst ${sg(pr.profit)}${bought ? ` · jouw winst bij verkoop ${sg(Math.floor(pr.sell * (1 - EA_TAX)) - bought)}` : ""}`);
+          const t = fb.tbl;
+          if (t) {
+            [["24u", t.d], ["24-48u", t.p], [`${t.days}d`, t.a]].forEach(([label, w]) => {
+              if (!w) return;
+              out.push(`   ${label}: ${w.s} verkocht${w.b ? ` (${w.b} bod)` : ""} / ${w.l} listings${w.s ? ` · P10 ${scK(w.p10)} · med ${scK(w.md)} · P75 ${scK(w.p75)} · P90 ${scK(w.p90)} · onverkocht ${w.u ? scK(w.u) : "-"} · ${scK(w.mn)}-${scK(w.mx)}` : ""}`);
+            });
+          } else out.push(`   24u: ${fb.sales24} verkocht · ${Math.round(fb.sellThrough * 100)}% · P10 ${scK(fb.p10)} · med ${scK(fb.median)} · P75 ${scK(fb.p75)}`);
+          const fh = fb.h72;
+          if (fh && fh.windows) out.push(`   trend: ${fh.state || "?"} · mediaan per dag (oud→nu) ${fh.windows.map(w => (w.median != null ? scK(w.median) : "-")).reverse().join(" → ")}${fh.demand ? ` · vraag ${fh.demand}` : ""}`);
+          if (Array.isArray(fb.last) && fb.last.length) out.push(`   laatste: ${fb.last.filter(([, price]) => price > 0).slice(0, 12).map(([minute, price, kind]) => `${when(minute * 60000)} ${scK(price)}${kind === 2 ? "(bod)" : ""}`).join(", ")}`);
+          const warn = salesCheckWarnings(fb, pr, bin || fb.median, platform);
+          warn.warnings.forEach(text => out.push(`   ⚠ ${text}`));
+        } catch (error) { out.push(`   FUTBIN: kon niet lezen (${error && error.message ? error.message : error})`); }
+      }
+      try {
+        const leak = leakAdvice(card, now);
+        if (leak) leak.lines.forEach(line => out.push(`   ${line}`));
+      } catch (_) { /* no leaks */ }
+    });
+    if (!n) out.push("", "(geen spelers op de transferlijst)");
+    return out.join("\n");
+  }
+
+  function addTransferExport(controller) {
+    const view = typeof controller.getView === "function" ? controller.getView() : null;
+    const root = view && typeof view.getRootElement === "function" ? view.getRootElement() : null;
+    if (!root) return;
+    let bar = root.querySelector(".pt-tl-export");
+    if (!lastTransferItems.length) { if (bar) bar.remove(); return; }
+    if (bar) return;
+    bar = el("div", "pt-tl-export");
+    const button = el("button", "pt-tl-export-btn", L("📋 Export voor Claude", "📋 Export for Claude"));
+    button.type = "button";
+    button.title = L("Zet je hele transferlijst met prijzen, aankoopprijs en FUTBIN-sales check op je klembord, om in de chat met Claude te plakken. Ontbrekende checks haalt hij eerst bij FUTBIN (één voor één). Geen EA-zoekacties.",
+      "Puts your whole transfer list with prices, purchase price and FUTBIN sales check on your clipboard, to paste in the chat with Claude. Missing checks are fetched from FUTBIN first (one by one). No EA searches.");
+    const out = el("div", "pt-tl-export-out");
+    button.addEventListener("click", async event => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (tlExportBusy) return;
+      tlExportBusy = true;
+      button.disabled = true;
+      out.textContent = "";
+      const platform = userPlatform();
+      const items = lastTransferItems.slice();
+      const ticker = window.setInterval(() => {
+        button.textContent = futbinState.busy && futbinState.total ? L(`📋 FUTBIN ${futbinState.done}/${futbinState.total}…`, `📋 FUTBIN ${futbinState.done}/${futbinState.total}…`) : L("📋 Bezig…", "📋 Working…");
+      }, 500);
+      try {
+        const cards = [];
+        const ids = new Set();
+        items.forEach(item => {
+          const isPlayer = typeof item.isPlayer === "function" ? item.isPlayer() : item.type === "player";
+          const auction = auctionOf(item) || {};
+          const id = Number(item.definitionId) || 0;
+          if (!isPlayer || !id || auction.tradeState === "closed" || ids.has(id)) return;
+          ids.add(id);
+          cards.push({ id, name: playerNameFor(id, (item._staticData && item._staticData.name) || ""), rating: Number(item.rating) || 0, holo: itemIsHolo(item) });
+        });
+        const need = cards.filter(card => futbinNeedsCheck(card, platform));
+        let error = "";
+        if (need.length) {
+          for (let i = 0; i < 120 && futbinState.busy; i++) await new Promise(resolve => window.setTimeout(resolve, 1000)); // an auto round first
+          const result = await futbinCheckCards(need, platform, true, { max: 40 });
+          error = (result && result.error) || "";
+        }
+        const text = transferExportText(items, platform);
+        const area = el("textarea", "pt-tl-export-text");
+        area.readOnly = true;
+        area.value = text;
+        const copy = el("button", "pt-tl-export-btn", L("📋 Kopieer", "📋 Copy"));
+        copy.type = "button";
+        const note = el("div", "pt-tl-export-note");
+        copy.addEventListener("click", async e => {
+          e.preventDefault();
+          e.stopPropagation();
+          const ok = await copyText(text);
+          note.textContent = ok ? L("✅ Gekopieerd — plak het in de chat met Claude", "✅ Copied — paste it in the chat with Claude") : L("Kopiëren lukte niet: selecteer de tekst en kopieer zelf", "Copy failed: select the text and copy it yourself");
+        });
+        const ok = await copyText(text);
+        note.textContent = (ok ? L("✅ Gekopieerd — plak het in de chat met Claude", "✅ Copied — paste it in the chat with Claude") : L("Tik op Kopieer", "Tap Copy"))
+          + (error ? L(` · ⚠ FUTBIN stopte (${error}): niet alle checks zijn vers`, ` · ⚠ FUTBIN stopped (${error}): not every check is fresh`) : "");
+        out.append(note, copy, area);
+      } catch (error) {
+        out.textContent = L(`Export mislukt: ${error && error.message ? error.message : error}`, `Export failed: ${error && error.message ? error.message : error}`);
+      } finally {
+        window.clearInterval(ticker);
+        button.textContent = L("📋 Export voor Claude", "📋 Export for Claude");
+        button.disabled = false;
+        tlExportBusy = false;
+      }
+    });
+    bar.append(button, out);
+    const list = root.querySelector(".sectioned-item-list");
+    if (list && list.parentNode) list.parentNode.insertBefore(bar, list);
+    else root.insertBefore(bar, root.firstChild);
   }
 
   // "35.3k", like FUT Genie's list.
@@ -14924,6 +15281,12 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-pos { color: #5fd38d; }
 .pt-neg { color: #ff7b7b; }
 .pt-profit-info { font-size: 13px; padding: 6px 4px; text-align: center; }
+.pt-tl-export { display: flex; flex-direction: column; gap: 6px; padding: 6px 10px; }
+.pt-tl-export-btn { align-self: flex-start; background: #1e3a5f; color: #fff; border: 1px solid #3b82f6; border-radius: 8px; padding: 6px 12px; font-weight: 700; cursor: pointer; }
+.pt-tl-export-btn:disabled { opacity: .6; cursor: default; }
+.pt-tl-export-out { display: flex; flex-direction: column; gap: 6px; }
+.pt-tl-export-text { width: 100%; height: 140px; font: 11px/1.35 monospace; background: #0b1220; color: #cbd5e1; border: 1px solid #334155; border-radius: 6px; padding: 6px; box-sizing: border-box; }
+.pt-tl-export-note { font-size: 12px; color: #86efac; }
 .pt-tl-summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
 .pt-tl-tile { padding: 8px 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 8px; background: rgba(0,0,0,.25); }
 .pt-tl-tile-label { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; color: #9aa6b8; }
@@ -14934,6 +15297,15 @@ function priceWatchMain(SCRIPT_VERSION) {
 .pt-tl-tile-value { font-size: 22px; }
 .pt-tl-badge { position: absolute; top: 8px; right: 14px; z-index: 2; text-align: right; font-size: 15px; font-weight: 700; line-height: 1.25; pointer-events: none; }
 .pt-tl-badge-sub { font-size: 11px; font-weight: 600; color: #9aa6b8; }
+.pt-leaks-row { display: flex; gap: 8px; align-items: flex-start; margin-top: 6px; }
+.pt-leaks-input { flex: 1; min-width: 0; background: #0b1119; color: #e6edf5; border: 1px solid rgba(255, 255, 255, .12); border-radius: 8px; padding: 6px 8px; font: 12px/1.35 ui-monospace, Consolas, monospace; resize: vertical; }
+.pt-leaks-help { font-size: 12px; color: #9fb0c3; }
+.pt-leaks-msg { font-size: 12px; margin-top: 6px; }
+.pt-leaks-item { display: flex; align-items: center; gap: 6px; font-size: 13px; margin-top: 6px; flex-wrap: wrap; }
+.pt-leaks-x { margin-left: auto; }
+.pt-version-tag { font-size: 12px; font-weight: 700; margin-top: 3px; line-height: 1.3; }
+.pt-version-right { color: #5fd38d; } .pt-version-other .pt-version-tag { color: #f4a35d; }
+li.pt-version-other .entityContainer, li.pt-version-other .rowContent { opacity: 0.55; }
 .pt-mb-badge { font-size: 12px; font-weight: 700; margin-top: 4px; line-height: 1.3; white-space: normal; color: #cfd8e6; }
 .pt-mb-badge.pt-mb-ok { color: #6be38f; }
 .pt-mb-badge.pt-mb-over { color: #ff7b7b; opacity: 1; }

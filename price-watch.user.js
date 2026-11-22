@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.7
+// @version      3.5.9
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -9624,6 +9624,11 @@ function priceWatchMain(SCRIPT_VERSION) {
     if (reasons.length && median > 0 && fb.p75 > median) sell = roundDownToStep(median + 0.6 * (fb.p75 - median));
     const recent = fb.recent && fb.recent.s >= 4 && fb.recent.p60 > 0 ? fb.recent : null;
     if (recent && roundDownToStep(recent.p60) < sell) { sell = roundDownToStep(recent.p60); reasons.push("recent"); }
+    // New card (≤ 7 days): its price is still finding its level, so even 8 h is too long (22 Nov: Balotelli
+    // 134K → 110K in 40 min, "sell 121K" while the last 10 sales were 110-113K). Sell at most the median of
+    // its newest 10 Buy Now sales.
+    const newest = futbinYoung(fb) && Array.isArray(fb.last) ? fb.last.filter(row => row[2] === 1 && row[1] > 0).slice(0, 10).map(row => row[1]).sort((a, b) => a - b) : [];
+    if (newest.length >= 5 && roundDownToStep(newest[Math.floor(newest.length / 2)]) < sell) { sell = roundDownToStep(newest[Math.floor(newest.length / 2)]); reasons.push("newest"); }
     const adjusted = sell < p75;
     buy = Math.min(buy, roundDownToStep(sell * (1 - EA_TAX) / (1 + FB_MIN_PROFIT)));
     const refMedian = recent ? recent.md : median;
@@ -9636,6 +9641,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const why = prices.reasons.map(r => (r === "unsold" ? L(`onverkocht vraagt ${scK(fb.unsold24)}`, `unsold ask ${scK(fb.unsold24)}`)
       : r === "slow" ? L(`${Math.round(fb.sellThrough * 100)}% verkocht`, `${Math.round(fb.sellThrough * 100)}% sold`)
         : r === "recent" ? L(`laatste 8u P60 ${scK(fb.recent.p60)}`, `last 8h P60 ${scK(fb.recent.p60)}`)
+        : r === "newest" ? L(`nieuwe kaart: laatste 10 verkopen ${scK(prices.sell)}`, `new card: last 10 sales ${scK(prices.sell)}`)
         : L("vraag daalt", "demand falling"))).join(", ");
     return ft("w_sellLowered", { sell: scK(prices.sell), p75: scK(prices.p75), why });
   }
@@ -10270,7 +10276,11 @@ function priceWatchMain(SCRIPT_VERSION) {
   function breadthAdd(platform, cards) {
     // Only cards that moved: ~1 in 4 has exactly 0% over 6 h (17 Nov: 161 of 587), and counting those as
     // "not rising" made 55% need ~75% of the moving cards up (never seen). Since 3.4.2: share of the movers.
-    const m6 = cards.map(card => card.m6).filter(value => value != null && Number.isFinite(value) && value !== 0).sort((a, b) => a - b);
+    // Since 3.5.8 over 24 h (same hour yesterday), not 6 h: 22 Nov 00:50 the median special card was −4.7%
+    // over 6 h (19% up) while Index 100 was +8.9% over 6 h and back at its pre-Thunderstruck level. At night
+    // the 6 h window compares the cheapest evening hours with the afternoon, so the daily rhythm alone
+    // pushes the share down in the evening and up in the morning.
+    const m6 = cards.map(card => card.m24).filter(value => value != null && Number.isFinite(value) && value !== 0).sort((a, b) => a - b);
     if (m6.length < 50) return;
     const key = futbinPlatform(platform);
     const all = getMarketRaw();
@@ -10384,8 +10394,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       const ts = state.turnState;
       const third = ts.confirm.uni != null && ts.confirm.uni > -0.01 ? L(`je gecheckte kaarten verkopen weer stabiel (${pct(ts.confirm.uni)})`, `your checked cards sell steady again (${pct(ts.confirm.uni)})`)
         : L(`fodder 84-88 terug op zijn week (${pct(ts.confirm.fod)})`, `fodder 84-88 back at its week (${pct(ts.confirm.fod)})`);
-      text = L(`Drie signalen eens: Index 100 (${name}, gemiddeld over 4u) ${pct(ts.index.rise)} boven de bodem na ${pct(ts.index.drop)}, ${Math.round(ts.breadth.up * 100)}% van je FUT.GG-lijst stijgt (6u), en ${third}. Tijd om weer naar kopen te kijken.`,
-        `Three signals agree: Index 100 (${name}, 4 h average) ${pct(ts.index.rise)} above the low after ${pct(ts.index.drop)}, ${Math.round(ts.breadth.up * 100)}% of your FUT.GG list is rising (6h), and ${third}. Time to look at buying again.`);
+      text = L(`Drie signalen eens: Index 100 (${name}, gemiddeld over 4u) ${pct(ts.index.rise)} boven de bodem na ${pct(ts.index.drop)}, ${Math.round(ts.breadth.up * 100)}% van je FUT.GG-lijst stijgt (24u), en ${third}. Tijd om weer naar kopen te kijken.`,
+        `Three signals agree: Index 100 (${name}, 4 h average) ${pct(ts.index.rise)} above the low after ${pct(ts.index.drop)}, ${Math.round(ts.breadth.up * 100)}% of your FUT.GG list is rising (24h), and ${third}. Time to look at buying again.`);
       Object.assign(stored, { turnAt: Date.now(), lowT: low[0] });
     } else {
       title = L("📉 Markt zakt hard", "📉 Market falling hard");
@@ -10428,7 +10438,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const help = [
       L("Eén getal voor álle kaartprijzen samen (de FUTBIN-index). Een soort beurs van FC.", "One number for ALL card prices together (the FUTBIN index). A kind of stock market for FC."),
       L("6u / 24u = hoeveel goedkoper (−) of duurder (+) alles is dan 6 of 24 uur geleden. Het neemt steeds het gemiddelde van 2 uur, zodat één rare uitschieter niet telt.", "6h / 24h = how much cheaper (−) or more expensive (+) everything is than 6 or 24 hours ago. It always takes a 2-hour average, so one odd spike doesn't count."),
-      br ? L(`${Math.round(br.up * 100)}% stijgt = van de kaarten in je lijst gaat ${Math.round(br.up * 100)}% omhoog. Meer dan de helft = goed teken.`, `${Math.round(br.up * 100)}% rising = ${Math.round(br.up * 100)}% of the cards in your list go up. More than half = good sign.`) : "",
+      br ? L(`${Math.round(br.up * 100)}% stijgt = van de kaarten in je lijst is ${Math.round(br.up * 100)}% duurder dan gisteren rond deze tijd. Meer dan de helft = goed teken.`, `${Math.round(br.up * 100)}% rising = ${Math.round(br.up * 100)}% of the cards in your list are dearer than yesterday at this time. More than half = good sign.`) : "",
       L("📉 zakt hard = in 6 uur 3% of meer omlaag. Dan niet kopen: morgen is het waarschijnlijk goedkoper. Verkopen mag wel.", "📉 falling hard = down 3% or more in 6 hours. Then don't buy: it's probably cheaper tomorrow. Selling is fine."),
       L("📈 draai bevestigd = de markt gaat weer omhoog: dan mag je weer kopen.", "📈 turn confirmed = the market is going up again: you can buy again."),
       L("Je pc haalt dit elke 30 minuten op (alleen als de web app daar open staat).", "Your pc fetches this every 30 minutes (only while the web app is open there).")

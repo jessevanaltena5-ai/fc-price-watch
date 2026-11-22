@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.10
+// @version      3.5.11
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8368,6 +8368,9 @@ function priceWatchMain(SCRIPT_VERSION) {
   function flipShort(value) {
     const number = Math.round(Number(value) || 0);
     if (number >= 1000000) return `${(number / 1000000).toFixed(2).replace(/\.?0+$/, "")}M`;
+    // A price on an EA step (always a multiple of 50) shows exact: 18,750 = "18.75K", not "18.8K" (a price
+    // you can't type in EA). Other values (profits, averages) stay rounded.
+    if (number >= 1000 && number < 1000000 && number % 50 === 0) return `${(number / 1000).toFixed(2).replace(/\.?0+$/, "")}K`;
     if (number >= 100000) return `${Math.round(number / 1000)}K`;
     if (number >= 1000) return `${(number / 1000).toFixed(1).replace(/\.0$/, "")}K`;
     return String(number);
@@ -9605,7 +9608,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const sign = number < 0 ? "-" : "";
     const abs = Math.abs(number);
     if (abs >= 1000000) return sign + flipShort(abs);
-    if (abs >= 10000) return `${sign}${Math.round(abs / 100) / 10}K`;
+    if (abs >= 10000 && abs % 50 !== 0) return `${sign}${Math.round(abs / 100) / 10}K`;
     return sign + flipShort(abs);
   }
   // Buy (Buy Now) = P25 of the BIN sales (P10 mixes in bid wins: that is the bid price). Sell = P75, lowered in

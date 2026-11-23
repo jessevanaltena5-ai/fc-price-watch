@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.15
+// @version      3.5.17
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14430,7 +14430,8 @@ function priceWatchMain(SCRIPT_VERSION) {
         out.push(`   gekocht ${scK(bought)} · break-even ${scK(roundUpToStep(bought / (1 - EA_TAX)))}${own}`);
       } else out.push("   gekocht: onbekend");
       if (state === "closed") return;
-      const card = { id, name, rating, rarity };
+      // special: EA rarity 0/1 = plain bronze/silver/gold (common/rare), everything above is a special card.
+      const card = { id, name, rating, rarity, special: Number(item.rareflag) > 1 };
       if (seen.has(id)) { out.push(`   FUTBIN: zelfde als #${seen.get(id)}`); return; }
       seen.set(id, n);
       const fb = futbinSalesFor(card, platform);
@@ -14454,8 +14455,13 @@ function priceWatchMain(SCRIPT_VERSION) {
         } catch (error) { out.push(`   FUTBIN: kon niet lezen (${error && error.message ? error.message : error})`); }
       }
       try {
-        const leak = leakAdvice(card, now);
-        if (leak) leak.lines.forEach(line => out.push(`   ${line}`));
+        // Always Dutch here (the rest of the export is too), whatever the UI language.
+        activeLeaks(now).filter(leak => leakMatches(leak, card)).forEach(leak => {
+          const before = now < leak.at;
+          const advice = leak.dir === "down" ? before ? `zakt vanaf ${when(leak.at)}: verkoop vóór, niet kopen` : `loopt nu (tot ${when(leak.end)}): kan nog zakken`
+            : before ? `kan stijgen vóór ${when(leak.at)}: koopkans` : `nu live (tot ${when(leak.end)}): verkoopmoment`;
+          out.push(`   📰 ${leak.dir === "down" ? "⬇" : "⬆"} ${leak.title}: ${advice}${leak.note ? ` · ${leak.note}` : ""}`);
+        });
       } catch (_) { /* no leaks */ }
     });
     if (!n) out.push("", "(geen spelers op de transferlijst)");

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.17
+// @version      3.5.18
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8165,6 +8165,8 @@ function priceWatchMain(SCRIPT_VERSION) {
     maxPriceTitle: ["Kaarten boven deze prijs verbergen (sheet: onder 500K blijven)", "Hide cards above this price (sheet: stay under 500K)"],
     minPct: ["Min. winst %", "Min profit %"],
     minPctTitle: ["Minimale winst na 5% belasting, als % van je koopprijs", "Minimum profit after 5% tax, as % of your buy price"],
+    minSales: ["Min. verkopen", "Min sales"],
+    minSalesTitle: ["Verberg kaarten met minder FUTBIN-verkopen in 24 uur (0 = uit). Kaarten zonder FUTBIN-check blijven staan. Alleen weergave: score, groen en signaallog veranderen niet.", "Hide cards with fewer FUTBIN sales in 24 h (0 = off). Cards without a FUTBIN check stay. Display only: score, green and the signal log don't change."],
     badLink: ["Dit is geen geldige fodder.gg price-watch-link", "This is not a valid fodder.gg price-watch link"],
     tickFirst: ["Vink eerst kaarten aan.", "Tick some cards first."],
     runStarted: ["Run met {n} kaart(en) gestart · max. prijs = koopprijs", "Run with {n} card(s) started · max price = buy price"],
@@ -8848,7 +8850,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       .map(item => fodderNow(item, state.platform))
       .map(item => ({ card: item, calc: flipCalc(item, state.platform) }))
       .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
-      .map(row => (row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row));
+      .map(row => (row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row))
+      .map(leakDemote);
+  }
+  // 📰⬇ A card named in a "down" leak (its names or ids, coming or live) is never 🟢/🟡: it becomes 🟠 with
+  // the leak as warning (user 24 Nov 2026). Broad leaks (only rarity/rating, like "Black Friday" that hits
+  // almost every card) keep their colour: early in such a week the flips still worked. The signal log still
+  // counts the card as it was (calc.leakFrom), so the test until 29 Nov stays the same.
+  function leakDemote(row) {
+    if (!["buy", "near"].includes(row.calc.status)) return row;
+    const named = leak => { const m = leak.match || {}; return (Array.isArray(m.names) ? m.names.length : !!m.names) || (Array.isArray(m.ids) ? m.ids.length : !!m.ids); };
+    const hits = activeLeaks().filter(leak => leak.dir === "down" && named(leak) && leakMatches(leak, row.card));
+    if (!hits.length) return row;
+    const lines = (leakAdvice(row.card) || { lines: [] }).lines.filter(line => hits.some(leak => line.includes(leak.title)));
+    return { ...row, calc: { ...row.calc, leakFrom: row.calc.status, status: "risk", risky: true, warnings: [...lines, ...row.calc.warnings] } };
   }
 
   // 🔔 Flip alert: a card that is newly 🟢 since the previous fetch → pling + toast + ntfy push.
@@ -11196,6 +11211,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       .map(card => ({ card, calc: momentumCalc(card, state.platform) }))
       .filter(row => !state.maxPrice || row.card.now <= state.maxPrice)
       .map(row => (row.calc.buy > 0 && row.calc.status !== "skip" && row.calc.pct < state.minPct ? { ...row, calc: { ...row.calc, status: "skip" } } : row))
+      .map(leakDemote)
       .sort((a, b) => a.card.m24 - b.card.m24);
   }
 
@@ -11303,6 +11319,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       .filter(row => !(platform === "pc" && futggPlatform === "pc" && futggPricesAt && Object.keys(futggPrices).length > 1000) || row.card.nowSrc === "index")
       .filter(row => !state.maxPrice || !(row.card.now > 0) || row.card.now <= state.maxPrice)
       .filter(row => !row.calc.futbin || row.calc.futbin.salesPerDay >= META_MIN_SALES)
+      .map(leakDemote)
       .sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.card.fbRating - a.card.fbRating);
   }
   // Background (pc): the meta list every hour, its FUTBIN checks in the auto rounds.
@@ -11457,6 +11474,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     };
     const maxPrice = field();
     const minPct = field();
+    const minSales = field();
     maxPrice.input.classList.add("pt-flip-max");
     const linkLabel = el("span", "pt-muted");
     const settingsRow = el("div", "pt-stock-list-buttons");
@@ -11469,7 +11487,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       update(state => { state.autoFutbin = autoCheck.checked; });
       if (autoCheck.checked) futbinAutoTop(getFlip().source);
     });
-    settingsRow.append(linkLabel, link, maxPrice.box, minPct.box, autoBox, updateButton());
+    settingsRow.append(linkLabel, link, maxPrice.box, minPct.box, minSales.box, autoBox, updateButton());
     settings.appendChild(settingsRow);
     card.appendChild(settings);
 
@@ -11591,6 +11609,8 @@ function priceWatchMain(SCRIPT_VERSION) {
       autoText.textContent = ft("autoFutbin", { n: FUTBIN_AUTO_TOP, m: MOMENTUM_AUTO_TOP });
       autoBox.title = ft("autoFutbinTitle", { n: FUTBIN_AUTO_TOP, m: MOMENTUM_AUTO_TOP });
       minPct.input.title = ft("minPctTitle");
+      minSales.label.textContent = ft("minSales");
+      minSales.input.title = ft("minSalesTitle");
       HEADERS.forEach(([key], i) => { if (key) headCells[i].textContent = ft(key); });
       headTick.title = ft("sel_headTitle");
       selectMenu.title = ft("sel_title");
@@ -11682,6 +11702,10 @@ function priceWatchMain(SCRIPT_VERSION) {
     minPct.input.addEventListener("change", () => update(state => {
       const value = Number(String(minPct.input.value).replace(",", "."));
       state.minPct = Number.isFinite(value) ? value : 5;
+    }));
+    minSales.input.addEventListener("change", () => update(state => {
+      const value = Math.round(Number(String(minSales.input.value).replace(/[^\d]/g, "")));
+      state.minSales = Number.isFinite(value) && value > 0 ? value : 0;
     }));
     onlyDeals.addEventListener("change", () => update(state => { state.onlyDeals = onlyDeals.checked; }));
     refresh.addEventListener("click", () => (getFlip().source === "meta" ? loadMeta(true) : getFlip().source === "futgg" ? loadMomentum(true) : loadFlipSheet(true)));
@@ -12034,6 +12058,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       platform.disabled = !!eaPlatform(); // known from your EA account
       if (document.activeElement !== maxPrice.input) maxPrice.input.value = state.maxPrice ? priceFormat.format(state.maxPrice) : "";
       if (document.activeElement !== minPct.input) minPct.input.value = String(state.minPct);
+      if (document.activeElement !== minSales.input) minSales.input.value = String(state.minSales || 0);
       onlyDeals.checked = !!state.onlyDeals;
       autoCheck.checked = !!state.autoFutbin;
       const meta = state.source === "meta";
@@ -12069,7 +12094,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         if (state.sort === "signal" || state.platform !== "pc") shown.sort((a, b) => FLIP_ORDER[a.calc.status] - FLIP_ORDER[b.calc.status] || b.calc.pct - a.calc.pct);
       }
       signalLogTouch(meta ? "meta" : momentum ? "futgg" : "fodder", shown.map(row => ({ k: `${row.card.id}|${state.platform}`, n: row.card.name, price: row.card.now,
-        green: row.calc.status === "buy", buy: row.calc.buy, sell: row.calc.sell })));
+        green: row.calc.status === "buy" || row.calc.leakFrom === "buy", buy: row.calc.buy, sell: row.calc.sell })));
       const listSize = shown.length;
       // "Done" = FUTBIN was asked: a usable check, a check with too few sales (calc.futbin stays empty, but it
       // is fresh, so no round picks it again) or not found on FUTBIN. Only the rest is still to do.
@@ -12086,6 +12111,8 @@ function priceWatchMain(SCRIPT_VERSION) {
           `(${thinCount} too few FUTBIN sales, ${missingCount} not on FUTBIN${otherPcCount ? `, ${otherPcCount} for your other pc` : ""}, ${fbOpen.length - otherPcCount} still to do)`)
         : "";
       if (filterText.trim()) shown = shown.filter(matchesFilter);
+      // Min sales (display only, after the signal log): hide checked cards with too few FUTBIN sales in 24 h.
+      if (state.minSales > 0) shown = shown.filter(row => !row.calc.futbin || Number(row.calc.futbin.sales24) >= state.minSales);
 
       // FUTBIN chip: progress of the list (checked / all) and a click = check the real sales now.
       const paused = state.autoFutbin && Date.now() < futbinAutoPause;

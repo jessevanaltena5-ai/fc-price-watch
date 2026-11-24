@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.18
+// @version      3.5.19
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -8858,12 +8858,12 @@ function priceWatchMain(SCRIPT_VERSION) {
   // almost every card) keep their colour: early in such a week the flips still worked. The signal log still
   // counts the card as it was (calc.leakFrom), so the test until 29 Nov stays the same.
   function leakDemote(row) {
-    if (!["buy", "near"].includes(row.calc.status)) return row;
     const named = leak => { const m = leak.match || {}; return (Array.isArray(m.names) ? m.names.length : !!m.names) || (Array.isArray(m.ids) ? m.ids.length : !!m.ids); };
     const hits = activeLeaks().filter(leak => leak.dir === "down" && named(leak) && leakMatches(leak, row.card));
     if (!hits.length) return row;
+    if (!["buy", "near"].includes(row.calc.status)) return { ...row, calc: { ...row.calc, leakNamed: true } }; // score bar grey
     const lines = (leakAdvice(row.card) || { lines: [] }).lines.filter(line => hits.some(leak => line.includes(leak.title)));
-    return { ...row, calc: { ...row.calc, leakFrom: row.calc.status, status: "risk", risky: true, warnings: [...lines, ...row.calc.warnings] } };
+    return { ...row, calc: { ...row.calc, leakFrom: row.calc.status, leakNamed: true, status: "risk", risky: true, warnings: [...lines, ...row.calc.warnings] } };
   }
 
   // 🔔 Flip alert: a card that is newly 🟢 since the previous fetch → pling + toast + ntfy push.
@@ -12236,13 +12236,14 @@ function priceWatchMain(SCRIPT_VERSION) {
         const scoreCell = el("td", "pt-col-score");
         scoreCell.title = ft(`st_${calc.status}`) + (calc.buy > 0 && calc.status !== "skip" ? ` · ${ft("gapTitle", { pct: pctOf(calc.gap) })}` : "");
         if (opp) {
-          const scoreBox = el("span", `pt-fx-score pt-fx-lvl-${opp.level}`);
+          // A card named in a ⬇ leak: grey bar ("skip it"), whatever its score (display only).
+          const scoreBox = el("span", `pt-fx-score pt-fx-lvl-${calc.leakNamed ? "low" : opp.level}`);
           const bar = el("span", "pt-fx-scorebar");
           const fill = el("i");
           fill.style.width = `${opp.score}%`;
           bar.appendChild(fill);
           scoreBox.append(el("b", "pt-opp", String(opp.score)), bar);
-          scoreBox.title = ft("badgeTitle", { score: opp.score, level: ft(`lvl_${opp.level}`) });
+          scoreBox.title = ft("badgeTitle", { score: opp.score, level: ft(`lvl_${calc.leakNamed ? "low" : opp.level}`) }) + (calc.leakNamed ? " · 📰⬇ leak" : "");
           scoreCell.appendChild(scoreBox);
         } else {
           scoreCell.appendChild(el("span", "pt-fx-noscore", `${FLIP_ICON[calc.status]} ${ft(`sts_${calc.status}`)}`));

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.19
+// @version      3.5.20
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -14656,7 +14656,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const full = !genie();
     addMassBidSell(actions, view, item, bought);
     let row = actions.querySelector(".pt-ql:not(.pt-ql-mb)");
-    if (row && (row.__ptItem !== item || row.__ptFull !== full)) {
+    if (row && (row.__ptItem !== item || row.__ptFull !== full || row.__ptBought !== bought)) {
       row.remove();
       row = null;
     }
@@ -14666,6 +14666,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     row = el("div", "panelActionRow pt-ql");
     row.__ptItem = item;
     row.__ptFull = full;
+    row.__ptBought = bought; // EA fills in the new price after you win: then rebuild
     const binNow = () => Number(view._buyNowNumericStepper && view._buyNowNumericStepper.getValue && view._buyNowNumericStepper.getValue()) || 0;
     const profit = el("div", "pt-ql-profit");
     const showProfit = () => {
@@ -14781,10 +14782,18 @@ function priceWatchMain(SCRIPT_VERSION) {
       actions.addEventListener("click", () => window.setTimeout(refresh, 50));
     }
     row.__ptRefresh = () => {
+      // Price changed under us (old price from before you won it): build again with the new one.
+      if ((item.lastSalePrice > 0 ? item.lastSalePrice : 0) !== row.__ptBought) { row.remove(); addQuickListMarkup(controller); return; }
       refreshPrice();
       showProfit();
     };
     row.__ptRefresh();
+    // EA can set the bought price a moment later: check it for a short while.
+    let checks = 0;
+    const watch = window.setInterval(() => {
+      if (!row.isConnected || ++checks > 20) return void window.clearInterval(watch);
+      if ((item.lastSalePrice > 0 ? item.lastSalePrice : 0) !== row.__ptBought) { window.clearInterval(watch); row.__ptRefresh(); }
+    }, 500);
   }
 
   // ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.5.20
+// @version      3.6.0
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -4061,7 +4061,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   // List: players list + { mode: "bid", massBid: { pct } }; player.sell = the BIN you saw yourself
   // (else the FUT.GG PC price). The script never searches, watches, bids or lists; it prepares the
   // filter, shows per auction whether your bid still fits, and fills the sell price when you list.
-  const MASS_BID_DEFAULT_PCT = 20;
+  const MASS_BID_DEFAULT_PCT = 15;
   const MASS_BID_WATCH_MAX = 50;
   const MASS_BID_HOT_SECONDS = 30;
 
@@ -4108,7 +4108,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   const MASS_BID_HOLD_PCT = 10;
 
   function massBidHold(info, paid) {
-    return !!(info && info.list.massBid && info.list.massBid.fodder && info.sell && paid > 0 &&
+    return !!(info && info.list.massBid && info.list.massBid.fodder && !info.list.massBid.sellAll && info.sell && paid > 0 &&
       paid <= info.sell * (1 - MASS_BID_HOLD_PCT / 100));
   }
 
@@ -5102,8 +5102,12 @@ function priceWatchMain(SCRIPT_VERSION) {
     return best;
   }
 
+  // Nicknames tips use that aren't in EA's names.
+  const PLAYER_NICKNAMES = { vdv: "van de ven", vvd: "van dijk", kdb: "de bruyne", taa: "alexander arnold" };
+
   function matchPlayer(raw) {
-    const query = plainName(raw);
+    const plain = plainName(raw);
+    const query = PLAYER_NICKNAMES[plain] || plain;
     // Any strong name match counts the same ("Hansen" = Tuva Hansen and Caroline *Graham Hansen*);
     // within a tier the best-rated player wins, because tips are about the cards people trade.
     const tier = score => (score >= 0.9 ? 2 : score >= 0.85 ? 1 : 0);
@@ -5188,7 +5192,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     }
     // Lookalikes whose regular card is at or below the tip rating ("Martin": Jon Martín, Lisandro Martínez, …):
     // the card versions decide which one has a card with that rating.
-    const query = plainName(name);
+    const query = PLAYER_NICKNAMES[plainName(name)] || plainName(name);
     // Exact names ("Martín") before prefixes ("Martínez"), then by rating.
     match.lookalikes = query.length < 3 ? [] : getPlayerIndex()
       .filter(entry => entry.rating <= rating && entry.rating >= rating - 20)
@@ -5334,9 +5338,15 @@ function priceWatchMain(SCRIPT_VERSION) {
       if (rawLine.trim().split(/\s+/).length > 10) return; // a sentence, not a list of names
       if (DISCARD_WORD.test(rawLine)) return; // "Discard on bids" is an instruction, not a player
       rawLine.split(/[,;/]/).forEach(part => {
-        const line = part.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–\d.)]+\s*/, "").trim();
-        // "Svitková 76" / "Svitková-76": a name with the card's rating, no price.
-        const withRating = line.match(/^([^\d]+?)\s*[-–]?\s*(\d{2})$/);
+        let line = part.replace(/@\w+/g, "").replace(/[•*_~`>]+/g, " ").replace(/^\s*[-–—\d.)]+\s*/, "").trim();
+        // "Ngumoha (totw)": the TOTW version of the player.
+        let wantRarity = null;
+        if (/[(\[]?\btotw\b[)\]]?/i.test(line)) {
+          wantRarity = 3;
+          line = line.replace(/[(\[]?\btotw\b[)\]]?/ig, " ").replace(/\s+/g, " ").trim();
+        }
+        // "Svitková 76" / "Svitková-76" / "Hato — 86": a name with the card's rating, no price.
+        const withRating = line.match(/^([^\d]+?)\s*[-–—:]?\s*(\d{2})$/);
         if (withRating && +withRating[2] >= 45 && withRating[1].trim().split(/\s+/).length <= 4) {
           const rating = +withRating[2];
           const match = matchRatedPlayer(withRating[1].trim(), rating);
@@ -5346,7 +5356,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           }
           if (seen.has(match.player.id)) return;
           seen.add(match.player.id);
-          players.push(Object.assign(match, { raw: line, tipRating: rating }));
+          players.push(Object.assign(match, { raw: line, tipRating: rating, wantRarity }));
           return;
         }
         if (!line || /\d/.test(line) || /^skip$/i.test(line)) return; // "skip" is a price column, not Oliver Skipp
@@ -5360,11 +5370,19 @@ function priceWatchMain(SCRIPT_VERSION) {
         }
         if (seen.has(match.player.id)) return;
         seen.add(match.player.id);
-        players.push(match);
+        players.push(Object.assign(match, { wantRarity }));
       });
     });
     // "Discard on bids" / "at discard": bid list at the quick-sell value (see playerMax).
-    return { players, skipped, platform, windows: parseWindows(text), discard: DISCARD_WORD.test(String(text || "")) };
+    // "Mass Bidding … bid 15% or so below the lowest Buy It Now … SELL INSTANT": a mass-bid list.
+    const all = String(text || "");
+    let massBid = null;
+    if (/\bmass[ -]?bid/i.test(all)) {
+      const pct = all.match(/(\d{1,2})\s*%[^\n]{0,30}?\b(below|under|onder)\b/i);
+      massBid = { pct: pct && +pct[1] > 0 && +pct[1] < 90 ? +pct[1] : MASS_BID_DEFAULT_PCT,
+        sellAll: /\bsell\s+(instant|straight|right away|direct)/i.test(all) };
+    }
+    return { players, skipped, platform, windows: parseWindows(text), discard: DISCARD_WORD.test(all), massBid };
   }
 
   // --- Inventory: what you own per rule, what it cost, what it's worth ----------
@@ -12605,7 +12623,7 @@ function priceWatchMain(SCRIPT_VERSION) {
     const priceFrom = field(L("Prijs van", "Price from"), "300", L("Laagste FUT.GG PC-prijs", "Lowest FUT.GG PC price"));
     const priceTo = field(L("tot", "to"), "1000", L("Hoogste FUT.GG PC-prijs", "Highest FUT.GG PC price"));
     const count = field(L("Aantal", "Count"), "15", L("Hoeveel kaarten in de lijst (tip: 10–12+)", "How many cards in the list (tip: 10–12+)"));
-    const pct = field(L("% onder BIN", "% below BIN"), String(MASS_BID_DEFAULT_PCT), L("Max bod = BIN − dit percentage (tip: 20–25%)", "Max bid = BIN − this percentage (tip: 20–25%)"));
+    const pct = field(L("% onder BIN", "% below BIN"), String(MASS_BID_DEFAULT_PCT), L("Max bod = BIN − dit percentage (tip: 15–25%)", "Max bid = BIN − this percentage (tip: 15–25%)"));
     const make = el("button", "pt-watch-refresh", L("Maken", "Create"));
     make.type = "button";
     make.title = L("Kaarten binnen de rating én de prijsrange (FUT.GG PC), duurste eerst", "Cards within the rating and price range (FUT.GG PC), most expensive first");
@@ -12638,7 +12656,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         id: `mb${Date.now()}`,
         type: "players",
         mode: "bid",
-        massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT },
+        massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT, sellAll: sellAll.checked },
         name: L(`🎯 Biedlijst ${rLow}–${rHigh} · ${priceFormat.format(pLow)}–${priceFormat.format(pHigh)}`, `🎯 Bid list ${rLow}–${rHigh} · ${priceFormat.format(pLow)}–${priceFormat.format(pHigh)}`),
         createdAt: Date.now(),
         profit: null,
@@ -12675,7 +12693,7 @@ function priceWatchMain(SCRIPT_VERSION) {
         id: `mb${Date.now()}`,
         type: "players",
         mode: "bid",
-        massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT, fodder: true },
+        massBid: { pct: percentage > 0 && percentage < 90 ? percentage : MASS_BID_DEFAULT_PCT, fodder: true, sellAll: sellAll.checked },
         name: L(`🎯 Fodder-biedlijst ${rLow === rHigh ? rLow : `${rLow}–${rHigh}`}`, `🎯 Fodder bid list ${rLow === rHigh ? rLow : `${rLow}–${rHigh}`}`),
         createdAt: Date.now(),
         profit: null,
@@ -12685,11 +12703,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       });
       saveStock();
       panel.style.display = "none";
-      showToast(L(`🎯 Fodder-biedlijst gemaakt met ${players.length} kaarten (≥${MASS_BID_HOLD_PCT}% onder de prijs gewonnen = houden).`, `🎯 Fodder bid list created with ${players.length} cards (won ≥${MASS_BID_HOLD_PCT}% under the price = keep).`), true);
+      showToast(sellAll.checked
+        ? L(`🎯 Fodder-biedlijst gemaakt met ${players.length} kaarten (alles direct verkopen).`, `🎯 Fodder bid list created with ${players.length} cards (sell everything instantly).`)
+        : L(`🎯 Fodder-biedlijst gemaakt met ${players.length} kaarten (≥${MASS_BID_HOLD_PCT}% onder de prijs gewonnen = houden).`, `🎯 Fodder bid list created with ${players.length} cards (won ≥${MASS_BID_HOLD_PCT}% under the price = keep).`), true);
       onCreated();
     });
+    // "SELL INSTANT AFTER BUYING": no "📦 keep" advice on fodder won cheaply.
+    const sellAllBox = el("label", "pt-stock-level");
+    const sellAll = el("input");
+    sellAll.type = "checkbox";
+    sellAll.checked = true;
+    sellAllBox.title = L("Aan: elke gewonnen kaart direct verkopen. Uit: fodder die je ≥10% onder de prijs wint → 📦 houden.", "On: sell every won card instantly. Off: fodder won ≥10% under the price → 📦 keep.");
+    sellAllBox.append(sellAll, document.createTextNode(L(" Alles direct verkopen", " Sell everything instantly")));
     const row = el("div", "pt-stock-list-buttons");
-    row.append(ratingFrom.box, ratingTo.box, priceFrom.box, priceTo.box, count.box, pct.box, make, makeFodder);
+    row.append(ratingFrom.box, ratingTo.box, priceFrom.box, priceTo.box, count.box, pct.box, sellAllBox, make, makeFodder);
     panel.append(row, note);
     return panel;
   }
@@ -13116,8 +13143,11 @@ function priceWatchMain(SCRIPT_VERSION) {
           await fetchGeniePrices(versions.map(version => version.definitionId));
           if (select.value !== String(player.id)) return;
           // No rating in the tip: the regular card, unless the tip price is far from it and another version fits.
-          const pick = item.tipRating ? pickVersion(versions, item.tipRating, parsePrice(maxInput.value) || item.fitCoins)
-            : pickUnratedVersion(versions, player.id, parsePrice(maxInput.value) || item.fitCoins);
+          // "(totw)": the TOTW version (the highest one if there are several).
+          const wanted = item.wantRarity ? versions.filter(version => version.rarity === item.wantRarity && !isHolo(version) &&
+            (!item.tipRating || version.rating === item.tipRating)).sort((a, b) => b.rating - a.rating)[0] : null;
+          const pick = wanted || (item.tipRating ? pickVersion(versions, item.tipRating, parsePrice(maxInput.value) || item.fitCoins)
+            : pickUnratedVersion(versions, player.id, parsePrice(maxInput.value) || item.fitCoins));
           versionState.playerId = player.id;
           versionState.versions = versions;
           versionSelect.value = "";
@@ -13184,7 +13214,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       })();
 
       const nameInput = el("input", "pt-target-input pt-stock-name");
-      nameInput.value = `Snipe ${new Date(parsed.windows.length ? parsed.windows[0].start : Date.now()).toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
+      nameInput.value = `${parsed.massBid ? "🎯 Mass bid" : "Snipe"} ${new Date(parsed.windows.length ? parsed.windows[0].start : Date.now()).toLocaleDateString("nl-NL", { day: "2-digit", month: "2-digit" })}`;
       const actions = el("div", "pt-stock-actions");
       const save = el("button", "pt-watch-refresh", L("Opslaan als snipe-lijst", "Save as snipe list"));
       const back = el("button", "pt-link-btn", L("← Terug", "← Back"));
@@ -13232,6 +13262,7 @@ function priceWatchMain(SCRIPT_VERSION) {
           players,
           holo: holoMode || players.some(player => player.holo),
           ...(parsed.discard ? { discard: true, mode: "bid" } : {}),
+          ...(parsed.massBid && !parsed.discard ? { mode: "bid", massBid: { pct: parsed.massBid.pct, sellAll: parsed.massBid.sellAll } } : {}),
           done: {}
         });
         saveStock();
@@ -13245,6 +13276,7 @@ function priceWatchMain(SCRIPT_VERSION) {
       const doubtful = parsed.players.filter(item => item.status === "maybe").length;
       const summary = el("div", "pt-stock-summary", L(`${parsed.players.length} spelers gevonden · ${recognised} zeker · ${doubtful} twijfel (oranje)`, `${parsed.players.length} players found · ${recognised} certain · ${doubtful} doubtful (orange)`) +
         (parsed.skipped ? L(` · ${parsed.skipped} regel(s) zonder speler overgeslagen`, ` · ${parsed.skipped} line(s) without a player skipped`) : "") + L(" · gewone kaart, duurste eerst. ", " · regular card, most expensive first. ") +
+        (parsed.massBid && !parsed.discard ? L(`🎯 Mass bid-tip: wordt een biedlijst, max bod = laagste BIN − ${parsed.massBid.pct}%${parsed.massBid.sellAll ? " · alles direct verkopen" : ""}. `, `🎯 Mass bid tip: becomes a bid list, max bid = lowest BIN − ${parsed.massBid.pct}%${parsed.massBid.sellAll ? " · sell everything instantly" : ""}. `) : "") +
         (parsed.discard ? L("🗑️ Discard-tip: bied-lijst, max bod = quick-sell-waarde van de rating (goud nooit onder 600, de laagste marktprijs); duurdere kaarten (> quick-sell + 200) prijs − 150. ", "🗑️ Discard tip: bid list, max bid = quick-sell value of the rating (gold never below 600, the lowest market price); more expensive cards (> quick-sell + 200) price − 150. ") : ""));
       summary.appendChild(switchLink(false));
       importPanel.append(summary, settings, table, actions);
@@ -13275,7 +13307,10 @@ function priceWatchMain(SCRIPT_VERSION) {
         const asFodder = parseFodderTip(area.value);
         const asFilters = parseFilterTip(area.value);
         // Rating-based fodder prices ("87s <6 / <6.5").
-        if (asPlayers.players.filter(item => item.priced).length >= 2) {
+        if (asPlayers.massBid && asPlayers.players.length >= 3) {
+          // A mass-bid tip with a player list: a bid list (max bid = BIN − the tip's %).
+          showPlayerReviewStep(asPlayers);
+        } else if (asPlayers.players.filter(item => item.priced).length >= 2) {
           // Names with rating and prices ("Hemp-88 <110 / <100pc"): a new snipe list with fixed max BINs.
           showPlayerReviewStep(asPlayers);
         } else if (asFilters.grouped) {

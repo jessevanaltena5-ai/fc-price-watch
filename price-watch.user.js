@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.6.0
+// @version      3.6.1
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -5474,6 +5474,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   }
 
   const wonPrices = new Map(); // item id -> winning bid, for cards still in Transfer Targets
+  let lastPileCounts = null; // per pile: EA's answer, the app's copy, kept, players (shown under the Fodder table)
 
   // Your cards outside the club: transfer list (not yet sold), unassigned, and won cards still in
   // Transfer Targets. Fetched fresh (falls back to what the web app has loaded). Never the market.
@@ -5489,11 +5490,20 @@ function priceWatchMain(SCRIPT_VERSION) {
       } }
     ];
     const items = [];
+    const counts = {};
     for (let i = 0; i < piles.length; i++) {
       if (i) await new Promise(resolve => window.setTimeout(resolve, CLUB_SEARCH_DELAY_MS));
       const fetched = await requestPile(piles[i].method);
-      (fetched || pileItems(repositories.Item[piles[i].pile])).filter(Boolean).filter(piles[i].keep).forEach(item => items.push(item));
+      // EA's answer and what the web app holds, merged: the screen shows max 50 unassigned, the app may hold more.
+      const loaded = pileItems(repositories.Item && repositories.Item[piles[i].pile]);
+      const byId = new Map();
+      (fetched || []).concat(!fetched || piles[i].pile === "unassigned" ? loaded : []).filter(Boolean).forEach(item => { if (!byId.has(item.id)) byId.set(item.id, item); });
+      const kept = [...byId.values()].filter(piles[i].keep);
+      counts[piles[i].pile] = { ea: fetched ? fetched.length : null, app: loaded.length, kept: kept.length,
+        players: kept.filter(item => item.isPlayer && item.isPlayer()).length };
+      kept.forEach(item => items.push(item));
     }
+    lastPileCounts = counts;
     return items;
   }
 
@@ -7175,7 +7185,13 @@ function priceWatchMain(SCRIPT_VERSION) {
 
     fodderInventoryProgress = null;
     if (!failed) {
-      getFodder().inventory = { updatedAt: Date.now(), rules };
+      // Cards outside the transfer list/unassigned/won that this count leaves out: other ratings, specials.
+      const outsidePlayers = transferPile.filter(item => item && item.isPlayer && item.isPlayer());
+      const skippedOutside = {
+        otherRating: outsidePlayers.filter(item => !ratings.includes(item.rating)).length,
+        special: outsidePlayers.filter(item => ratings.includes(item.rating) && item.isSpecial && item.isSpecial()).length
+      };
+      getFodder().inventory = { updatedAt: Date.now(), rules, piles: lastPileCounts, skippedOutside, ratingRange: [Math.min(...ratings), Math.max(...ratings)] };
       saveFodder();
       fetchGeniePrices(Object.values(rules).flatMap(bucket => bucket.items.map(item => item.d)))
         .then(() => listeners.forEach(listener => listener()));
@@ -8035,6 +8051,27 @@ function priceWatchMain(SCRIPT_VERSION) {
           el("span", "pt-muted", L(` · waarde op marktminimum ~${priceFormat.format(totalValue)} (na belasting ~${priceFormat.format(Math.round(totalValue * (1 - EA_TAX)))})`, ` · value at market minimum ~${priceFormat.format(totalValue)} (after tax ~${priceFormat.format(Math.round(totalValue * (1 - EA_TAX)))})`)),
           el("span", "pt-muted", L(` · geteld om ${formatTime(state.inventory.updatedAt)}`, ` · counted at ${formatTime(state.inventory.updatedAt)}`))
         );
+        // Where the cards outside the club came from, and what the count leaves out.
+        const piles = state.inventory.piles;
+        if (piles) {
+          const pileText = (key, nl, en) => {
+            const pile = piles[key];
+            if (!pile) return "";
+            const more = pile.ea != null && pile.app > pile.ea ? L(` (EA gaf ${pile.ea}, app had ${pile.app})`, ` (EA gave ${pile.ea}, app had ${pile.app})`) : "";
+            return L(`${nl} ${pile.players}`, `${en} ${pile.players}`) + more;
+          };
+          const skipped = state.inventory.skippedOutside || {};
+          const range = state.inventory.ratingRange || [];
+          const line = el("div", "pt-muted");
+          line.textContent = L("Buiten de club (spelers): ", "Outside the club (players): ") + [
+            pileText("transfer", "transferlijst", "transfer list"),
+            pileText("unassigned", "unassigned", "unassigned"),
+            pileText("watchlist", "gewonnen in Transfer Targets", "won in Transfer Targets")
+          ].filter(Boolean).join(" · ") +
+            (skipped.otherRating ? L(` · ${skipped.otherRating} niet geteld (rating buiten ${range[0]}–${range[1]})`, ` · ${skipped.otherRating} not counted (rating outside ${range[0]}–${range[1]})`) : "") +
+            (skipped.special ? L(` · ${skipped.special} niet geteld (special/TOTW)`, ` · ${skipped.special} not counted (special/TOTW)`) : "");
+          totals.appendChild(line);
+        }
       } else {
         totals.appendChild(el("span", "pt-muted", L("📦 Klik op \"Voorraad bijwerken\" om je fodder per rating te tellen.", "📦 Click \"Update stock\" to count your fodder per rating.")));
       }

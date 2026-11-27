@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.6.1
+// @version      3.6.2
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -192,6 +192,13 @@ function priceWatchMain(SCRIPT_VERSION) {
             const watch = /\/watchlist/.test(path) && req.method !== "GET";
             const bad = !(this.status >= 200 && this.status < 300);
             noteEaResponse(path, req.method, this.status);
+            // Unassigned ("purchased") answers: how many cards EA gives and with which query (max 50?).
+            if (/purchased/.test(path) && req.method === "GET" && !bad) {
+              let n = "?";
+              try { const body = typeof this.response === "object" && this.response ? this.response : JSON.parse(this.responseText); n = (body.itemData || body.items || []).length; } catch (_) { /* count unknown */ }
+              eaLog({ kind: "http", method: req.method, path: path + (req.url.includes("?") ? "?" + req.url.split("?")[1] : ""), status: this.status, ms: Date.now() - started, text: `unassigned: ${n} kaarten` });
+              return;
+            }
             if (!bid && !watch && !bad && !/\/auth/.test(path)) return;
             let text = "";
             if (bad) {
@@ -209,6 +216,24 @@ function priceWatchMain(SCRIPT_VERSION) {
       }
       return send.apply(this, arguments);
     };
+    // Same for fetch (other tools may use it): only unassigned answers, the count and the query.
+    if (window.fetch && !window.fetch.__ptLog) {
+      const originalFetch = window.fetch;
+      const loggedFetch = function (input) {
+        const promise = originalFetch.apply(this, arguments);
+        try {
+          const url = String(input && input.url || input || "");
+          if (/\/ut\/game\/.*purchased/.test(url)) {
+            promise.then(response => response.clone().json()).then(body => {
+              eaLog({ kind: "http", method: "FETCH", path: url.replace(/^https?:\/\/[^/]+/, "").replace(/\d{5,}/g, "#"), status: 200, ms: 0, text: `unassigned: ${(body.itemData || body.items || []).length} kaarten` });
+            }).catch(() => {});
+          }
+        } catch (_) { /* never interfere */ }
+        return promise;
+      };
+      loggedFetch.__ptLog = true;
+      window.fetch = loggedFetch;
+    }
   })();
 
   // EA's own messages at the top of the screen.

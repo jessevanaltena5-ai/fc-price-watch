@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.6.3
+// @version      3.6.4
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -173,6 +173,7 @@ function priceWatchMain(SCRIPT_VERSION) {
   (function installEaRequestLog() {
     const proto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
     if (!proto || proto.open.__ptLog) return;
+    installEaRequestLog.seen = new Set();
     const open = proto.open;
     const send = proto.send;
     const openLogged = function (method, url) {
@@ -192,6 +193,26 @@ function priceWatchMain(SCRIPT_VERSION) {
             const watch = /\/watchlist/.test(path) && req.method !== "GET";
             const bad = !(this.status >= 200 && this.status < 300);
             noteEaResponse(path, req.method, this.status);
+            // Where does the real unassigned total live? Log number fields named like purchased/unassigned
+            // in any EA answer (once per path + field), e.g. usermassinfo. Only a log.
+            if (!bad && req.method === "GET" && /\/ut\/game\//.test(req.url)) {
+              try {
+                const body = typeof this.response === "object" && this.response ? this.response : JSON.parse(this.responseText || "null");
+                const found = [];
+                const walk = (value, key, depth) => {
+                  if (depth > 5 || value == null || found.length > 6) return;
+                  if (typeof value === "number" && /purchas|unassign|pile/i.test(key)) found.push(`${key}=${value}`);
+                  else if (typeof value === "object" && value.key != null && typeof value.value === "number" && /pile/i.test(key)) found.push(`${key}[${value.key}]=${value.value}`);
+                  else if (typeof value === "object") Object.keys(value).slice(0, 200).forEach(k => walk(value[k], Array.isArray(value) ? key : k, depth + 1));
+                };
+                walk(body, "", 0);
+                const seenKey = path + found.join(",");
+                if (found.length && !installEaRequestLog.seen.has(seenKey)) {
+                  installEaRequestLog.seen.add(seenKey);
+                  eaLog({ kind: "http", method: req.method, path, status: this.status, ms: 0, text: "velden: " + found.join(" ") });
+                }
+              } catch (_) { /* not JSON */ }
+            }
             // Unassigned ("purchased") answers: how many cards EA gives and with which query (max 50?).
             if (/purchased/.test(path) && req.method === "GET" && !bad) {
               let n = "?";

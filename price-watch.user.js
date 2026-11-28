@@ -2,7 +2,7 @@
 // @name         FC Price Watch
 // @namespace    local.fc.price-watch
 // @author       Altenarista
-// @version      3.6.2
+// @version      3.6.3
 // @description  FC Price Watch met FUT.GG-PC-prijzen, PC-instapdoel, duidelijke zoekwaarschuwingen, handmatige live EA-BIN-scan met conservatieve limieten, stock-lijsten en QR-overdracht naar je telefoon.
 // @match        https://www.ea.com/*ultimate-team/web-app*
 // @match        https://www.easports.com/*ultimate-team/web-app*
@@ -196,6 +196,7 @@ function priceWatchMain(SCRIPT_VERSION) {
             if (/purchased/.test(path) && req.method === "GET" && !bad) {
               let n = "?";
               try { const body = typeof this.response === "object" && this.response ? this.response : JSON.parse(this.responseText); n = (body.itemData || body.items || []).length; } catch (_) { /* count unknown */ }
+              if (typeof n === "number" && n < 50) noteUnassignedTotal(n, "ea"); // under 50: EA showed them all
               eaLog({ kind: "http", method: req.method, path: path + (req.url.includes("?") ? "?" + req.url.split("?")[1] : ""), status: this.status, ms: Date.now() - started, text: `unassigned: ${n} kaarten` });
               return;
             }
@@ -5501,6 +5502,49 @@ function priceWatchMain(SCRIPT_VERSION) {
   const wonPrices = new Map(); // item id -> winning bid, for cards still in Transfer Targets
   let lastPileCounts = null; // per pile: EA's answer, the app's copy, kept, players (shown under the Fodder table)
 
+  // Unassigned: EA hands out max 50 cards at a time, but EA's Home tile shows the real total
+  // ("131 Items Remaining"). Read from that tile; an EA answer under 50 means everything is visible.
+  const UNASSIGNED_TOTAL_KEY = "pt_unassigned_total_v1";
+  function noteUnassignedTotal(n, source) {
+    if (!(n >= 0)) return;
+    const old = readJson(UNASSIGNED_TOTAL_KEY, null);
+    if (old && old.n === n && Date.now() - old.at < 60000) return;
+    writeJson(UNASSIGNED_TOTAL_KEY, { n, at: Date.now(), source });
+  }
+  let unassignedScanAt = 0;
+  function scanUnassignedTile() {
+    if (Date.now() - unassignedScanAt < 5000 || !document.body) return;
+    unassignedScanAt = Date.now();
+    try {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+        acceptNode: node => (/remaining|resterend/i.test(node.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP)
+      });
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        // Climb a little: "131" and "Items Remaining" are separate elements in one tile. Only tile-sized boxes
+        // (short text) that name Unassigned, so an SBC's "3 items remaining" elsewhere doesn't count.
+        let box = node.parentElement;
+        for (let i = 0; i < 5 && box; i++, box = box.parentElement) {
+          const text = (box.textContent || "").replace(/\s+/g, " ");
+          if (text.length > 200) break;
+          const at = text.search(/unassigned|niet toegewezen/i);
+          if (at >= 0) {
+            // The count after the tile's title, not some other "… remaining" before it.
+            const match = text.slice(at).match(/(\d{1,4})\s*(?:items?\s*remaining|resterende|items?\s*resterend)/i);
+            if (match) return noteUnassignedTotal(+match[1], "tile");
+          }
+        }
+      }
+    } catch (_) {
+      // Only a count.
+    }
+  }
+  // { total, visible, hidden, at } when EA holds more unassigned cards than it hands out, else null.
+  function hiddenUnassigned(visible) {
+    const stored = readJson(UNASSIGNED_TOTAL_KEY, null);
+    if (!stored || !(visible >= 0) || Date.now() - stored.at > 12 * 3600 * 1000) return null;
+    return stored.n > visible ? { total: stored.n, visible, hidden: stored.n - visible, at: stored.at } : null;
+  }
+
   // Your cards outside the club: transfer list (not yet sold), unassigned, and won cards still in
   // Transfer Targets. Fetched fresh (falls back to what the web app has loaded). Never the market.
   async function itemsOutsideClub() {
@@ -8096,6 +8140,20 @@ function priceWatchMain(SCRIPT_VERSION) {
             (skipped.otherRating ? L(` · ${skipped.otherRating} niet geteld (rating buiten ${range[0]}–${range[1]})`, ` · ${skipped.otherRating} not counted (rating outside ${range[0]}–${range[1]})`) : "") +
             (skipped.special ? L(` · ${skipped.special} niet geteld (special/TOTW)`, ` · ${skipped.special} not counted (special/TOTW)`) : "");
           totals.appendChild(line);
+          // Unassigned beyond EA's 50: only the count is known (Home tile), value estimated at your average card.
+          const hidden = piles.unassigned ? hiddenUnassigned(piles.unassigned.kept) : null;
+          if (hidden) {
+            const average = totalOwned ? totalValue / totalOwned : 0;
+            const estimate = Math.round(hidden.hidden * average / 1000) * 1000;
+            const hiddenLine = el("div", "");
+            hiddenLine.append(
+              el("strong", "", L(`📥 +${hidden.hidden} verborgen in unassigned`, `📥 +${hidden.hidden} hidden in unassigned`)),
+              el("span", "pt-muted", (estimate ? L(` · geschat ~${priceFormat.format(estimate)} (jouw gemiddelde ${priceFormat.format(Math.round(average))} per kaart)`, ` · estimated ~${priceFormat.format(estimate)} (your average ${priceFormat.format(Math.round(average))} per card)`) : "") +
+                L(` · EA geeft er 50 tegelijk; totaal ${hidden.total} (Home, ${formatTime(hidden.at)}) · totaal met verborgen ~${priceFormat.format(Math.round((totalValue + estimate) / 1000) * 1000)}`, ` · EA hands out 50 at a time; total ${hidden.total} (Home, ${formatTime(hidden.at)}) · total incl. hidden ~${priceFormat.format(Math.round((totalValue + estimate) / 1000) * 1000)}`))
+            );
+            hiddenLine.title = L("Welke kaarten het zijn ziet niemand tot je de eerste 50 wegwerkt (naar club of transferlijst). Daarna opnieuw 📦 tellen.", "Nobody can see which cards these are until you clear the first 50 (to club or transfer list). Then count 📦 again.");
+            totals.appendChild(hiddenLine);
+          }
         }
       } else {
         totals.appendChild(el("span", "pt-muted", L("📦 Klik op \"Voorraad bijwerken\" om je fodder per rating te tellen.", "📦 Click \"Update stock\" to count your fodder per rating.")));
@@ -16615,6 +16673,7 @@ button.pt-hk-x:hover { color: #ff6b7d; background: rgba(255, 107, 125, .1); }
         tabReported = true;
       }
     }
+    scanUnassignedTile();
     if (!migrated && findTabBarController()) {
       migrated = true;
       renderRunBar(); // resume a stock run after a page refresh
